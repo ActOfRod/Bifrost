@@ -1,0 +1,4 @@
+/target
+**/*.rs.bk
+*.pdb
+guest_image.bin
