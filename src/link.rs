@@ -187,16 +187,19 @@ impl Program {
                     out.insert(s.va);
                 }
             }
-            for seg in [&m.rodata, &m.data] {
-                let mut va = align_up(seg.va, 8);
-                while va + 8 <= seg.end() {
-                    if let Some(v) = m.read_u64(va) {
-                        if v % 4 == 0 && self.is_code(v) {
-                            out.insert(v);
-                        }
-                    }
-                    va += 8;
+            let mut va = align_up(m.image_base, 8);
+            let end = m.image_base + m.image.len() as u64;
+            while va + 8 <= end {
+                if m.in_text(va) {
+                    va = align_up(m.text.end(), 8);
+                    continue;
                 }
+                if let Some(v) = m.read_u64(va) {
+                    if v % 4 == 0 && self.is_code(v) {
+                        out.insert(v);
+                    }
+                }
+                va += 8;
             }
             let mut va = m.text.va;
             while va + 8 <= m.text.end() {

@@ -270,6 +270,9 @@ fn build(
         "{title}: {} functions, {} instructions ({} unsupported), {} jump tables, {} imports resolved, {} unresolved, {} C units",
         report.functions, report.instructions, report.unsupported, report.jump_tables, report.resolved_imports, report.imports, report.units
     );
+    for (va, word) in lifted.stats.examples.iter().take(8) {
+        println!("  unsupported {word:08x} at {va:#x}");
+    }
     println!("wrote {}{}", out.display(), if romfs_ref.is_some() { " (with romfs.bin)" } else { "" });
     let (cc, exe_file, extra): (&str, String, &[&str]) = match compile {
         "none" => return Ok(()),
