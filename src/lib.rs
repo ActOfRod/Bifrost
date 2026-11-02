@@ -6,6 +6,7 @@ mod analysis;
 mod disasm;
 mod emit;
 pub mod codegen;
+pub mod link;
 mod error;
 mod format;
 mod hos;
