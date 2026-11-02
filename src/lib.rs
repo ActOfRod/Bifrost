@@ -5,6 +5,7 @@
 mod analysis;
 mod disasm;
 mod emit;
+pub mod codegen;
 mod error;
 mod format;
 mod hos;
