@@ -7,6 +7,8 @@ mod disasm;
 mod emit;
 pub mod codegen;
 pub mod link;
+pub mod project;
+pub mod intake;
 mod error;
 mod format;
 mod hos;
