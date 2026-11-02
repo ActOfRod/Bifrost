@@ -433,7 +433,7 @@ fn branch_sys(w: u32, pc: u64) -> Op {
     if w & 0xFFFF_F01F == 0xD503_201F {
         let hint = bits(w, 11, 5);
         return Op::C(match hint {
-            1 | 2 | 3 => "bf_yield();".into(),
+            1..=3 => "bf_yield();".into(),
             _ => String::new(),
         });
     }

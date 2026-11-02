@@ -262,7 +262,7 @@ pub fn lift(module: &Module) -> Lifted {
     let mut queue = Vec::new();
     let mut queued = BTreeSet::new();
     let push = |queue: &mut Vec<u64>, queued: &mut BTreeSet<u64>, addr: u64| {
-        if addr % 4 == 0 && module.in_text(addr) && queued.insert(addr) {
+        if addr.is_multiple_of(4) && module.in_text(addr) && queued.insert(addr) {
             queue.push(addr);
         }
     };
@@ -879,7 +879,7 @@ fn int_mem_op(size: u32, opc: u32) -> Option<(Width, bool, bool)> {
             }
         }
         2 => match size {
-            0 | 1 | 2 => Some((width, true, true)),
+            0..=2 => Some((width, true, true)),
             3 => None,
             _ => None,
         },

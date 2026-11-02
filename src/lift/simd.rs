@@ -708,8 +708,8 @@ fn two_misc(w: u32, scalar: bool) -> Option<String> {
     let width = if q { 128 } else { 64 };
     let eb = 8u32 << size;
     // FP group
-    let fp = opcode >= 0x16 || (opcode >= 0x0C && opcode <= 0x0F && size >= 2) || (opcode == 0x1F);
-    if fp && !(opcode >= 0x16 && opcode <= 0x17) {
+    let fp = opcode >= 0x16 || ((0x0C..=0x0F).contains(&opcode) && size >= 2) || (opcode == 0x1F);
+    if fp && !(0x16..=0x17).contains(&opcode) {
         let sz = size & 1;
         let hi = size >> 1;
         if !scalar && !q && sz == 1 {
@@ -803,7 +803,7 @@ fn two_misc(w: u32, scalar: bool) -> Option<String> {
     let (ua, sa) = (format!("A.{uf}[i]"), format!("A.{sf}[i]"));
     let all = ones(eb);
     let cnt = if scalar { 1 } else { width / eb };
-    if size == 3 && !q && !scalar && !matches!(opcode, 0x12 | 0x13 | 0x14) {
+    if size == 3 && !q && !scalar && !matches!(opcode, 0x12..=0x14) {
         return None;
     }
     if scalar && !matches!(opcode, 7 | 8 | 9 | 10 | 11 | 0x12 | 0x14) {

@@ -334,6 +334,7 @@ fn addr_expr(base: GReg, offset: i64) -> String {
     format!("((uint64_t)((int64_t){} + ({offset}LL)))", reg_expr(base))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_load(
     out: &mut String,
     pc: u64,
@@ -424,6 +425,7 @@ fn emit_store(
     writeln!(out, "    ctx->pc = {:#x};", pc + 4).unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_pair(
     out: &mut String,
     pc: u64,

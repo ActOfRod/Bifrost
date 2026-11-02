@@ -1,5 +1,5 @@
-/// Public Horizon SVC names. This is a compatibility label table, not a kernel.
-/// Only a few benign calls have behavior; everything else stops as unimplemented.
+//! Public Horizon SVC names. This is a compatibility label table, not a kernel.
+//! Only a few benign calls have behavior; everything else stops as unimplemented.
 
 pub fn svc_name(imm: u16) -> Option<&'static str> {
     Some(match imm {

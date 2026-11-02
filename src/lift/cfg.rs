@@ -59,8 +59,7 @@ pub fn lift_program(src: &dyn CodeSource, entries: &BTreeSet<u64>) -> Lifted {
             }
             let mut pc = start;
             let mut window: Vec<(u64, u32)> = Vec::new();
-            loop {
-                let Some(word) = src.word(pc) else { break };
+            while let Some(word) = src.word(pc) {
                 if !src.is_code(pc) {
                     break;
                 }

@@ -204,7 +204,7 @@ fn read_symbols(
 }
 
 fn parse_rela(module: &mut Module, rela: u64, relasz: u64) -> Result<()> {
-    if relasz % 24 != 0 {
+    if !relasz.is_multiple_of(24) {
         module
             .notes
             .push(format!("ignoring RELA at {rela:#x}: size {relasz} is not a multiple of 24"));
@@ -272,14 +272,11 @@ fn apply_relocs(module: &mut Module) -> Result<()> {
                     write_u64(module, reloc.offset, sentinel)
                 }
             }
-            R_AARCH64_ABS32 => {
-                if defined || reloc.symbol.is_empty() {
+            R_AARCH64_ABS32
+                if (defined || reloc.symbol.is_empty()) => {
                     let value = symbol_va.wrapping_add(reloc.addend as u64) as u32;
                     write_u32(module, reloc.offset, value)
-                } else {
-                    false
                 }
-            }
             _ => false,
         };
         if let Some(stored) = module.relocations.iter_mut().find(|item| {
