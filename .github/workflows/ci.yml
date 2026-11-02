@@ -18,6 +18,7 @@ jobs:
           pip install unicorn==2.1.4 capstone==5.0.7
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo build
       - name: Differential test vs Unicorn
         run: python3 tests/diff/diff.py --count 1500 --seed 7
       - name: End-to-end (native + MinGW build)
