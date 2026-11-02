@@ -18,6 +18,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
+    #[command(hide = true)]
+    LiftWords {
+        #[arg(long, default_value = "0x10080000")]
+        pc: String,
+        words: Vec<String>,
+    },
     /// Show the format, imports, and how much of the code lifts
     Inspect {
         file: PathBuf,
@@ -60,6 +67,7 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<()> {
     match Cli::parse().cmd {
+        Cmd::LiftWords { pc, words } => lift_words(&pc, &words),
         Cmd::Inspect { file, disasm } => inspect(&file, disasm),
         Cmd::Recompile { file, out } => recompile(&file, &out),
         Cmd::Run {
@@ -164,4 +172,18 @@ fn run_module(
 fn parse_hex(text: &str) -> anyhow::Result<u64> {
     let text = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")).unwrap_or(text);
     u64::from_str_radix(text, 16).with_context(|| format!("expected hex, found {text}"))
+}
+
+fn lift_words(pc: &str, words: &[String]) -> anyhow::Result<()> {
+    use bifrost::lift::decode::{decode, Op};
+    let pc = parse_hex(pc)?;
+    for w in words {
+        let word = u32::from_str_radix(w.trim_start_matches("0x"), 16)?;
+        let text = match decode(word, pc) {
+            Op::C(s) => format!("C\t{s}"),
+            other => format!("X\t{other:?}"),
+        };
+        println!("{word:08x}\t{text}");
+    }
+    Ok(())
 }

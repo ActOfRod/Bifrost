@@ -9,7 +9,7 @@ mod error;
 mod format;
 mod hos;
 mod interp;
-mod lift;
+pub mod lift;
 mod module;
 
 pub use disasm::disassemble;
