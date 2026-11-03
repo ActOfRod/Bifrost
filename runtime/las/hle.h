@@ -12,17 +12,11 @@ typedef struct { const char *name; HostFn fn; } HleImplEntry;
 // HLE_FUNC("mangled_symbol", c_function) binds a guest import to a host function.
 #define HLE_CAT2(a, b) a##b
 #define HLE_CAT(a, b) HLE_CAT2(a, b)
-#ifdef __APPLE__
-#define HLE_SECTION "__DATA,__hle_impls"
-#elif defined(__linux__)
-#define HLE_SECTION "hle_impls"  // ELF: the linker defines __start_ / __stop_ for C-identifier section names
-#else
-#define HLE_SECTION ".hle$m"  // between the .hle$a / .hle$z markers in runtime/dispatch.c
-#endif
+// Bifrost: registration goes through bf_hle_add (a constructor per function) instead of a linker section.
+void bf_hle_add(const char *name, HostFn fn);
 #define HLE_FUNC(sym, fn)                                                                   \
     static void fn(Cpu *c);                                                                 \
-    __attribute__((used, section(HLE_SECTION))) static const HleImplEntry                   \
-        HLE_CAT(hle_entry_, __LINE__) = {sym, fn};                                          \
+    __attribute__((constructor)) static void HLE_CAT(hle_reg_, __LINE__)(void) { bf_hle_add(sym, fn); } \
     static void fn(Cpu *c)
 
 // Per-boot host state. RT_ON_RESET(fn) { ... } runs when the game is torn down for an in-place reboot (switching

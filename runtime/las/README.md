@@ -10,4 +10,4 @@ its own runtime (`cpu.h` maps `Cpu` to `BfCpu`). Local changes to the vendored f
 - `nvn/texpatch.c`: stb_truetype include path.
 - `nvn/vulkan/android_driver.c` is kept as `.adrenotools` (custom driver loading; not built yet).
 
-Work in progress: not yet compiled into generated projects.
+Work in progress: compiles and links for arm64 Android against SDL3 + shaderc (`bf_las_glue.c`, `bf_las_game_stubs.c`), not yet built into generated projects.

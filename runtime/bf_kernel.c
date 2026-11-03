@@ -439,3 +439,4 @@ void bf_svc(BfCpu *c, uint32_t imm, uint64_t pc) {
     }
     c->x[0] = rc;
 }
+uint64_t bf_kernel_heap_size(void) { return heap_size; }

@@ -81,6 +81,7 @@ void bf_ipc_close(uint32_t handle);
 extern char bf_romfs_path[1024];
 extern char bf_dlc_dir[1024];
 int bf_run(int argc, char **argv);
+uint64_t bf_kernel_heap_size(void);
 
 // Host implementations of guest symbols. BF_HLE("nvnBootstrapLoader", fn) { ... } binds an import by name;
 // bf_hle_addr gives a host function a guest-callable address (for tables of function pointers handed to the guest).
