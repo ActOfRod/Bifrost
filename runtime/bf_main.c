@@ -30,48 +30,63 @@ static void missing(BfCpu *c) {
     exit(4);
 }
 
+// Host implementations of guest-callable functions. Entries are immutable once published: a writer fills
+// hle_tab[n] under hle_lock and then release-stores hle_count, so lock-free readers that acquire-load the count only
+// ever see complete entries. (The renderer registers NVN entry points from guest threads while others dispatch.)
 typedef struct { const char *name; BfFn fn; } BfHleEntry;
-static BfHleEntry hle_tab[8192];
+#define BF_HLE_MAX 8192
+static BfHleEntry hle_tab[BF_HLE_MAX];
 static size_t hle_count;
 static int hle_lock;
 static void hle_acquire(void) { while (__atomic_exchange_n(&hle_lock, 1, __ATOMIC_ACQUIRE)) {} }
 static void hle_release(void) { __atomic_store_n(&hle_lock, 0, __ATOMIC_RELEASE); }
+static size_t hle_published(void) { return __atomic_load_n(&hle_count, __ATOMIC_ACQUIRE); }
 
-void bf_hle_add(const char *name, BfFn fn) {
+// Appends {name, fn} unless fn is already present; returns its index, or BF_HLE_MAX if the table is full.
+static size_t hle_insert(const char *name, BfFn fn) {
     hle_acquire();
-    if (hle_count < sizeof hle_tab / sizeof hle_tab[0]) hle_tab[hle_count++] = (BfHleEntry){name, fn};
+    size_t n = hle_count, i = 0;
+    while (i < n && hle_tab[i].fn != fn) i++;
+    if (i == n && n < BF_HLE_MAX) {
+        hle_tab[n] = (BfHleEntry){name, fn};
+        __atomic_store_n(&hle_count, n + 1, __ATOMIC_RELEASE);
+    }
     hle_release();
+    return i < BF_HLE_MAX ? i : BF_HLE_MAX;
 }
 
+void bf_hle_add(const char *name, BfFn fn) { if (fn) hle_insert(name, fn); }
+
 BfFn bf_hle_find(const char *name) {
-    for (size_t i = 0; i < hle_count; i++) if (!strcmp(hle_tab[i].name, name)) return hle_tab[i].fn;
+    size_t n = hle_published();
+    for (size_t i = 0; i < n; i++) if (!strcmp(hle_tab[i].name, name)) return hle_tab[i].fn;
     return NULL;
 }
 
 uint64_t bf_hle_addr(const char *name, BfFn fn) {
     if (!fn) return 0;
-    hle_acquire();
-    size_t i = 0;
-    while (i < hle_count && hle_tab[i].fn != fn) i++;
-    if (i == hle_count && hle_count < sizeof hle_tab / sizeof hle_tab[0]) hle_tab[hle_count++] = (BfHleEntry){name, fn};
-    hle_release();
-    return i < hle_count ? BF_HLE_BASE + i * 16 : 0;
+    size_t i = hle_insert(name, fn);
+    return i < BF_HLE_MAX ? BF_HLE_BASE + i * 16 : 0;
 }
 
+// Per-import cache of the host implementation. Only hits are cached, so an implementation registered after the
+// first call is still found on the next one.
 static BfFn import_impl(uint64_t pc) {
     static BfFn *cache;
-    static uint8_t *known;
     size_t i = 0;
     while (i < bf_import_count && bf_imports[i].sentinel != pc) i++;
     if (i >= bf_import_count) return NULL;
-    if (!cache) {
-        BfFn *fns = calloc(bf_import_count + 1, sizeof *fns);
-        uint8_t *k = calloc(bf_import_count + 1, 1);
-        if (!fns || !k) return NULL;
-        cache = fns, known = k;
+    BfFn *tab = __atomic_load_n(&cache, __ATOMIC_ACQUIRE);
+    if (!tab) {
+        BfFn *fresh = calloc(bf_import_count + 1, sizeof *fresh);
+        if (!fresh) return bf_hle_find(bf_imports[i].name);
+        BfFn *expected = NULL;
+        if (__atomic_compare_exchange_n(&cache, &expected, fresh, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) tab = fresh;
+        else free(fresh), tab = expected;
     }
-    if (!known[i]) { cache[i] = bf_hle_find(bf_imports[i].name); known[i] = 1; }
-    return cache[i];
+    BfFn fn = __atomic_load_n(&tab[i], __ATOMIC_ACQUIRE);
+    if (!fn && (fn = bf_hle_find(bf_imports[i].name))) __atomic_store_n(&tab[i], fn, __ATOMIC_RELEASE);
+    return fn;
 }
 
 void bf_call(BfCpu *c) {
@@ -79,7 +94,12 @@ void bf_call(BfCpu *c) {
     if (fn) { fn(c); return; }
     if (c->pc >= BF_HLE_BASE && c->pc < 0xFFFFFF0000000000ull) {
         size_t i = (size_t)((c->pc - BF_HLE_BASE) / 16);
-        if (i < hle_count) { c->pc = c->x[30]; hle_tab[i].fn(c); return; }
+        if (i < hle_published()) {
+            BfFn host = hle_tab[i].fn;
+            c->pc = c->x[30];
+            host(c);
+            return;
+        }
     }
     if (c->pc >= 0xFFFFFF0000000000ull) {
         BfFn impl = import_impl(c->pc);
