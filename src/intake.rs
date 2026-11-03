@@ -24,6 +24,10 @@ pub struct RomfsRef {
 pub struct Content {
     pub exefs: BTreeMap<String, Vec<u8>>,
     pub romfs: Option<RomfsRef>,
+    /// Extracted RomFS directory; packed into an image at build time.
+    pub romfs_dir: Option<PathBuf>,
+    /// Also take RomFS from Data/PublicData NCAs (add-on content).
+    pub want_data: bool,
     pub title: Option<String>,
     pub title_id: u64,
     pub notes: Vec<String>,
@@ -113,7 +117,7 @@ fn read_nca(f: &mut File, path: &Path, base: u64, name: &str, content: &mut Cont
         );
     }
     let content_type = hdr[0x205];
-    if content_type != 0 {
+    if content_type != 0 && !(content.want_data && matches!(content_type, 4 | 5)) {
         return Ok(());
     }
     let program_id = u64le(&hdr, 0x210);
@@ -244,6 +248,10 @@ fn read_dir(path: &Path, content: &mut Content) -> Result<()> {
             found.insert(name, std::fs::read(&p)?);
         }
     }
+    if found.is_empty() && path.file_name().is_some_and(|n| n.eq_ignore_ascii_case("romfs")) {
+        content.romfs_dir = Some(path.to_path_buf());
+        return Ok(());
+    }
     if found.is_empty() {
         bail!("{}: no ExeFS files (main, rtld, subsdk*, sdk, main.npdm) found", path.display());
     }
@@ -255,7 +263,7 @@ fn read_dir(path: &Path, content: &mut Content) -> Result<()> {
         }
     }
     if path.join("romfs").is_dir() && content.romfs.is_none() {
-        content.notes.push("extracted romfs/ directory found; pack it into a RomFS image and pass --romfs".into());
+        content.romfs_dir = Some(path.join("romfs"));
     }
     Ok(())
 }
@@ -280,6 +288,10 @@ pub fn gather(base: &[PathBuf], updates: &[PathBuf]) -> Result<Content> {
         }
         if layer.romfs.is_some() {
             content.romfs = layer.romfs;
+            content.romfs_dir = None;
+        } else if layer.romfs_dir.is_some() {
+            content.romfs_dir = layer.romfs_dir;
+            content.romfs = None;
         }
         if layer.title_id != 0 {
             content.title_id = layer.title_id & !0x800;
@@ -424,6 +436,40 @@ pub fn expand_patch_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+/// Where a RomFS comes from: an image (file or a section of a container) or an extracted directory.
+#[derive(Debug, Clone)]
+pub enum RomfsSource {
+    Image(RomfsRef),
+    Dir(PathBuf),
+}
+
+/// Resolve one piece of dumped add-on content (an NSP/NCA with plaintext data NCAs, a RomFS image,
+/// or an extracted RomFS directory) to its RomFS.
+pub fn dlc_romfs(path: &Path) -> Result<RomfsSource> {
+    if path.is_dir() {
+        let romfs = if path.join("romfs").is_dir() { path.join("romfs") } else { path.to_path_buf() };
+        for cand in ["romfs.bin", "romfs.romfs", "romfs.img"] {
+            let p = path.join(cand);
+            if p.is_file() {
+                return Ok(RomfsSource::Image(RomfsRef { size: p.metadata()?.len(), path: p, offset: 0 }));
+            }
+        }
+        return Ok(RomfsSource::Dir(romfs));
+    }
+    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let len = f.metadata()?.len();
+    let head = read_at(&mut f, 0, 8.min(len as usize))?;
+    if head.len() == 8 && u64le(&head, 0) == 0x50 {
+        return Ok(RomfsSource::Image(RomfsRef { size: len, path: path.to_path_buf(), offset: 0 }));
+    }
+    let mut content = Content { want_data: true, ..Default::default() };
+    read_container(path, &mut content)?;
+    content
+        .romfs
+        .map(RomfsSource::Image)
+        .ok_or_else(|| anyhow!("{}: no plaintext RomFS found in this add-on content", path.display()))
 }
 
 pub fn copy_romfs(r: &RomfsRef, dst: &Path) -> Result<()> {

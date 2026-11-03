@@ -53,9 +53,33 @@ static void out_buffer(BfCtx *x, uint64_t *addr, uint64_t *size) {
     else { *addr = x->c_addr; *size = x->c_size; }
 }
 
-static FILE *open_romfs(void) { return fopen(bf_romfs_path, "rb"); }
-static int64_t romfs_size(void) {
-    FILE *f = open_romfs();
+// Add-on content lives in <dlc dir>/<index>.romfs, index 1..N, with data ids title_id + 0x1000 + index.
+static void dlc_path(char *out, size_t n, uint32_t index) { snprintf(out, n, "%s/%u.romfs", bf_dlc_dir, index); }
+static uint32_t dlc_count(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        cached = 0;
+        for (uint32_t i = 1; i < 2000; i++) {
+            char p[1100]; dlc_path(p, sizeof p, i);
+            FILE *f = fopen(p, "rb");
+            if (!f) break;
+            fclose(f); cached = (int)i;
+        }
+    }
+    return (uint32_t)cached;
+}
+static uint64_t aoc_base_id(void) { return (bf_title_id & ~0xFFFull) + 0x1000; }
+
+static FILE *open_storage(const char *obj) {
+    if (!strcmp(obj, "IStorage:romfs")) return fopen(bf_romfs_path, "rb");
+    if (!strncmp(obj, "IStorage:aoc", 12)) {
+        char p[1100]; dlc_path(p, sizeof p, (uint32_t)strtoul(obj + 12, NULL, 10));
+        return fopen(p, "rb");
+    }
+    return NULL;
+}
+static int64_t storage_size(const char *obj) {
+    FILE *f = open_storage(obj);
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
 #ifdef _WIN32
@@ -124,12 +148,33 @@ static void dispatch(BfCtx *x) {
         }
         return;
     }
-    if (is(x, "IStorage:romfs")) {
+    if (obj_prefix(x, "aoc:")) {
+        if (cmd == 2 || cmd == 0) out_u32(x, dlc_count());
+        else if (cmd == 3 || cmd == 1) {
+            uint32_t off = (uint32_t)in_u64(x, 0), want = (uint32_t)(in_u64(x, 0) >> 32), n = 0;
+            uint64_t addr, cap;
+            out_buffer(x, &addr, &cap);
+            for (uint32_t i = off + 1; i <= dlc_count() && n < want && (n + 1) * 4 <= cap; i++, n++) ST32(addr + n * 4, i);
+            out_u32(x, n);
+        } else if (cmd == 5) out_u64(x, aoc_base_id());
+        else if (cmd == 8) { uint32_t h = bf_event_new(); out_copy_handle(x, h); }
+        return;
+    }
+    if (is(x, "fsp-srv") && cmd == 202) {
+        uint64_t data_id = in_u64(x, 8);
+        char name[40];
+        if (data_id > aoc_base_id() && data_id - aoc_base_id() <= dlc_count())
+            snprintf(name, sizeof name, "IStorage:aoc%u", (unsigned)(data_id - aoc_base_id()));
+        else snprintf(name, sizeof name, "IStorage");
+        out_obj(x, name);
+        return;
+    }
+    if (obj_prefix(x, "IStorage:")) {
         if (cmd == 0) {
             uint64_t off = in_u64(x, 0), size = in_u64(x, 8), addr, cap;
             out_buffer(x, &addr, &cap);
             if (size > cap) size = cap;
-            FILE *f = open_romfs();
+            FILE *f = open_storage(x->obj->name);
             if (!f) { x->result = 0x7D402; return; }
 #ifdef _WIN32
             _fseeki64(f, (int64_t)off, SEEK_SET);
@@ -139,7 +184,7 @@ static void dispatch(BfCtx *x) {
             size_t n = fread(BF_HOST(addr), 1, (size_t)size, f);
             if (n < size) memset((uint8_t *)BF_HOST(addr) + n, 0, (size_t)(size - n));
             fclose(f);
-        } else if (cmd == 4) out_u64(x, (uint64_t)romfs_size());
+        } else if (cmd == 4) out_u64(x, (uint64_t)storage_size(x->obj->name));
         return;
     }
     if (is(x, "ISystemClock") && cmd == 0) { out_u64(x, (uint64_t)time(NULL)); return; }

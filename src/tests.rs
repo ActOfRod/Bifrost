@@ -391,3 +391,47 @@ fn parses_pfs0_images() {
     let files = crate::intake::parse_pfs0_bytes(&f).unwrap();
     assert_eq!(files, vec![("main".to_string(), b"abc".to_vec()), ("sdk".to_string(), b"de".to_vec())]);
 }
+
+#[test]
+fn romfs_directory_round_trip() {
+    let root = std::env::temp_dir().join(format!("bifrost_romfs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Model/Field")).unwrap();
+    std::fs::create_dir_all(root.join("Sound")).unwrap();
+    std::fs::write(root.join("Model/Field/island.bfres"), vec![7u8; 1000]).unwrap();
+    std::fs::write(root.join("Model/a.txt"), b"alpha").unwrap();
+    std::fs::write(root.join("Sound/bgm.bfstm"), b"music!").unwrap();
+    std::fs::write(root.join("top.bin"), b"").unwrap();
+    let image = root.with_extension("romfs");
+    let size = crate::romfs::build_from_dir(&root, &image, &mut |_, _| {}).unwrap();
+    assert_eq!(size, std::fs::metadata(&image).unwrap().len());
+    let read = |p: &str| crate::romfs::read_file(&image, p).unwrap();
+    assert_eq!(read("Model/Field/island.bfres"), Some(vec![7u8; 1000]));
+    assert_eq!(read("Model/a.txt").as_deref(), Some(&b"alpha"[..]));
+    assert_eq!(read("Sound/bgm.bfstm").as_deref(), Some(&b"music!"[..]));
+    assert_eq!(read("top.bin"), Some(Vec::new()));
+    assert_eq!(read("Sound/missing"), None);
+    assert!(matches!(crate::intake::dlc_romfs(&image).unwrap(), crate::intake::RomfsSource::Image(_)));
+    assert!(matches!(crate::intake::dlc_romfs(&root).unwrap(), crate::intake::RomfsSource::Dir(_)));
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::remove_file(&image).unwrap();
+}
+
+#[test]
+fn romfs_hash_matches_horizon() {
+    assert_eq!(crate::romfs::hash_table_len(0), 3);
+    assert_eq!(crate::romfs::hash_table_len(10), 11);
+    assert_eq!(crate::romfs::hash_table_len(20), 23);
+    assert_eq!(crate::romfs::path_hash(0, b""), 123_456_789);
+}
+
+#[test]
+fn romfs_only_input_is_explained() {
+    let root = std::env::temp_dir().join(format!("bifrost_romfs_only_{}", std::process::id())).join("romfs");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.bin"), b"x").unwrap();
+    let opts = crate::pipeline::BuildOptions { inputs: vec![root.clone()], out: root.with_file_name("out"), ..Default::default() };
+    let err = crate::pipeline::run(&opts, &mut |_| {}).unwrap_err().to_string();
+    assert!(err.contains("ExeFS"), "{err}");
+    std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+}

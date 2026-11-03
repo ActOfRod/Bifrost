@@ -24,7 +24,22 @@ typedef struct BfImport { uint64_t sentinel; const char *name; } BfImport;
 extern const BfImport bf_imports[];
 extern const size_t bf_import_count;
 
-// guest address-space layout (39-bit, like a Horizon application process)
+// guest address-space layout. The default mirrors a 39-bit Horizon application process; BF_COMPACT_AS
+// shrinks it to 64 GiB for hosts with a 39-bit user address space (most Android kernels).
+#ifdef BF_COMPACT_AS
+#define BF_AS_SIZE        (1ull << 36)
+#define BF_CODE_BASE      0x0008000000ull
+#define BF_HEAP_BASE      0x0100000000ull
+#define BF_HEAP_SIZE      0x0400000000ull
+#define BF_STACK_BASE     0x0500000000ull
+#define BF_STACK_SIZE     0x0100000000ull
+#define BF_TLS_BASE       0x0600000000ull
+#define BF_TLS_SIZE       0x0010000000ull
+#define BF_MISC_BASE      0x0700000000ull
+#define BF_MISC_SIZE      0x0100000000ull
+#define BF_ALIAS_BASE     0x0800000000ull
+#define BF_ALIAS_SIZE     0x0100000000ull
+#else
 #define BF_AS_SIZE        (1ull << 39)
 #define BF_CODE_BASE      0x0008000000ull
 #define BF_HEAP_BASE      0x1100000000ull
@@ -37,6 +52,7 @@ extern const size_t bf_import_count;
 #define BF_MISC_SIZE      0x1000000000ull
 #define BF_ALIAS_BASE     0x4400000000ull
 #define BF_ALIAS_SIZE     0x1000000000ull
+#endif
 #define BF_THREAD_EXIT    0xFFFFFFFFFFFFF000ull
 
 // platform layer (bf_platform.c)
@@ -76,3 +92,5 @@ uint32_t bf_ipc_connect(const char *name);
 uint32_t bf_ipc_request(uint64_t msg, uint32_t handle);
 void bf_ipc_close(uint32_t handle);
 extern char bf_romfs_path[1024];
+extern char bf_dlc_dir[1024];
+int bf_run(int argc, char **argv);

@@ -32,14 +32,20 @@ enum Cmd {
         /// IPS/IPS32/pchtxt patch files or directories of them
         #[arg(long)]
         patch: Vec<PathBuf>,
-        /// Plaintext RomFS image to ship with the program (overrides the one found in the content)
+        /// Plaintext RomFS image or extracted romfs/ directory (overrides the one found in the content)
         #[arg(long)]
         romfs: Option<PathBuf>,
+        /// Dumped add-on content: NSP/NCA with plaintext data NCAs, a RomFS image, or an extracted RomFS folder
+        #[arg(long)]
+        dlc: Vec<PathBuf>,
+        /// Android SDK folder for --compile android (defaults to ANDROID_HOME)
+        #[arg(long)]
+        android_sdk: Option<PathBuf>,
         /// File with extra code entry points (one hex address per line, e.g. bifrost_missing.txt)
         #[arg(long)]
         extra_entries: Vec<PathBuf>,
-        /// Compile after generation: none, native, or windows (MinGW-w64 cross compiler)
-        #[arg(long, default_value = "none")]
+        /// Compile after generation: none, native, windows (MinGW-w64) or android (NDK, produces an APK)
+        #[arg(long, alias = "target", default_value = "none")]
         compile: String,
     },
     /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
@@ -92,8 +98,20 @@ fn main() -> ExitCode {
 fn run() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::LiftWords { pc, words } => lift_words(&pc, &words),
-        Cmd::Build { inputs, out, update, patch, romfs, extra_entries, compile } => {
-            build(&inputs, &out, &update, &patch, romfs, &extra_entries, &compile)
+        Cmd::Build { inputs, out, update, patch, romfs, dlc, android_sdk, extra_entries, compile } => {
+            let opts = bifrost::pipeline::BuildOptions {
+                inputs,
+                updates: update,
+                patches: patch,
+                dlc,
+                romfs,
+                extra_entries,
+                out,
+                target: compile.parse()?,
+                android_sdk,
+                ..Default::default()
+            };
+            build(&opts)
         }
         Cmd::Inspect { file, disasm } => inspect(&file, disasm),
         Cmd::Recompile { file, out } => recompile(&file, &out),
@@ -215,85 +233,25 @@ fn lift_words(pc: &str, words: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build(
-    inputs: &[PathBuf],
-    out: &std::path::Path,
-    updates: &[PathBuf],
-    patches: &[PathBuf],
-    romfs: Option<PathBuf>,
-    extra_entries: &[PathBuf],
-    compile: &str,
-) -> anyhow::Result<()> {
-    use bifrost::intake;
-    use bifrost::lift::cfg::{lift_program, CodeSource};
-    let content = intake::gather(inputs, updates)?;
-    for note in &content.notes {
-        println!("note: {note}");
-    }
-    let (mut modules, notes) = intake::load_modules(&content)?;
-    for note in notes {
-        println!("note: {note}");
-    }
-    for p in intake::expand_patch_paths(patches)? {
-        println!("{}", intake::apply_patch(&mut modules, &p)?);
-    }
-    let program = bifrost::link::link(modules);
-    for m in &program.modules {
-        println!("module {:<10} base {:#x} entry {:#x} text {:#x} bytes", m.name, m.image_base, m.entry, m.text.size);
-    }
-    let mut entries = program.entry_points();
-    for file in extra_entries {
-        let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let va = parse_hex(line)?;
-            if program.is_code(va) {
-                entries.insert(va);
-            }
+fn build(opts: &bifrost::pipeline::BuildOptions) -> anyhow::Result<()> {
+    use bifrost::pipeline::Event;
+    let mut last = String::new();
+    let result = bifrost::pipeline::run(opts, &mut |ev| match ev {
+        Event::Progress(_, step) if step != last && !step.contains("compiled") && !step.starts_with("Copying") && !step.starts_with("Packing") => {
+            eprintln!("[bifrost] {step}");
+            last = step;
         }
-    }
-    let lifted = lift_program(&program, &entries);
-    let title = content.title.clone().unwrap_or_else(|| {
-        inputs[0].file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "guest".into())
-    });
-    let exe: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    let exe = if exe.is_empty() { "guest".to_string() } else { exe };
-    let info = bifrost::project::ProjectInfo { title: &title, title_id: content.title_id, exe_name: &exe };
-    let report = bifrost::project::write_project(&program, &lifted, &info, out)?;
-    let romfs_ref = match romfs {
-        Some(path) => Some(intake::RomfsRef { size: std::fs::metadata(&path)?.len(), path, offset: 0 }),
-        None => content.romfs.clone(),
-    };
-    if let Some(r) = &romfs_ref {
-        intake::copy_romfs(r, &out.join("romfs.bin"))?;
-    }
+        Event::Progress(..) => {}
+        Event::Log(line) => println!("{line}"),
+    })?;
+    let r = &result.report;
     println!(
-        "{title}: {} functions, {} instructions ({} unsupported), {} jump tables, {} imports resolved, {} unresolved, {} C units",
-        report.functions, report.instructions, report.unsupported, report.jump_tables, report.resolved_imports, report.imports, report.units
+        "{}: {} functions, {} instructions ({} unsupported), {} jump tables, {} imports resolved, {} unresolved, {} C units",
+        result.title, r.functions, r.instructions, r.unsupported, r.jump_tables, r.resolved_imports, r.imports, r.units
     );
-    for (va, word) in lifted.stats.examples.iter().take(8) {
-        println!("  unsupported {word:08x} at {va:#x}");
+    println!("wrote {}", result.project.display());
+    if let Some(a) = &result.artifact {
+        println!("built {}", a.display());
     }
-    println!("wrote {}{}", out.display(), if romfs_ref.is_some() { " (with romfs.bin)" } else { "" });
-    let (cc, exe_file, extra): (&str, String, &[&str]) = match compile {
-        "none" => return Ok(()),
-        "native" => ("cc", exe.clone(), &["-lpthread", "-lm"]),
-        "windows" => ("x86_64-w64-mingw32-gcc", format!("{exe}.exe"), &["-static"]),
-        other => anyhow::bail!("--compile must be none, native or windows (got {other})"),
-    };
-    let cc = std::env::var("CC").ok().filter(|_| compile == "native").unwrap_or_else(|| cc.to_string());
-    let mut sources: Vec<_> = std::fs::read_dir(out)?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .filter(|n| n.ends_with(".c"))
-        .collect();
-    sources.sort();
-    let status = std::process::Command::new(&cc)
-        .current_dir(out)
-        .args(["-O2", "-std=gnu11", "-fno-strict-aliasing", "-w", "-o", &exe_file])
-        .args(&sources)
-        .args(extra)
-        .status()
-        .with_context(|| format!("run {cc}"))?;
-    anyhow::ensure!(status.success(), "{cc} failed");
-    println!("built {}", out.join(&exe_file).display());
     Ok(())
 }

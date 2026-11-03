@@ -6,9 +6,16 @@
 #include <string.h>
 
 int bf_verbose;
+#ifdef __ANDROID__
+#include <android/log.h>
+void bf_log(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt); __android_log_vprint(ANDROID_LOG_INFO, "bifrost", fmt, ap); va_end(ap);
+}
+#else
 void bf_log(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
 }
+#endif
 
 #define R_OK 0u
 #define R_TIMEOUT 0xEA01u

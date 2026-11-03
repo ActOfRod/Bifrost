@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "gui"]
+
 [package]
 name = "bifrost"
 version = "0.1.0"
@@ -15,5 +18,6 @@ sha2 = "0.10"
 clap = { version = "4.4", features = ["derive"] }
 anyhow = "1.0"
 thiserror = "1.0"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

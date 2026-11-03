@@ -5,6 +5,7 @@
 
 uint8_t *bf_membase;
 char bf_romfs_path[1024];
+char bf_dlc_dir[1024];
 
 static BfFn lookup(uint64_t pc) {
     size_t lo = 0, hi = bf_entry_count;
@@ -70,15 +71,17 @@ static void dir_of(const char *path, char *out, size_t n) {
     if (slash) slash[1] = 0; else out[0] = 0;
 }
 
-int main(int argc, char **argv) {
+int bf_run(int argc, char **argv) {
     char dir[900], image[1024];
     dir_of(argv[0], dir, sizeof dir);
     snprintf(image, sizeof image, "%sguest_image.bin", dir);
     snprintf(bf_romfs_path, sizeof bf_romfs_path, "%sromfs.bin", dir);
+    snprintf(bf_dlc_dir, sizeof bf_dlc_dir, "%sdlc", dir);
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-v")) bf_verbose++;
         else if (!strcmp(argv[i], "--image") && i + 1 < argc) snprintf(image, sizeof image, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--romfs") && i + 1 < argc) snprintf(bf_romfs_path, sizeof bf_romfs_path, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--dlc") && i + 1 < argc) snprintf(bf_dlc_dir, sizeof bf_dlc_dir, "%s", argv[++i]);
     }
     bf_membase = bf_plat_reserve(BF_AS_SIZE);
     if (!bf_membase) { bf_log("bifrost: cannot reserve the guest address space\n"); return 5; }
@@ -118,3 +121,7 @@ int main(int argc, char **argv) {
     fflush(NULL);
     return (int)(c->x[0] & 0xFF);
 }
+
+#ifndef BF_NO_MAIN
+int main(int argc, char **argv) { return bf_run(argc, argv); }
+#endif
