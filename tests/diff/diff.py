@@ -21,8 +21,9 @@ SKIP = ("ldx", "stx", "ldax", "stlx", "ldlar", "stllr", "ldapr", "cas", "swp", "
         "ldset", "ldsmax", "ldsmin", "ldumax", "ldumin", "stadd", "stclr", "steor", "stset", "stsmax",
         "stsmin", "stumax", "stumin", "ldg", "stg", "st2g", "stzg", "irg", "addg", "subg", "gmi", "ldraa", "ldrab")
 STUB = r"""
+#define _GNU_SOURCE
+#include <sys/mman.h>
 #include "bf_cpu.h"
-uint8_t *bf_membase;
 void bf_call(BfCpu *c) { (void)c; }
 void bf_dispatch_until(BfCpu *c, uint64_t r) { (void)c; (void)r; }
 void bf_svc(BfCpu *c, uint32_t i, uint64_t pc) { (void)c; (void)i; (void)pc; }
@@ -30,10 +31,13 @@ void bf_brk(BfCpu *c, uint32_t i, uint64_t pc) { (void)c; (void)i; (void)pc; }
 void bf_unimpl(BfCpu *c, uint64_t pc, uint32_t w) { (void)c; (void)pc; (void)w; }
 uint64_t bf_ticks(void) { return 0; }
 void bf_yield(void) {}
-void bf_test_mem(uint8_t *host) { bf_membase = host - (uintptr_t)0x%xULL; }
+void *bf_test_mem(void) {  // guest addresses are host addresses, so the test window lives at MEM_BASE
+    void *p = mmap((void *)0x%xULL, 0x%x, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+}
 size_t bf_test_cpu_size(void) { return sizeof(BfCpu); }
 size_t bf_test_v_off(void) { return offsetof(BfCpu, v); }
-""" % MEM_BASE
+""" % (MEM_BASE, MEM_SIZE)
 
 XREGS = [UC_ARM64_REG_X0 + k for k in range(29)] + [UC_ARM64_REG_X29, UC_ARM64_REG_X30]
 
@@ -105,7 +109,7 @@ def main():
     src += "BfFn bf_tests[] = {%s};\n" % ",".join("t_%d" % i for i in range(len(tests)))
     open(os.path.join(tmp, "t.c"), "w").write(src)
     so = os.path.join(tmp, "t.so")
-    cc = subprocess.run(["clang", "-O1", "-shared", "-fPIC", "-w", "-I", os.path.join(ROOT, "runtime"), "-o", so,
+    cc = subprocess.run(["clang", "-O1", "-shared", "-fPIC", "-w", "-I", os.path.join(ROOT, "runtime"), "-DBF_AS_BASE=0ull", "-DBF_AS_SIZE=(1ull<<32)", "-o", so,
                          os.path.join(tmp, "t.c"), "-lm"], capture_output=True, text=True)
     if cc.returncode:
         print(cc.stderr[:6000]); sys.exit(2)
@@ -113,8 +117,10 @@ def main():
     lib.bf_test_cpu_size.restype = ctypes.c_size_t
     lib.bf_test_v_off.restype = ctypes.c_size_t
     csize, voff = lib.bf_test_cpu_size(), lib.bf_test_v_off()
-    hostmem = (ctypes.c_uint8 * MEM_SIZE)()
-    lib.bf_test_mem(hostmem)
+    lib.bf_test_mem.restype = ctypes.c_void_p
+    if lib.bf_test_mem() != MEM_BASE:
+        print("cannot map the test window at 0x%x" % MEM_BASE); sys.exit(2)
+    hostmem = (ctypes.c_uint8 * MEM_SIZE).from_address(MEM_BASE)
     fns = (ctypes.c_void_p * len(tests)).in_dll(lib, "bf_tests")
     FN = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
     fails = []

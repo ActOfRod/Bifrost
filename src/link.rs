@@ -264,7 +264,8 @@ impl Program {
                     let imm = (((a >> 5) & 0x7FFFF) as u64) << 2 | ((a >> 29) & 3) as u64;
                     let page =
                         (va & !0xFFF).wrapping_add((((imm << 12) << 31) as i64 >> 31) as u64);
-                    let t = page.wrapping_add(((b >> 10) & 0xFFF) as u64);
+                    let t =
+                        page.wrapping_add((((b >> 10) & 0xFFF) as u64) << (12 * ((b >> 22) & 1)));
                     if t % 4 == 0 && self.is_code(t) {
                         out.insert(t);
                     }

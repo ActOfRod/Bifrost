@@ -409,7 +409,11 @@ impl RendererDeps {
         let mut v = Vec::new();
         for name in ["libSDL3.so", "libshaderc_shared.so"] {
             let dst = dir.join(name);
-            run(Command::new(&strip).arg("--strip-unneeded").arg("-o").arg(&dst).arg(self.root.join("lib").join(name)))?;
+            run(Command::new(&strip)
+                .arg("--strip-unneeded")
+                .arg("-o")
+                .arg(&dst)
+                .arg(self.root.join("lib").join(name)))?;
             v.push(dst);
         }
         Ok(v)
