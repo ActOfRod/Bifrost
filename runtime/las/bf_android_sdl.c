@@ -3,7 +3,9 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_system.h>
+#include <android/asset_manager_jni.h>
 #include <android/log.h>
+#include <jni.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -29,31 +31,48 @@ static void *log_pump(void *arg) {
     return NULL;
 }
 
+// APK assets are read through the AAssetManager: SDL_IOFromFile resolves relative names against internal storage
+// first, which would return the previously unpacked copies instead of the assets of a newly installed APK.
+static AAssetManager *assets;
+
+static AAssetManager *asset_manager(void) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject activity = (jobject)SDL_GetAndroidActivity();
+    if (!env || !activity) return NULL;
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID get = (*env)->GetMethodID(env, cls, "getAssets", "()Landroid/content/res/AssetManager;");
+    jobject am = get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    AAssetManager *mgr = am ? AAssetManager_fromJava(env, (*env)->NewGlobalRef(env, am)) : NULL;
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, activity);
+    return mgr;
+}
+
 static int extract(const char *name, const char *dst, int always) {
-    SDL_IOStream *in = SDL_IOFromFile(name, "rb");  // (APK assets on Android)
+    AAsset *in = AAssetManager_open(assets, name, AASSET_MODE_STREAMING);
     if (!in) return 0;
-    Sint64 len = SDL_GetIOSize(in);
+    off64_t len = AAsset_getLength64(in);
     struct stat st;
-    if (!always && stat(dst, &st) == 0 && st.st_size == len) { SDL_CloseIO(in); return 1; }
+    if (!always && stat(dst, &st) == 0 && st.st_size == len) { AAsset_close(in); return 1; }
     char tmp[1100];
     snprintf(tmp, sizeof tmp, "%s.part", dst);
     FILE *f = fopen(tmp, "wb");
-    if (!f) { SDL_CloseIO(in); return 0; }
+    if (!f) { AAsset_close(in); return 0; }
     static char buf[1 << 16];
-    size_t n;
-    while ((n = SDL_ReadIO(in, buf, sizeof buf)) > 0) fwrite(buf, 1, n, f);
+    int n;
+    while ((n = AAsset_read(in, buf, sizeof buf)) > 0) fwrite(buf, 1, (size_t)n, f);
     fclose(f);
-    SDL_CloseIO(in);
+    AAsset_close(in);
     return rename(tmp, dst) == 0;
 }
 
 static void read_small(const char *path, char *out, size_t size, int asset) {
     out[0] = 0;
-    SDL_IOStream *in = asset ? SDL_IOFromFile(path, "rb") : NULL;
+    AAsset *in = asset ? AAssetManager_open(assets, path, AASSET_MODE_BUFFER) : NULL;
     FILE *f = asset ? NULL : fopen(path, "rb");
-    size_t n = in ? SDL_ReadIO(in, out, size - 1) : f ? fread(out, 1, size - 1, f) : 0;
-    out[n] = 0;
-    if (in) SDL_CloseIO(in);
+    int n = in ? AAsset_read(in, out, size - 1) : f ? (int)fread(out, 1, size - 1, f) : 0;
+    out[n > 0 ? n : 0] = 0;
+    if (in) AAsset_close(in);
     if (f) fclose(f);
 }
 
@@ -86,6 +105,7 @@ int main(int argc, char **argv) {
         pthread_create(&lt, NULL, log_pump, NULL);
         pthread_detach(lt);
     }
+    if (!(assets = asset_manager())) { __android_log_print(ANDROID_LOG_ERROR, "bifrost", "no asset manager"); return 1; }
     const char *in = SDL_GetAndroidInternalStoragePath();
     const char *ext = SDL_GetAndroidExternalStoragePath();
     if (!in) { __android_log_print(ANDROID_LOG_ERROR, "bifrost", "no internal storage: %s", SDL_GetError()); return 1; }
@@ -98,15 +118,14 @@ int main(int argc, char **argv) {
     snprintf(dlc_path, sizeof dlc_path, "%s/dlc", in);
     mkdir(dlc_path, 0700);
     int bundled_dlc = 0;
-    int ndlc = 0;
-    char **names = SDL_GlobDirectory("dlc", NULL, 0, &ndlc);  // (APK asset dirs)
-    for (int i = 0; names && i < ndlc; i++) {
+    AAssetDir *dir = AAssetManager_openDir(assets, "dlc");
+    for (const char *name; dir && (name = AAssetDir_getNextFileName(dir));) {
         char src[512], dst[1600];
-        snprintf(src, sizeof src, "dlc/%s", names[i]);
-        snprintf(dst, sizeof dst, "%s/%s", dlc_path, names[i]);
+        snprintf(src, sizeof src, "dlc/%s", name);
+        snprintf(dst, sizeof dst, "%s/%s", dlc_path, name);
         bundled_dlc |= extract(src, dst, fresh);
     }
-    SDL_free(names);
+    if (dir) AAssetDir_close(dir);
     if (fresh) {
         char stamp[1100];
         snprintf(stamp, sizeof stamp, "%s/bifrost.stamp", in);
