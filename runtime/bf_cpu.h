@@ -45,7 +45,14 @@ typedef uint32_t __attribute__((aligned(1), may_alias)) bf_u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) bf_u64u;
 typedef uint8_t __attribute__((may_alias)) bf_u8a;
 
-#define BF_HOST(a) ((void *)(uintptr_t)(uint64_t)(a))
+#define BF_AS_BASE        0x2000000000ull
+#define BF_AS_SIZE        (1ull << 36)
+// Guest addresses are host addresses inside the reserved guest window. Anything outside it is folded back in, so a
+// wild guest pointer lands on reserved (faulting) pages of the window instead of reaching host memory.
+#define BF_HOST(a) ((void *)(uintptr_t)(BF_AS_BASE | ((uint64_t)(a) & (BF_AS_SIZE - 1))))
+static inline int bf_guest_range_ok(uint64_t a, uint64_t n) {
+    return a >= BF_AS_BASE && n <= BF_AS_SIZE && a - BF_AS_BASE <= BF_AS_SIZE - n;
+}
 #define LD8(a) (*(const bf_u8a *)BF_HOST(a))
 #define LD16(a) (*(const bf_u16u *)BF_HOST(a))
 #define LD32(a) (*(const bf_u32u *)BF_HOST(a))

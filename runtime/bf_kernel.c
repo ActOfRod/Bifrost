@@ -116,16 +116,25 @@ static uint64_t next_thread_id = 0x50;
 static _Thread_local BfThread *cur;
 static int live_threads;
 
+// The handle table has its own lock: handles are created both with and without the kernel lock held.
+static int handle_lock;
 uint32_t bf_handle_new(int kind, void *obj) {
+    while (__atomic_exchange_n(&handle_lock, 1, __ATOMIC_ACQUIRE)) {}
     for (uint32_t i = 1; i < 8192; i++)
-        if (!handles[i].kind) { handles[i].kind = kind; handles[i].obj = obj; return 0x10000u | i; }
+        if (!handles[i].kind) {
+            handles[i].obj = obj;
+            __atomic_store_n(&handles[i].kind, kind, __ATOMIC_RELEASE);
+            __atomic_store_n(&handle_lock, 0, __ATOMIC_RELEASE);
+            return 0x10000u | i;
+        }
+    __atomic_store_n(&handle_lock, 0, __ATOMIC_RELEASE);
     bf_log("bifrost: handle table exhausted\n");
     exit(6);
 }
 static BfHandle *handle_get(uint32_t h) {
     if (h == 0xFFFF8001u && cur) h = cur->handle;
     uint32_t i = h & 0xFFFF;
-    if ((h >> 16) != 1 || i >= 8192 || !handles[i].kind) return NULL;
+    if ((h >> 16) != 1 || i >= 8192 || !__atomic_load_n(&handles[i].kind, __ATOMIC_ACQUIRE)) return NULL;
     return &handles[i];
 }
 void *bf_handle_obj(uint32_t h, int kind) {
@@ -340,6 +349,11 @@ void bf_svc(BfCpu *c, uint32_t imm, uint64_t pc) {
         if (size > BF_HEAP_SIZE) { rc = 0xD401u; break; }
         bf_plat_klock();
         if (size > heap_size) bf_commit_guest(BF_HEAP_BASE + heap_size, size - heap_size);
+        else if (size < heap_size) {  // released memory must read as zero if the heap grows again
+            uint64_t cut = (size + 0xFFF) & ~0xFFFull;
+            memset(BF_HOST(BF_HEAP_BASE + size), 0, (size_t)((cut < heap_size ? cut : heap_size) - size));
+            if (heap_size > cut) bf_plat_decommit(BF_HOST(BF_HEAP_BASE + cut), heap_size - cut);
+        }
         heap_size = size;
         if (size) bf_region_add(BF_HEAP_BASE, size, 0x5, BF_PERM_R | BF_PERM_W); else region_remove(BF_HEAP_BASE);
         bf_plat_kunlock();
@@ -348,6 +362,7 @@ void bf_svc(BfCpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x02: case 0x03: case 0x2A: case 0x2B: case 0x5F: case 0x32: case 0x0F: case 0x0D: case 0x2D: case 0x14: break;
     case 0x04: // MapMemory(dst, src, size)
+        if (!bf_guest_range_ok(c->x[0], c->x[2]) || !bf_guest_range_ok(c->x[1], c->x[2])) { rc = 0xDC01u; break; }
         bf_plat_klock();
         bf_commit_guest(c->x[0], c->x[2]);
         memcpy(BF_HOST(c->x[0]), BF_HOST(c->x[1]), c->x[2]);
@@ -355,6 +370,7 @@ void bf_svc(BfCpu *c, uint32_t imm, uint64_t pc) {
         bf_plat_kunlock();
         break;
     case 0x05: // UnmapMemory(dst, src, size)
+        if (!bf_guest_range_ok(c->x[0], c->x[2]) || !bf_guest_range_ok(c->x[1], c->x[2])) { rc = 0xDC01u; break; }
         bf_plat_klock();
         memcpy(BF_HOST(c->x[1]), BF_HOST(c->x[0]), c->x[2]);
         region_remove(c->x[0]);
@@ -425,7 +441,10 @@ void bf_svc(BfCpu *c, uint32_t imm, uint64_t pc) {
                (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)pc);
         if (c->x[0] & 0x80000000ull) break;
         fflush(NULL); exit(7);
-    case 0x27: fwrite(BF_HOST(c->x[0]), 1, (size_t)c->x[1], stderr); break;
+    case 0x27:
+        if (bf_guest_range_ok(c->x[0], c->x[1])) fwrite(BF_HOST(c->x[0]), 1, (size_t)c->x[1], stderr);
+        else rc = 0xDC01u;
+        break;
     case 0x29: c->x[1] = get_info((uint32_t)c->x[1], c->x[3], &rc); break;
     case 0x2C: bf_plat_klock(); bf_commit_guest(c->x[0], c->x[1]); bf_region_add(c->x[0], c->x[1], 0x5, 3); bf_plat_kunlock(); break;
     case 0x30: c->x[1] = 0x100000000ull; break;
