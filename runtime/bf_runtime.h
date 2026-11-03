@@ -24,39 +24,26 @@ typedef struct BfImport { uint64_t sentinel; const char *name; } BfImport;
 extern const BfImport bf_imports[];
 extern const size_t bf_import_count;
 
-// guest address-space layout. The default mirrors a 39-bit Horizon application process; BF_COMPACT_AS
-// shrinks it to 64 GiB for hosts with a 39-bit user address space (most Android kernels).
-#ifdef BF_COMPACT_AS
+// guest address-space layout. Guest addresses are host addresses: the whole window is reserved at BF_AS_BASE,
+// so host code (HLE services, the renderer) can dereference guest pointers directly. 64 GiB at 128 GiB fits a
+// 39-bit host user address space (most Android kernels) and stays clear of ART's low 4 GiB.
+#define BF_AS_BASE        0x2000000000ull
 #define BF_AS_SIZE        (1ull << 36)
-#define BF_CODE_BASE      0x0008000000ull
-#define BF_HEAP_BASE      0x0100000000ull
+#define BF_CODE_BASE      (BF_AS_BASE + 0x0008000000ull)
+#define BF_HEAP_BASE      (BF_AS_BASE + 0x0100000000ull)
 #define BF_HEAP_SIZE      0x0400000000ull
-#define BF_STACK_BASE     0x0500000000ull
+#define BF_STACK_BASE     (BF_AS_BASE + 0x0500000000ull)
 #define BF_STACK_SIZE     0x0100000000ull
-#define BF_TLS_BASE       0x0600000000ull
+#define BF_TLS_BASE       (BF_AS_BASE + 0x0600000000ull)
 #define BF_TLS_SIZE       0x0010000000ull
-#define BF_MISC_BASE      0x0700000000ull
+#define BF_MISC_BASE      (BF_AS_BASE + 0x0700000000ull)
 #define BF_MISC_SIZE      0x0100000000ull
-#define BF_ALIAS_BASE     0x0800000000ull
+#define BF_ALIAS_BASE     (BF_AS_BASE + 0x0800000000ull)
 #define BF_ALIAS_SIZE     0x0100000000ull
-#else
-#define BF_AS_SIZE        (1ull << 39)
-#define BF_CODE_BASE      0x0008000000ull
-#define BF_HEAP_BASE      0x1100000000ull
-#define BF_HEAP_SIZE      0x1800000000ull
-#define BF_STACK_BASE     0x2900000000ull
-#define BF_STACK_SIZE     0x0800000000ull
-#define BF_TLS_BASE       0x3100000000ull
-#define BF_TLS_SIZE       0x0010000000ull
-#define BF_MISC_BASE      0x3200000000ull
-#define BF_MISC_SIZE      0x1000000000ull
-#define BF_ALIAS_BASE     0x4400000000ull
-#define BF_ALIAS_SIZE     0x1000000000ull
-#endif
 #define BF_THREAD_EXIT    0xFFFFFFFFFFFFF000ull
 
 // platform layer (bf_platform.c)
-void *bf_plat_reserve(uint64_t size);
+void *bf_plat_reserve_at(uint64_t addr, uint64_t size);  // exactly at addr, or NULL
 int bf_plat_commit(void *p, uint64_t size);
 void bf_plat_decommit(void *p, uint64_t size);
 typedef struct BfThreadHost BfThreadHost;
@@ -94,3 +81,16 @@ void bf_ipc_close(uint32_t handle);
 extern char bf_romfs_path[1024];
 extern char bf_dlc_dir[1024];
 int bf_run(int argc, char **argv);
+
+// Host implementations of guest symbols. BF_HLE("nvnBootstrapLoader", fn) { ... } binds an import by name;
+// bf_hle_addr gives a host function a guest-callable address (for tables of function pointers handed to the guest).
+#define BF_HLE_BASE       0xFFFFFE0000000000ull
+#define BF_HLE_CAT2(a, b) a##b
+#define BF_HLE_CAT(a, b)  BF_HLE_CAT2(a, b)
+void bf_hle_add(const char *name, BfFn fn);
+BfFn bf_hle_find(const char *name);
+uint64_t bf_hle_addr(const char *name, BfFn fn);
+#define BF_HLE(sym, fn)                                                                             \
+    static void fn(BfCpu *c);                                                                       \
+    __attribute__((constructor)) static void BF_HLE_CAT(bf_hle_reg_, __LINE__)(void) { bf_hle_add(sym, fn); } \
+    static void fn(BfCpu *c)

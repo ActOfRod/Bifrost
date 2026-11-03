@@ -32,7 +32,7 @@ static uint64_t heap_size;
 
 void bf_commit_guest(uint64_t va, uint64_t size) {
     uint64_t lo = va & ~0xFFFull, hi = (va + size + 0xFFF) & ~0xFFFull;
-    if (hi > lo && !bf_plat_commit(bf_membase + lo, hi - lo)) {
+    if (hi > lo && !bf_plat_commit(BF_HOST(lo), hi - lo)) {
         bf_log("bifrost: cannot commit guest memory %llx+%llx\n", (unsigned long long)lo, (unsigned long long)(hi - lo));
         exit(5);
     }
@@ -74,8 +74,9 @@ static void query_memory(uint64_t info, uint64_t addr) {
             base = regions[i].va; size = regions[i].size; type = regions[i].type; perm = regions[i].perm; goto found;
         }
     {
-        uint64_t lo = 0, hi = BF_AS_SIZE;
-        if (addr >= BF_AS_SIZE) { lo = BF_AS_SIZE; hi = ~0ull; type = 0x10; }
+        uint64_t lo = BF_AS_BASE, hi = BF_AS_BASE + BF_AS_SIZE;
+        if (addr < BF_AS_BASE) { lo = 0; hi = BF_AS_BASE; }
+        else if (addr >= hi) { lo = hi; hi = ~0ull; type = 0x10; }
         for (size_t i = 0; i < bf_segment_count; i++) {
             uint64_t s = bf_segments[i].va, e = s + bf_segments[i].size;
             if (e <= addr && e > lo) lo = e;
@@ -317,7 +318,7 @@ static uint64_t get_info(uint32_t id, uint64_t sub, uint32_t *rc) {
     case 8: case 9: case 10: case 16: case 17: case 20: return 0;
     case 11: return 0x9E3779B97F4A7C15ull * (sub + 1) ^ bf_plat_ns();
     case 12: return BF_CODE_BASE;
-    case 13: return BF_AS_SIZE - BF_CODE_BASE;
+    case 13: return BF_AS_BASE + BF_AS_SIZE - BF_CODE_BASE;
     case 14: return BF_STACK_BASE;
     case 15: return BF_STACK_SIZE;
     case 18: return bf_title_id;

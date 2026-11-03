@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-uint8_t *bf_membase;
 char bf_romfs_path[1024];
 char bf_dlc_dir[1024];
 
@@ -31,13 +30,63 @@ static void missing(BfCpu *c) {
     exit(4);
 }
 
+typedef struct { const char *name; BfFn fn; } BfHleEntry;
+static BfHleEntry hle_tab[8192];
+static size_t hle_count;
+static int hle_lock;
+static void hle_acquire(void) { while (__atomic_exchange_n(&hle_lock, 1, __ATOMIC_ACQUIRE)) {} }
+static void hle_release(void) { __atomic_store_n(&hle_lock, 0, __ATOMIC_RELEASE); }
+
+void bf_hle_add(const char *name, BfFn fn) {
+    hle_acquire();
+    if (hle_count < sizeof hle_tab / sizeof hle_tab[0]) hle_tab[hle_count++] = (BfHleEntry){name, fn};
+    hle_release();
+}
+
+BfFn bf_hle_find(const char *name) {
+    for (size_t i = 0; i < hle_count; i++) if (!strcmp(hle_tab[i].name, name)) return hle_tab[i].fn;
+    return NULL;
+}
+
+uint64_t bf_hle_addr(const char *name, BfFn fn) {
+    if (!fn) return 0;
+    hle_acquire();
+    size_t i = 0;
+    while (i < hle_count && hle_tab[i].fn != fn) i++;
+    if (i == hle_count && hle_count < sizeof hle_tab / sizeof hle_tab[0]) hle_tab[hle_count++] = (BfHleEntry){name, fn};
+    hle_release();
+    return i < hle_count ? BF_HLE_BASE + i * 16 : 0;
+}
+
+static BfFn import_impl(uint64_t pc) {
+    static BfFn *cache;
+    static uint8_t *known;
+    size_t i = 0;
+    while (i < bf_import_count && bf_imports[i].sentinel != pc) i++;
+    if (i >= bf_import_count) return NULL;
+    if (!cache) {
+        BfFn *fns = calloc(bf_import_count + 1, sizeof *fns);
+        uint8_t *k = calloc(bf_import_count + 1, 1);
+        if (!fns || !k) return NULL;
+        cache = fns, known = k;
+    }
+    if (!known[i]) { cache[i] = bf_hle_find(bf_imports[i].name); known[i] = 1; }
+    return cache[i];
+}
+
 void bf_call(BfCpu *c) {
     BfFn fn = lookup(c->pc);
     if (fn) { fn(c); return; }
+    if (c->pc >= BF_HLE_BASE && c->pc < 0xFFFFFF0000000000ull) {
+        size_t i = (size_t)((c->pc - BF_HLE_BASE) / 16);
+        if (i < hle_count) { c->pc = c->x[30]; hle_tab[i].fn(c); return; }
+    }
     if (c->pc >= 0xFFFFFF0000000000ull) {
-        bf_log("bifrost: call to unresolved import %s (returning 0)\n", bf_import_name(c->pc));
-        c->x[0] = 0;
+        BfFn impl = import_impl(c->pc);
+        if (!impl) bf_log("bifrost: call to unresolved import %s (returning 0)\n", bf_import_name(c->pc));
         c->pc = c->x[30];
+        if (impl) { impl(c); return; }
+        c->x[0] = 0;
         return;
     }
     missing(c);
@@ -83,8 +132,11 @@ int bf_run(int argc, char **argv) {
         else if (!strcmp(argv[i], "--romfs") && i + 1 < argc) snprintf(bf_romfs_path, sizeof bf_romfs_path, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--dlc") && i + 1 < argc) snprintf(bf_dlc_dir, sizeof bf_dlc_dir, "%s", argv[++i]);
     }
-    bf_membase = bf_plat_reserve(BF_AS_SIZE);
-    if (!bf_membase) { bf_log("bifrost: cannot reserve the guest address space\n"); return 5; }
+    if (!bf_plat_reserve_at(BF_AS_BASE, BF_AS_SIZE)) {
+        bf_log("bifrost: cannot reserve the guest address space at %llx+%llx\n", (unsigned long long)BF_AS_BASE,
+               (unsigned long long)BF_AS_SIZE);
+        return 5;
+    }
     FILE *f = fopen(image, "rb");
     if (!f) { bf_log("bifrost: cannot open %s\n", image); return 5; }
     for (size_t i = 0; i < bf_segment_count; i++) {

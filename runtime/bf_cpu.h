@@ -38,7 +38,6 @@ typedef struct BfCpu {
 
 typedef void (*BfFn)(BfCpu *c);
 
-extern uint8_t *bf_membase;
 
 // ---- memory: guest address a lives at bf_membase + a
 typedef uint16_t __attribute__((aligned(1), may_alias)) bf_u16u;
@@ -46,7 +45,7 @@ typedef uint32_t __attribute__((aligned(1), may_alias)) bf_u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) bf_u64u;
 typedef uint8_t __attribute__((may_alias)) bf_u8a;
 
-#define BF_HOST(a) ((void *)(bf_membase + (uint64_t)(a)))
+#define BF_HOST(a) ((void *)(uintptr_t)(uint64_t)(a))
 #define LD8(a) (*(const bf_u8a *)BF_HOST(a))
 #define LD16(a) (*(const bf_u16u *)BF_HOST(a))
 #define LD32(a) (*(const bf_u32u *)BF_HOST(a))

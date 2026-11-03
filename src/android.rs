@@ -126,7 +126,7 @@ pub fn write_sources(out: &Path, package: &str, label: &str) -> Result<()> {
     fs::write(
         dir.join("README.txt"),
         "Build the APK with `bifrost build ... --target android` (needs ANDROID_HOME with an NDK, build-tools and a\n\
-         platform). The generated C is compiled with -DBF_NO_MAIN -DBF_COMPACT_AS together with ../bf_android.c.in\n\
+         platform). The generated C is compiled with -DBF_NO_MAIN together with ../bf_android.c.in\n\
          and the NDK's native_app_glue into lib/<abi>/libbifrost.so.\n",
     )?;
     Ok(())
@@ -138,7 +138,6 @@ pub fn compile_args(sdk: &AndroidSdk, triple: &str) -> Vec<String> {
         format!("--target={triple}{MIN_SDK}"),
         "-fPIC".into(),
         "-DBF_NO_MAIN".into(),
-        "-DBF_COMPACT_AS".into(),
         format!("-I{}", sdk.glue_dir().display()),
     ]
 }

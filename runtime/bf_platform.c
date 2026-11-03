@@ -8,7 +8,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-void *bf_plat_reserve(uint64_t size) { return VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE, PAGE_NOACCESS); }
+void *bf_plat_reserve_at(uint64_t addr, uint64_t size) {
+    void *p = VirtualAlloc((void *)(uintptr_t)addr, (SIZE_T)size, MEM_RESERVE, PAGE_NOACCESS);
+    if (p && (uint64_t)(uintptr_t)p != addr) { VirtualFree(p, 0, MEM_RELEASE); return NULL; }
+    return p;
+}
 int bf_plat_commit(void *p, uint64_t size) { return VirtualAlloc(p, (SIZE_T)size, MEM_COMMIT, PAGE_READWRITE) != NULL; }
 void bf_plat_decommit(void *p, uint64_t size) { VirtualFree(p, (SIZE_T)size, MEM_DECOMMIT); }
 
@@ -42,9 +46,15 @@ void bf_plat_kbroadcast(void) { WakeAllConditionVariable(&kcond); }
 #include <sys/mman.h>
 #include <time.h>
 
-void *bf_plat_reserve(uint64_t size) {
-    void *p = mmap(NULL, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    return p == MAP_FAILED ? NULL : p;
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+void *bf_plat_reserve_at(uint64_t addr, uint64_t size) {
+    void *p = mmap((void *)(uintptr_t)addr, size, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    if ((uint64_t)(uintptr_t)p != addr) { munmap(p, size); return NULL; }  // kernels before 4.17 treat it as a hint
+    return p;
 }
 int bf_plat_commit(void *p, uint64_t size) { return mprotect(p, size, PROT_READ | PROT_WRITE) == 0; }
 void bf_plat_decommit(void *p, uint64_t size) { madvise(p, size, MADV_DONTNEED); }

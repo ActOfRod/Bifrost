@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::lift::cfg::CodeSource;
 use crate::module::{Format, Module, SymbolKind, IMPORT_SENTINEL_BASE};
 
-pub const CODE_BASE: u64 = 0x0800_0000;
+/// Must match BF_CODE_BASE in runtime/bf_runtime.h (guest window base + 128 MiB).
+pub const CODE_BASE: u64 = 0x20_0800_0000;
 const MODULE_ALIGN: u64 = 0x20_0000;
 const R_AARCH64_ABS64: u32 = 257;
 const R_AARCH64_GLOB_DAT: u32 = 1025;
