@@ -8,12 +8,26 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "../bf_runtime.h"
 
 void settings_load(void);
 int ui_run(void);
 
 static char image_path[1024], romfs_path[1024], dlc_path[1024];
+static int log_pipe[2];
+
+// The runtime and the guest (svcOutputDebugString) write to stdout / stderr; forward them to logcat.
+static void *log_pump(void *arg) {
+    (void)arg;
+    char buf[1024];
+    ssize_t n;
+    while ((n = read(log_pipe[0], buf, sizeof buf - 1)) > 0) {
+        buf[n] = 0;
+        __android_log_write(ANDROID_LOG_INFO, "bifrost", buf);
+    }
+    return NULL;
+}
 
 static int extract(const char *name, const char *dst, int always) {
     SDL_IOStream *in = SDL_IOFromFile(name, "rb");  // (APK assets on Android)
@@ -63,6 +77,15 @@ static void *guest_main(void *arg) {
 
 int main(int argc, char **argv) {
     (void)argc, (void)argv;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    if (pipe(log_pipe) == 0) {
+        pthread_t lt;
+        dup2(log_pipe[1], 1);
+        dup2(log_pipe[1], 2);
+        pthread_create(&lt, NULL, log_pump, NULL);
+        pthread_detach(lt);
+    }
     const char *in = SDL_GetAndroidInternalStoragePath();
     const char *ext = SDL_GetAndroidExternalStoragePath();
     if (!in) { __android_log_print(ANDROID_LOG_ERROR, "bifrost", "no internal storage: %s", SDL_GetError()); return 1; }
