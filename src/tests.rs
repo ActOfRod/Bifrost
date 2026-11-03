@@ -38,7 +38,15 @@ fn words(code: &[u32]) -> Vec<u8> {
     code.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 
-fn build_nso(text: &[u8], ro: &[u8], data: &[u8], flags: u32, text_mem: u32, ro_mem: u32, data_mem: u32) -> Vec<u8> {
+fn build_nso(
+    text: &[u8],
+    ro: &[u8],
+    data: &[u8],
+    flags: u32,
+    text_mem: u32,
+    ro_mem: u32,
+    data_mem: u32,
+) -> Vec<u8> {
     let text_file = if flags & 1 != 0 {
         lz4_flex::block::compress(text)
     } else {
@@ -90,7 +98,12 @@ fn build_nso(text: &[u8], ro: &[u8], data: &[u8], flags: u32, text_mem: u32, ro_
 #[test]
 fn decodes_known_encodings() {
     assert!(matches!(decode(0xD503_201F, 0), Op::Nop));
-    assert!(matches!(decode(0xD65F_03C0, 0), Op::Ret { reg: crate::lift::GReg::X(30) }));
+    assert!(matches!(
+        decode(0xD65F_03C0, 0),
+        Op::Ret {
+            reg: crate::lift::GReg::X(30)
+        }
+    ));
     assert!(matches!(
         decode(0x8B01_0000, 0),
         Op::Alu {
@@ -311,7 +324,10 @@ fn linked_module(name: &str, text: &[u32]) -> Module {
     m.format = Format::Nso;
     m.name = name.into();
     m.image.resize(0x2000, 0);
-    m.data = Segment { va: 0x1000, size: 0x1000 };
+    m.data = Segment {
+        va: 0x1000,
+        size: 0x1000,
+    };
     m
 }
 
@@ -319,24 +335,47 @@ fn linked_module(name: &str, text: &[u32]) -> Module {
 fn links_modules_in_horizon_order_and_resolves_cross_module_imports() {
     use crate::module::{Import, Symbol, SymbolKind};
     let mut main = linked_module("main", &[0xD65F_03C0]);
-    main.imports.push(Import { name: "nn_shared".into(), slot_va: Some(0x1000), sentinel: IMPORT_SENTINEL_BASE });
-    main.imports.push(Import { name: "nn_missing".into(), slot_va: Some(0x1008), sentinel: IMPORT_SENTINEL_BASE + 1 });
+    main.imports.push(Import {
+        name: "nn_shared".into(),
+        slot_va: Some(0x1000),
+        sentinel: IMPORT_SENTINEL_BASE,
+    });
+    main.imports.push(Import {
+        name: "nn_missing".into(),
+        slot_va: Some(0x1008),
+        sentinel: IMPORT_SENTINEL_BASE + 1,
+    });
     let mut sdk = linked_module("sdk", &[0xD280_0540, 0xD65F_03C0]);
-    sdk.symbols.push(Symbol { name: "nn_shared".into(), va: 0x4, size: 4, defined: true, kind: SymbolKind::Func });
+    sdk.symbols.push(Symbol {
+        name: "nn_shared".into(),
+        va: 0x4,
+        size: 4,
+        defined: true,
+        kind: SymbolKind::Func,
+    });
     let sub = linked_module("subsdk1", &[0xD65F_03C0]);
     let program = crate::link::link(vec![sdk, sub, main]);
     let names: Vec<_> = program.modules.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["main", "subsdk1", "sdk"]);
     assert_eq!(program.modules[0].image_base, crate::link::CODE_BASE);
-    assert!(program.modules.windows(2).all(|w| w[1].image_base > w[0].image_base && w[1].image_base % 0x20_0000 == 0));
+    assert!(program
+        .modules
+        .windows(2)
+        .all(|w| w[1].image_base > w[0].image_base && w[1].image_base % 0x20_0000 == 0));
     let sdk_base = program.modules[2].image_base;
     let main = &program.modules[0];
     assert_eq!(main.read_u64(main.image_base + 0x1000), Some(sdk_base + 4));
     assert_eq!(program.resolved_imports, 1);
     assert_eq!(program.imports.len(), 1);
-    assert_eq!(main.read_u64(main.image_base + 0x1008), Some(program.imports[0].0));
+    assert_eq!(
+        main.read_u64(main.image_base + 0x1008),
+        Some(program.imports[0].0)
+    );
     let entries = program.entry_points();
-    assert!(entries.contains(&(sdk_base + 4)), "data pointer into code becomes an entry");
+    assert!(
+        entries.contains(&(sdk_base + 4)),
+        "data pointer into code becomes an entry"
+    );
     let lifted = crate::lift::cfg::lift_program(&program, &entries);
     let gen = crate::codegen::generate(&lifted);
     assert!(gen.header.contains(&format!("f_{:x}", sdk_base + 4)));
@@ -389,7 +428,13 @@ fn parses_pfs0_images() {
     f.extend_from_slice(b"main\0sdk\0\0\0\0\0\0\0\0");
     f.extend_from_slice(b"abcde");
     let files = crate::intake::parse_pfs0_bytes(&f).unwrap();
-    assert_eq!(files, vec![("main".to_string(), b"abc".to_vec()), ("sdk".to_string(), b"de".to_vec())]);
+    assert_eq!(
+        files,
+        vec![
+            ("main".to_string(), b"abc".to_vec()),
+            ("sdk".to_string(), b"de".to_vec())
+        ]
+    );
 }
 
 #[test]
@@ -411,8 +456,14 @@ fn romfs_directory_round_trip() {
     assert_eq!(read("Sound/bgm.bfstm").as_deref(), Some(&b"music!"[..]));
     assert_eq!(read("top.bin"), Some(Vec::new()));
     assert_eq!(read("Sound/missing"), None);
-    assert!(matches!(crate::intake::dlc_romfs(&image).unwrap(), crate::intake::RomfsSource::Image(_)));
-    assert!(matches!(crate::intake::dlc_romfs(&root).unwrap(), crate::intake::RomfsSource::Dir(_)));
+    assert!(matches!(
+        crate::intake::dlc_romfs(&image).unwrap(),
+        crate::intake::RomfsSource::Image(_)
+    ));
+    assert!(matches!(
+        crate::intake::dlc_romfs(&root).unwrap(),
+        crate::intake::RomfsSource::Dir(_)
+    ));
     std::fs::remove_dir_all(&root).unwrap();
     std::fs::remove_file(&image).unwrap();
 }
@@ -427,11 +478,19 @@ fn romfs_hash_matches_horizon() {
 
 #[test]
 fn romfs_only_input_is_explained() {
-    let root = std::env::temp_dir().join(format!("bifrost_romfs_only_{}", std::process::id())).join("romfs");
+    let root = std::env::temp_dir()
+        .join(format!("bifrost_romfs_only_{}", std::process::id()))
+        .join("romfs");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("a.bin"), b"x").unwrap();
-    let opts = crate::pipeline::BuildOptions { inputs: vec![root.clone()], out: root.with_file_name("out"), ..Default::default() };
-    let err = crate::pipeline::run(&opts, &mut |_| {}).unwrap_err().to_string();
+    let opts = crate::pipeline::BuildOptions {
+        inputs: vec![root.clone()],
+        out: root.with_file_name("out"),
+        ..Default::default()
+    };
+    let err = crate::pipeline::run(&opts, &mut |_| {})
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("ExeFS"), "{err}");
     std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
 }

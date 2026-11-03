@@ -45,7 +45,9 @@ pub fn ld_literal(opc: u32, rt: u32, addr: &str) -> Option<String> {
         2 => 16,
         _ => return None,
     };
-    Some(format!("{{ BfVec t = {{0}}; memcpy(&t, BF_HOST({addr}), {n}); c->v[{rt}] = t; }}"))
+    Some(format!(
+        "{{ BfVec t = {{0}}; memcpy(&t, BF_HOST({addr}), {n}); c->v[{rt}] = t; }}"
+    ))
 }
 
 pub fn pair(load: bool, opc: u32, rt: u32, rt2: u32) -> String {
@@ -56,7 +58,9 @@ pub fn pair(load: bool, opc: u32, rt: u32, rt2: u32) -> String {
              c->v[{rt}] = t1; c->v[{rt2}] = t2;"
         )
     } else {
-        format!("memcpy(BF_HOST(a), &c->v[{rt}], {n}); memcpy(BF_HOST(a + {n}), &c->v[{rt2}], {n});")
+        format!(
+            "memcpy(BF_HOST(a), &c->v[{rt}], {n}); memcpy(BF_HOST(a + {n}), &c->v[{rt2}], {n});"
+        )
     }
 }
 
@@ -88,7 +92,11 @@ pub fn ldst_struct(w: u32) -> Option<String> {
         return None;
     }
     let base = rxsp(rn);
-    let wbreg = if rn == 31 { "c->sp".to_string() } else { format!("c->x[{rn}]") };
+    let wbreg = if rn == 31 {
+        "c->sp".to_string()
+    } else {
+        format!("c->x[{rn}]")
+    };
     let wb = |total: u32| -> String {
         if !post {
             String::new()
@@ -126,17 +134,29 @@ pub fn ldst_struct(w: u32) -> Option<String> {
         if interleave == 1 {
             for r in 0..nregs {
                 if load {
-                    s += &format!("memcpy(&t[{r}], BF_HOST(a + {}), {regbytes}); ", r * regbytes);
+                    s += &format!(
+                        "memcpy(&t[{r}], BF_HOST(a + {}), {regbytes}); ",
+                        r * regbytes
+                    );
                 } else {
-                    s += &format!("memcpy(BF_HOST(a + {}), &t[{r}], {regbytes}); ", r * regbytes);
+                    s += &format!(
+                        "memcpy(BF_HOST(a + {}), &t[{r}], {regbytes}); ",
+                        r * regbytes
+                    );
                 }
             }
         } else {
             let elems = regbytes / es;
             let (dst, src) = if load {
-                (format!("&t[r].b[e * {es}]"), format!("BF_HOST(a + (e * {nregs} + r) * {es})"))
+                (
+                    format!("&t[r].b[e * {es}]"),
+                    format!("BF_HOST(a + (e * {nregs} + r) * {es})"),
+                )
             } else {
-                (format!("BF_HOST(a + (e * {nregs} + r) * {es})"), format!("&t[r].b[e * {es}]"))
+                (
+                    format!("BF_HOST(a + (e * {nregs} + r) * {es})"),
+                    format!("&t[r].b[e * {es}]"),
+                )
             };
             s += &format!(
                 "for (int e = 0; e < {elems}; e++) for (int r = 0; r < {nregs}; r++) memcpy({dst}, {src}, {es}); "
@@ -194,9 +214,15 @@ pub fn ldst_struct(w: u32) -> Option<String> {
                 "{{ BfVec t = {{0}}; for (int i = 0; i < {lanes}; i++) memcpy(&t.b[i * {es}], BF_HOST(a + {off}), {es}); c->v[{reg}] = t; }} "
             );
         } else if load {
-            s += &format!("memcpy(&c->v[{reg}].b[{}], BF_HOST(a + {off}), {es}); ", index * es);
+            s += &format!(
+                "memcpy(&c->v[{reg}].b[{}], BF_HOST(a + {off}), {es}); ",
+                index * es
+            );
         } else {
-            s += &format!("memcpy(BF_HOST(a + {off}), &c->v[{reg}].b[{}], {es}); ", index * es);
+            s += &format!(
+                "memcpy(BF_HOST(a + {off}), &c->v[{reg}].b[{}], {es}); ",
+                index * es
+            );
         }
     }
     s += &wb(total);
@@ -357,7 +383,11 @@ fn fp_cmp(w: u32) -> Option<String> {
         return None;
     }
     let a = freg(sz, bits(w, 9, 5));
-    let b = if bit(w, 3) { "0.0".to_string() } else { freg(sz, bits(w, 20, 16)) };
+    let b = if bit(w, 3) {
+        "0.0".to_string()
+    } else {
+        freg(sz, bits(w, 20, 16))
+    };
     Some(format!("c->nzcv = bf_fcmp((double){a}, (double){b});"))
 }
 
@@ -367,7 +397,9 @@ fn fp_ccmp(w: u32) -> Option<String> {
     let b = freg(sz, bits(w, 20, 16));
     let cond = bits(w, 15, 12);
     let nzcv = (bits(w, 3, 0) as u64) << 28;
-    Some(format!("c->nzcv = BF_COND(c, {cond}) ? bf_fcmp((double){a}, (double){b}) : 0x{nzcv:x}ull;"))
+    Some(format!(
+        "c->nzcv = BF_COND(c, {cond}) ? bf_fcmp((double){a}, (double){b}) : 0x{nzcv:x}ull;"
+    ))
 }
 
 fn fp_csel(w: u32) -> Option<String> {
@@ -433,11 +465,21 @@ fn fp_1src(w: u32) -> Option<String> {
     let a = freg(sz, n);
     let s = FS[sz];
     let i = FI[sz];
-    let sign = if sz == 0 { "0x80000000u" } else { "0x8000000000000000ull" };
+    let sign = if sz == 0 {
+        "0x80000000u"
+    } else {
+        "0x8000000000000000ull"
+    };
     Some(match opc {
         0 => format!("bf_vset_d(c, {d}, c->v[{n}].{i}[0]);"),
-        1 => format!("bf_vset_d(c, {d}, c->v[{n}].{i}[0] & ~({}){sign});", UT[2 + sz]),
-        2 => format!("bf_vset_d(c, {d}, ({})(c->v[{n}].{i}[0] ^ {sign}));", UT[2 + sz]),
+        1 => format!(
+            "bf_vset_d(c, {d}, c->v[{n}].{i}[0] & ~({}){sign});",
+            UT[2 + sz]
+        ),
+        2 => format!(
+            "bf_vset_d(c, {d}, ({})(c->v[{n}].{i}[0] ^ {sign}));",
+            UT[2 + sz]
+        ),
         3 => fset(sz, d, &format!("bf_fsqrt_{s}({a})")),
         4 if sz == 1 => format!("bf_vset_f(c, {d}, (float){a});"),
         5 if sz == 0 => format!("bf_vset_fd(c, {d}, (double){a});"),
@@ -544,7 +586,10 @@ fn fp_fixed(w: u32) -> Option<String> {
     match (rmode, opc) {
         (3, 0) | (3, 1) => {
             let f = cvt_fn(opc == 0, sf);
-            Some(format!("c->x[{d}] = {f}(ldexp((double){}, {fbits}), 3);", freg(sz, n)))
+            Some(format!(
+                "c->x[{d}] = {f}(ldexp((double){}, {fbits}), 3);",
+                freg(sz, n)
+            ))
         }
         (0, 2) | (0, 3) => {
             let v = match (opc == 2, sf) {
@@ -611,7 +656,11 @@ fn three_same(w: u32, scalar: bool) -> Option<String> {
         let cnt = if scalar { 1 } else { width / (32 << sz) };
         let f = F[sz];
         let s = FS[sz];
-        let (a, b, dd) = (format!("A.{f}[i]"), format!("B.{f}[i]"), format!("D.{f}[i]"));
+        let (a, b, dd) = (
+            format!("A.{f}[i]"),
+            format!("B.{f}[i]"),
+            format!("D.{f}[i]"),
+        );
         let bin = |name: &str| format!("R.{f}[i] = bf_{name}_{s}({a}, {b});");
         let pair = |name: &str| pairwise_stmt(cnt, f, &format!("bf_{name}_{s}($x, $y)"));
         let stmt = match (u, opcode, hi) {
@@ -649,17 +698,30 @@ fn three_same(w: u32, scalar: bool) -> Option<String> {
     }
     let cnt = if scalar { 1 } else { width / eb };
     let (uf, sf, ut) = (U[size], S[size], UT[size]);
-    let (ua, ub, ud) = (format!("A.{uf}[i]"), format!("B.{uf}[i]"), format!("D.{uf}[i]"));
+    let (ua, ub, ud) = (
+        format!("A.{uf}[i]"),
+        format!("B.{uf}[i]"),
+        format!("D.{uf}[i]"),
+    );
     let (sa, sb) = (format!("A.{sf}[i]"), format!("B.{sf}[i]"));
-    let (xa, xb) = if u { (ua.clone(), ub.clone()) } else { (sa.clone(), sb.clone()) };
-    let wide = if u { "(unsigned __int128)" } else { "(__int128)" };
+    let (xa, xb) = if u {
+        (ua.clone(), ub.clone())
+    } else {
+        (sa.clone(), sb.clone())
+    };
+    let wide = if u {
+        "(unsigned __int128)"
+    } else {
+        "(__int128)"
+    };
     let all = ones(eb);
     let scalar_ok = matches!(opcode, 1 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 16 | 17 | 22);
     if scalar && (!scalar_ok || (size != 3 && !matches!(opcode, 1 | 5 | 9 | 11 | 22))) {
         return None;
     }
     let sat = if u { "bf_sat_u" } else { "bf_sat_s" };
-    let absdiff = format!("({ut})({wide}{xa} > {wide}{xb} ? {wide}{xa} - {xb} : {wide}{xb} - {xa})");
+    let absdiff =
+        format!("({ut})({wide}{xa} > {wide}{xb} ? {wide}{xa} - {xb} : {wide}{xb} - {xa})");
     let stmt = match (u, opcode) {
         (_, 0) => format!("R.{uf}[i] = ({ut})(({wide}{xa} + {xb}) >> 1);"),
         (_, 1) => format!("R.{uf}[i] = ({ut}){sat}((__int128){xa} + (__int128){xb}, {eb});"),
@@ -689,7 +751,11 @@ fn three_same(w: u32, scalar: bool) -> Option<String> {
         (_, 20) if size < 3 => pairwise_stmt(cnt, if u { uf } else { sf }, "($x > $y ? $x : $y)"),
         (_, 21) if size < 3 => pairwise_stmt(cnt, if u { uf } else { sf }, "($x < $y ? $x : $y)"),
         (false, 22) | (true, 22) if size == 1 || size == 2 => {
-            let rnd = if u { format!(" + ((__int128)1 << {})", eb - 1) } else { String::new() };
+            let rnd = if u {
+                format!(" + ((__int128)1 << {})", eb - 1)
+            } else {
+                String::new()
+            };
             format!("R.{uf}[i] = ({ut})bf_sat_s((2 * (__int128){sa} * {sb}{rnd}) >> {eb}, {eb});")
         }
         (false, 23) => pairwise_stmt(cnt, uf, &format!("({ut})($x + $y)")),
@@ -762,10 +828,18 @@ fn two_misc(w: u32, scalar: bool) -> Option<String> {
             (true, 0x0D, 1) => fcmp_res(sz, &format!("{a} <= 0")),
             (false, 0x0E, 1) => fcmp_res(sz, &format!("{a} < 0")),
             (false, 0x0F, 1) if !scalar => {
-                format!("R.{fi}[i] = A.{fi}[i] & ~(({})1 << {});", UT[2 + sz], 31 + 32 * sz)
+                format!(
+                    "R.{fi}[i] = A.{fi}[i] & ~(({})1 << {});",
+                    UT[2 + sz],
+                    31 + 32 * sz
+                )
             }
             (true, 0x0F, 1) if !scalar => {
-                format!("R.{fi}[i] = A.{fi}[i] ^ (({})1 << {});", UT[2 + sz], 31 + 32 * sz)
+                format!(
+                    "R.{fi}[i] = A.{fi}[i] ^ (({})1 << {});",
+                    UT[2 + sz],
+                    31 + 32 * sz
+                )
             }
             _ => return None,
         };
@@ -820,22 +894,41 @@ fn two_misc(w: u32, scalar: bool) -> Option<String> {
             let cnt2 = width / (2 * eb);
             let (wf, wt) = (U[size + 1], UT[size + 1]);
             let src = if u { uf } else { sf };
-            let acc = if opcode == 6 { format!("D.{wf}[i] + ") } else { String::new() };
+            let acc = if opcode == 6 {
+                format!("D.{wf}[i] + ")
+            } else {
+                String::new()
+            };
             let st = format!(
                 "R.{wf}[i] = ({wt})({acc}({wt})(int64_t)A.{src}[2 * i] + ({wt})(int64_t)A.{src}[2 * i + 1]);"
             );
             let st = if u { st.replace("(int64_t)", "") } else { st };
             return Some(vl(d, n, n, cnt2, false, &st));
         }
-        (false, 4) if size < 3 => format!("R.{uf}[i] = ({ut})(bf_cls32((uint32_t)(int32_t){sa}) - {});", 32 - eb),
-        (true, 4) if size < 3 => format!("R.{uf}[i] = ({ut})(bf_clz32((uint32_t){ua}) - {});", 32 - eb),
+        (false, 4) if size < 3 => format!(
+            "R.{uf}[i] = ({ut})(bf_cls32((uint32_t)(int32_t){sa}) - {});",
+            32 - eb
+        ),
+        (true, 4) if size < 3 => format!(
+            "R.{uf}[i] = ({ut})(bf_clz32((uint32_t){ua}) - {});",
+            32 - eb
+        ),
         (false, 5) if size == 0 => "R.b[i] = (uint8_t)__builtin_popcount(A.b[i]);".to_string(),
         (true, 5) if size == 0 => "R.b[i] = (uint8_t)~A.b[i];".to_string(),
         (true, 5) if size == 1 => {
             let c8 = width / 8;
-            return Some(vl(d, n, n, c8, false, "R.b[i] = (uint8_t)(bf_rbit32(A.b[i]) >> 24);"));
+            return Some(vl(
+                d,
+                n,
+                n,
+                c8,
+                false,
+                "R.b[i] = (uint8_t)(bf_rbit32(A.b[i]) >> 24);",
+            ));
         }
-        (false, 7) => format!("R.{uf}[i] = ({ut})bf_sat_s({sa} < 0 ? -(__int128){sa} : (__int128){sa}, {eb});"),
+        (false, 7) => format!(
+            "R.{uf}[i] = ({ut})bf_sat_s({sa} < 0 ? -(__int128){sa} : (__int128){sa}, {eb});"
+        ),
         (true, 7) => format!("R.{uf}[i] = ({ut})bf_sat_s(-(__int128){sa}, {eb});"),
         (false, 8) => format!("R.{uf}[i] = ({sa} > 0) ? {all} : 0;"),
         (true, 8) => format!("R.{uf}[i] = ({sa} >= 0) ? {all} : 0;"),
@@ -864,7 +957,14 @@ fn two_misc(w: u32, scalar: bool) -> Option<String> {
             let cntn = 64 / eb;
             let off = if q { cntn } else { 0 };
             let (wf, wt) = (U[size + 1], UT[size + 1]);
-            return Some(vl(d, n, n, cntn, false, &format!("R.{wf}[i] = ({wt})(({wt})A.{uf}[i + {off}] << {eb});")));
+            return Some(vl(
+                d,
+                n,
+                n,
+                cntn,
+                false,
+                &format!("R.{wf}[i] = ({wt})(({wt})A.{uf}[i + {off}] << {eb});"),
+            ));
         }
         _ => return None,
     };
@@ -908,7 +1008,14 @@ fn scalar_dup(w: u32) -> Option<String> {
     }
     let idx = imm5 >> (size + 1);
     let f = U[size];
-    Some(vl(bits(w, 4, 0), bits(w, 9, 5), 0, 1, false, &format!("R.{f}[i] = A.{f}[{idx}];")))
+    Some(vl(
+        bits(w, 4, 0),
+        bits(w, 9, 5),
+        0,
+        1,
+        false,
+        &format!("R.{f}[i] = A.{f}[{idx}];"),
+    ))
 }
 
 // ---------------------------------------------------------------- across lanes
@@ -942,8 +1049,16 @@ fn across(w: u32) -> Option<String> {
     let acc_t = if u { "uint64_t" } else { "int64_t" };
     let (init, step, out) = match opcode {
         0x03 => ("0", "acc += A.$f[i];".to_string(), U[size + 1]),
-        0x0A => ("A.$f[0]", "if (A.$f[i] > acc) acc = A.$f[i];".to_string(), U[size]),
-        0x1A => ("A.$f[0]", "if (A.$f[i] < acc) acc = A.$f[i];".to_string(), U[size]),
+        0x0A => (
+            "A.$f[0]",
+            "if (A.$f[i] > acc) acc = A.$f[i];".to_string(),
+            U[size],
+        ),
+        0x1A => (
+            "A.$f[0]",
+            "if (A.$f[i] < acc) acc = A.$f[i];".to_string(),
+            U[size],
+        ),
         0x1B if !u => ("0", "acc += A.$f[i];".to_string(), U[size]),
         _ => return None,
     };
@@ -975,14 +1090,23 @@ fn copy(w: u32) -> Option<String> {
             return None;
         }
         let idx2 = imm4 >> size;
-        return Some(format!("{{ {ut} t = c->v[{n}].{f}[{idx2}]; c->v[{d}].{f}[{idx}] = t; }}"));
+        return Some(format!(
+            "{{ {ut} t = c->v[{n}].{f}[{idx2}]; c->v[{d}].{f}[{idx}] = t; }}"
+        ));
     }
     match imm4 {
         0 => {
             if size == 3 && !q {
                 return None;
             }
-            Some(vl(d, n, n, cnt, false, &format!("R.{f}[i] = A.{f}[{idx}];")))
+            Some(vl(
+                d,
+                n,
+                n,
+                cnt,
+                false,
+                &format!("R.{f}[i] = A.{f}[{idx}];"),
+            ))
         }
         1 => {
             if size == 3 && !q {
@@ -999,9 +1123,13 @@ fn copy(w: u32) -> Option<String> {
                 return None;
             }
             if q {
-                Some(format!("c->x[{d}] = (uint64_t)(int64_t)c->v[{n}].{sf}[{idx}];"))
+                Some(format!(
+                    "c->x[{d}] = (uint64_t)(int64_t)c->v[{n}].{sf}[{idx}];"
+                ))
             } else {
-                Some(format!("c->x[{d}] = (uint32_t)(int32_t)c->v[{n}].{sf}[{idx}];"))
+                Some(format!(
+                    "c->x[{d}] = (uint32_t)(int32_t)c->v[{n}].{sf}[{idx}];"
+                ))
             }
         }
         7 => {
@@ -1028,14 +1156,44 @@ fn mod_imm(w: u32) -> Option<String> {
     let (imm, kind) = match cmode >> 1 {
         0..=3 => {
             let v = rep32(imm8 << (8 * (cmode >> 1)));
-            (v, if cmode & 1 == 0 { if op { 1 } else { 0 } } else if op { 3 } else { 2 })
+            (
+                v,
+                if cmode & 1 == 0 {
+                    if op {
+                        1
+                    } else {
+                        0
+                    }
+                } else if op {
+                    3
+                } else {
+                    2
+                },
+            )
         }
         4 | 5 => {
             let v = rep16(imm8 << (8 * ((cmode >> 1) & 1)));
-            (v, if cmode & 1 == 0 { if op { 1 } else { 0 } } else if op { 3 } else { 2 })
+            (
+                v,
+                if cmode & 1 == 0 {
+                    if op {
+                        1
+                    } else {
+                        0
+                    }
+                } else if op {
+                    3
+                } else {
+                    2
+                },
+            )
         }
         6 => {
-            let v = if cmode & 1 == 0 { (imm8 << 8) | 0xFF } else { (imm8 << 16) | 0xFFFF };
+            let v = if cmode & 1 == 0 {
+                (imm8 << 8) | 0xFF
+            } else {
+                (imm8 << 16) | 0xFFFF
+            };
             (rep32(v), if op { 1 } else { 0 })
         }
         _ => {
@@ -1071,8 +1229,22 @@ fn mod_imm(w: u32) -> Option<String> {
                 format!("bf_vset_d(c, {d}, 0x{v:x}ull);")
             }
         }
-        2 => vl(d, d, d, cnt, false, &format!("R.d[i] = D.d[i] | 0x{imm:x}ull;")),
-        _ => vl(d, d, d, cnt, false, &format!("R.d[i] = D.d[i] & ~0x{imm:x}ull;")),
+        2 => vl(
+            d,
+            d,
+            d,
+            cnt,
+            false,
+            &format!("R.d[i] = D.d[i] | 0x{imm:x}ull;"),
+        ),
+        _ => vl(
+            d,
+            d,
+            d,
+            cnt,
+            false,
+            &format!("R.d[i] = D.d[i] & ~0x{imm:x}ull;"),
+        ),
     })
 }
 
@@ -1127,7 +1299,14 @@ fn tbl(w: u32) -> Option<String> {
         s += &format!("memcpy(T + {}, &c->v[{}], 16); ", k * 16, (n + k) % 32);
     }
     let miss = if tbx { "D.b[i]" } else { "0" };
-    let body = vl(d, n, m, cnt, false, &format!("R.b[i] = B.b[i] < {} ? T[B.b[i]] : {miss};", len * 16));
+    let body = vl(
+        d,
+        n,
+        m,
+        cnt,
+        false,
+        &format!("R.b[i] = B.b[i] < {} ? T[B.b[i]] : {miss};", len * 16),
+    );
     Some(format!("{{ {s}{body} }}"))
 }
 
@@ -1149,13 +1328,22 @@ fn shift_imm(w: u32, scalar: bool) -> Option<String> {
     let rsh = 2 * eb - immhb;
     let lsh = immhb - eb;
     let (uf, sf, ut) = (U[size], S[size], UT[size]);
-    let (ua, sa, ud) = (format!("A.{uf}[i]"), format!("A.{sf}[i]"), format!("D.{uf}[i]"));
+    let (ua, sa, ud) = (
+        format!("A.{uf}[i]"),
+        format!("A.{sf}[i]"),
+        format!("D.{uf}[i]"),
+    );
     let cnt = if scalar { 1 } else { width / eb };
     let simple = matches!(opcode, 0 | 2 | 4 | 6 | 8 | 10);
     if simple && ((scalar && size != 3) || (!scalar && size == 3 && !q)) {
         return None;
     }
-    let shr = |round: u32| format!("({ut})bf_vshl({ua}, -{rsh}, {eb}, {}, {round}, 0)", !u as u32);
+    let shr = |round: u32| {
+        format!(
+            "({ut})bf_vshl({ua}, -{rsh}, {eb}, {}, {round}, 0)",
+            !u as u32
+        )
+    };
     let stmt = match (u, opcode) {
         (_, 0) => format!("R.{uf}[i] = {};", shr(0)),
         (_, 2) => format!("R.{uf}[i] = ({ut})({ud} + {});", shr(0)),
@@ -1172,9 +1360,14 @@ fn shift_imm(w: u32, scalar: bool) -> Option<String> {
         (false, 10) => format!("R.{uf}[i] = ({ut})((uint64_t){ua} << {lsh});"),
         (true, 10) => {
             let mask = (u64::MAX >> (64 - eb)) << lsh & (u64::MAX >> (64 - eb));
-            format!("R.{uf}[i] = ({ut})(({ud} & ~({ut})0x{mask:x}ull) | ((uint64_t){ua} << {lsh}));")
+            format!(
+                "R.{uf}[i] = ({ut})(({ud} & ~({ut})0x{mask:x}ull) | ((uint64_t){ua} << {lsh}));"
+            )
         }
-        (_, 14) => format!("R.{uf}[i] = ({ut})bf_vshl({ua}, {lsh}, {eb}, {}, 0, 1);", !u as u32),
+        (_, 14) => format!(
+            "R.{uf}[i] = ({ut})bf_vshl({ua}, {lsh}, {eb}, {}, 0, 1);",
+            !u as u32
+        ),
         (true, 12) => format!("R.{uf}[i] = ({ut})bf_sat_u((__int128){sa} << {lsh}, {eb});"),
         (_, 0x10..=0x13) => {
             if size == 3 {
@@ -1191,7 +1384,11 @@ fn shift_imm(w: u32, scalar: bool) -> Option<String> {
             } else {
                 format!("(__int128)A.{wu}[i]")
             };
-            let rnd = if round { format!(" + ((__int128)1 << {})", rsh_n - 1) } else { String::new() };
+            let rnd = if round {
+                format!(" + ((__int128)1 << {})", rsh_n - 1)
+            } else {
+                String::new()
+            };
             let v = format!("(({src}{rnd}) >> {rsh_n})");
             let val = match (u, opcode >> 1) {
                 (false, 8) => format!("({ut}){v}"),
@@ -1212,8 +1409,19 @@ fn shift_imm(w: u32, scalar: bool) -> Option<String> {
             let cntn = 64 / eb;
             let off = if q { cntn } else { 0 };
             let (wf, wt) = (U[size + 1], UT[size + 1]);
-            let src = if u { format!("A.{uf}[i + {off}]") } else { format!("(int64_t)A.{sf}[i + {off}]") };
-            return Some(vl(d, n, n, cntn, false, &format!("R.{wf}[i] = ({wt})((uint64_t)({src}) << {lsh});")));
+            let src = if u {
+                format!("A.{uf}[i + {off}]")
+            } else {
+                format!("(int64_t)A.{sf}[i + {off}]")
+            };
+            return Some(vl(
+                d,
+                n,
+                n,
+                cntn,
+                false,
+                &format!("R.{wf}[i] = ({wt})((uint64_t)({src}) << {lsh});"),
+            ));
         }
         (_, 0x1C) | (_, 0x1F) => {
             if size < 2 || (!scalar && size == 3 && !q) {
@@ -1223,14 +1431,21 @@ fn shift_imm(w: u32, scalar: bool) -> Option<String> {
             let fbits = rsh;
             let (f, fi) = (F[sz], FI[sz]);
             if opcode == 0x1C {
-                let v = if u { format!("A.{fi}[i]") } else { format!("A.{}[i]", S[size]) };
+                let v = if u {
+                    format!("A.{fi}[i]")
+                } else {
+                    format!("A.{}[i]", S[size])
+                };
                 if sz == 0 {
                     format!("R.f[i] = ldexpf((float){v}, -{fbits});")
                 } else {
                     format!("R.fd[i] = ldexp((double){v}, -{fbits});")
                 }
             } else {
-                format!("R.{fi}[i] = {}(ldexp((double)A.{f}[i], {fbits}), 3);", cvt_fn(!u, sz == 1))
+                format!(
+                    "R.{fi}[i] = {}(ldexp((double)A.{f}[i], {fbits}), 3);",
+                    cvt_fn(!u, sz == 1)
+                )
             }
         }
         _ => return None,
@@ -1248,13 +1463,18 @@ fn indexed(w: u32, scalar: bool) -> Option<String> {
     let opcode = bits(w, 15, 12);
     let (n, d) = (bits(w, 9, 5), bits(w, 4, 0));
     let width = if q { 128 } else { 64 };
-    let is_fp = matches!((u, opcode), (false, 1) | (false, 5) | (false, 9) | (true, 9));
+    let is_fp = matches!(
+        (u, opcode),
+        (false, 1) | (false, 5) | (false, 9) | (true, 9)
+    );
     if is_fp {
         if size < 2 {
             return None;
         }
         let sz = size & 1;
-        let (idx, m) = if sz == 0 { ((h << 1) | l, (mbit << 4) | rm4) } else {
+        let (idx, m) = if sz == 0 {
+            ((h << 1) | l, (mbit << 4) | rm4)
+        } else {
             if l == 1 {
                 return None;
             }
@@ -1293,13 +1513,24 @@ fn indexed(w: u32, scalar: bool) -> Option<String> {
         } else {
             format!("({wt})((int64_t)A.{sf}[i + {off}] * (int64_t)B.{sf}[{idx}])")
         };
-        let sq = format!("bf_sat_s(2 * (__int128)A.{sf}[i + {off}] * B.{sf}[{idx}], {})", 2 * eb);
+        let sq = format!(
+            "bf_sat_s(2 * (__int128)A.{sf}[i + {off}] * B.{sf}[{idx}], {})",
+            2 * eb
+        );
         let stmt = match (u, opcode) {
             (_, 2) if !scalar => format!("R.{wf}[i] = ({wt})(D.{wf}[i] + {prod});"),
             (_, 6) if !scalar => format!("R.{wf}[i] = ({wt})(D.{wf}[i] - {prod});"),
             (_, 10) if !scalar => format!("R.{wf}[i] = {prod};"),
-            (false, 3) => format!("R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{}[i] + {sq}, {});", S[size + 1], 2 * eb),
-            (false, 7) => format!("R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{}[i] - {sq}, {});", S[size + 1], 2 * eb),
+            (false, 3) => format!(
+                "R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{}[i] + {sq}, {});",
+                S[size + 1],
+                2 * eb
+            ),
+            (false, 7) => format!(
+                "R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{}[i] - {sq}, {});",
+                S[size + 1],
+                2 * eb
+            ),
             (false, 11) => format!("R.{wf}[i] = ({wt}){sq};"),
             _ => return None,
         };
@@ -1311,7 +1542,11 @@ fn indexed(w: u32, scalar: bool) -> Option<String> {
         (true, 4) if !scalar => format!("R.{uf}[i] = ({ut})(D.{uf}[i] - A.{uf}[i] * {e});"),
         (false, 8) if !scalar => format!("R.{uf}[i] = ({ut})(A.{uf}[i] * {e});"),
         (false, 12) | (false, 13) => {
-            let rnd = if opcode == 13 { format!(" + ((__int128)1 << {})", eb - 1) } else { String::new() };
+            let rnd = if opcode == 13 {
+                format!(" + ((__int128)1 << {})", eb - 1)
+            } else {
+                String::new()
+            };
             format!("R.{uf}[i] = ({ut})bf_sat_s((2 * (__int128)A.{sf}[i] * B.{sf}[{idx}]{rnd}) >> {eb}, {eb});")
         }
         _ => return None,
@@ -1360,7 +1595,10 @@ fn three_diff(w: u32, scalar: bool) -> Option<String> {
     if scalar && !(matches!(opcode, 9 | 11 | 13) && !u) {
         return None;
     }
-    let sq = format!("bf_sat_s(2 * (__int128)A.{nsf}[i + {off}] * B.{nsf}[i + {off}], {})", 2 * eb);
+    let sq = format!(
+        "bf_sat_s(2 * (__int128)A.{nsf}[i + {off}] * B.{nsf}[i + {off}], {})",
+        2 * eb
+    );
     let stmt = match (u, opcode) {
         (_, 0) => format!("R.{wf}[i] = ({wt})({ea} + {eb_});"),
         (_, 1) => format!("R.{wf}[i] = ({wt})(A.{wf}[i] + {eb_});"),
@@ -1368,14 +1606,20 @@ fn three_diff(w: u32, scalar: bool) -> Option<String> {
         (_, 3) => format!("R.{wf}[i] = ({wt})(A.{wf}[i] - {eb_});"),
         (_, 4) | (_, 6) => {
             let op = if opcode == 4 { "+" } else { "-" };
-            let rnd = if u { format!(" + (({wt})1 << {})", eb - 1) } else { String::new() };
+            let rnd = if u {
+                format!(" + (({wt})1 << {})", eb - 1)
+            } else {
+                String::new()
+            };
             return Some(vl(
                 d,
                 n,
                 m,
                 cnt,
                 q,
-                &format!("R.{nf}[i + {off}] = ({nt})((({wt})(A.{wf}[i] {op} B.{wf}[i]){rnd}) >> {eb});"),
+                &format!(
+                    "R.{nf}[i + {off}] = ({nt})((({wt})(A.{wf}[i] {op} B.{wf}[i]){rnd}) >> {eb});"
+                ),
             ));
         }
         (_, 5) => format!("R.{wf}[i] = ({wt})(D.{wf}[i] + {absd});"),
@@ -1383,8 +1627,14 @@ fn three_diff(w: u32, scalar: bool) -> Option<String> {
         (_, 8) => format!("R.{wf}[i] = ({wt})(D.{wf}[i] + {prod});"),
         (_, 10) => format!("R.{wf}[i] = ({wt})(D.{wf}[i] - {prod});"),
         (_, 12) => format!("R.{wf}[i] = {prod};"),
-        (false, 9) => format!("R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{wsf}[i] + {sq}, {});", 2 * eb),
-        (false, 11) => format!("R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{wsf}[i] - {sq}, {});", 2 * eb),
+        (false, 9) => format!(
+            "R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{wsf}[i] + {sq}, {});",
+            2 * eb
+        ),
+        (false, 11) => format!(
+            "R.{wf}[i] = ({wt})bf_sat_s((__int128)D.{wsf}[i] - {sq}, {});",
+            2 * eb
+        ),
         (false, 13) => format!("R.{wf}[i] = ({wt}){sq};"),
         _ => return None,
     };

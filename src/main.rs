@@ -41,6 +41,9 @@ enum Cmd {
         /// Android SDK folder for --compile android (defaults to ANDROID_HOME)
         #[arg(long)]
         android_sdk: Option<PathBuf>,
+        /// Renderer dependencies (scripts/build_android_deps.sh output) for NVN titles; defaults to BIFROST_ANDROID_DEPS
+        #[arg(long)]
+        android_deps: Option<PathBuf>,
         /// File with extra code entry points (one hex address per line, e.g. bifrost_missing.txt)
         #[arg(long)]
         extra_entries: Vec<PathBuf>,
@@ -98,7 +101,18 @@ fn main() -> ExitCode {
 fn run() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::LiftWords { pc, words } => lift_words(&pc, &words),
-        Cmd::Build { inputs, out, update, patch, romfs, dlc, android_sdk, extra_entries, compile } => {
+        Cmd::Build {
+            inputs,
+            out,
+            update,
+            patch,
+            romfs,
+            dlc,
+            android_sdk,
+            android_deps,
+            extra_entries,
+            compile,
+        } => {
             let opts = bifrost::pipeline::BuildOptions {
                 inputs,
                 updates: update,
@@ -109,6 +123,7 @@ fn run() -> anyhow::Result<()> {
                 out,
                 target: compile.parse()?,
                 android_sdk,
+                android_deps,
                 ..Default::default()
             };
             build(&opts)
@@ -162,11 +177,7 @@ fn recompile(file: &std::path::Path, out: &std::path::Path) -> anyhow::Result<()
     let module = bifrost::load_path(file).with_context(|| format!("loading {}", file.display()))?;
     let lifted = bifrost::lift(&module);
     let report = bifrost::emit(&module, &lifted, out)?;
-    println!(
-        "wrote {} files to {}",
-        report.files.len(),
-        out.display()
-    );
+    println!("wrote {} files to {}", report.files.len(), out.display());
     println!(
         "lifted {} instructions, {} unsupported, {} imports",
         report.lifted, report.unsupported, report.imports
@@ -215,7 +226,10 @@ fn run_module(
 }
 
 fn parse_hex(text: &str) -> anyhow::Result<u64> {
-    let text = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")).unwrap_or(text);
+    let text = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
     u64::from_str_radix(text, 16).with_context(|| format!("expected hex, found {text}"))
 }
 
@@ -237,7 +251,12 @@ fn build(opts: &bifrost::pipeline::BuildOptions) -> anyhow::Result<()> {
     use bifrost::pipeline::Event;
     let mut last = String::new();
     let result = bifrost::pipeline::run(opts, &mut |ev| match ev {
-        Event::Progress(_, step) if step != last && !step.contains("compiled") && !step.starts_with("Copying") && !step.starts_with("Packing") => {
+        Event::Progress(_, step)
+            if step != last
+                && !step.contains("compiled")
+                && !step.starts_with("Copying")
+                && !step.starts_with("Packing") =>
+        {
             eprintln!("[bifrost] {step}");
             last = step;
         }

@@ -59,23 +59,23 @@ fn refuse_container(data: &[u8]) -> Result<()> {
 }
 
 pub(crate) fn read_u32(data: &[u8], off: usize) -> Result<u32> {
-    let bytes = data.get(off..off + 4).ok_or_else(|| {
-        Error::message(format!("truncated read of u32 at {off:#x}"))
-    })?;
+    let bytes = data
+        .get(off..off + 4)
+        .ok_or_else(|| Error::message(format!("truncated read of u32 at {off:#x}")))?;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 pub(crate) fn read_u16(data: &[u8], off: usize) -> Result<u16> {
-    let bytes = data.get(off..off + 2).ok_or_else(|| {
-        Error::message(format!("truncated read of u16 at {off:#x}"))
-    })?;
+    let bytes = data
+        .get(off..off + 2)
+        .ok_or_else(|| Error::message(format!("truncated read of u16 at {off:#x}")))?;
     Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 pub(crate) fn read_u64(data: &[u8], off: usize) -> Result<u64> {
-    let bytes = data.get(off..off + 8).ok_or_else(|| {
-        Error::message(format!("truncated read of u64 at {off:#x}"))
-    })?;
+    let bytes = data
+        .get(off..off + 8)
+        .ok_or_else(|| Error::message(format!("truncated read of u64 at {off:#x}")))?;
     Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 

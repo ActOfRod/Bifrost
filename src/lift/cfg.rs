@@ -48,7 +48,11 @@ fn bits(w: u32, hi: u32, lo: u32) -> u32 {
 
 pub fn lift_program(src: &dyn CodeSource, entries: &BTreeSet<u64>) -> Lifted {
     let mut out = Lifted::default();
-    let mut fn_queue: VecDeque<u64> = entries.iter().copied().filter(|&a| src.is_code(a) && a % 4 == 0).collect();
+    let mut fn_queue: VecDeque<u64> = entries
+        .iter()
+        .copied()
+        .filter(|&a| src.is_code(a) && a % 4 == 0)
+        .collect();
     let mut known_fns: BTreeSet<u64> = fn_queue.iter().copied().collect();
     while let Some(entry) = fn_queue.pop_front() {
         let mut leaders = BTreeSet::new();
@@ -66,7 +70,11 @@ pub fn lift_program(src: &dyn CodeSource, entries: &BTreeSet<u64>) -> Lifted {
                 let op = out
                     .insns
                     .entry(pc)
-                    .or_insert_with(|| Insn { address: pc, word, op: decode(word, pc) })
+                    .or_insert_with(|| Insn {
+                        address: pc,
+                        word,
+                        op: decode(word, pc),
+                    })
                     .op
                     .clone();
                 window.push((pc, word));
@@ -169,10 +177,21 @@ fn jump_table(src: &dyn CodeSource, window: &[(u64, u32)]) -> Option<Vec<u64>> {
             let size = bits(word, 31, 30);
             let opc = bits(word, 23, 22);
             if opc == 1 || opc == 2 {
-                load = Some((bits(word, 4, 0), bits(word, 9, 5), bits(word, 20, 16), size, opc == 2));
+                load = Some((
+                    bits(word, 4, 0),
+                    bits(word, 9, 5),
+                    bits(word, 20, 16),
+                    size,
+                    opc == 2,
+                ));
             }
         } else if word & 0x7FE0_0000 == 0x0B20_0000 || word & 0xFFE0_0000 == 0x8B20_0000 {
-            add = Some((bits(word, 4, 0), bits(word, 9, 5), bits(word, 20, 16), bits(word, 12, 10)));
+            add = Some((
+                bits(word, 4, 0),
+                bits(word, 9, 5),
+                bits(word, 20, 16),
+                bits(word, 12, 10),
+            ));
         }
     }
     let (adst, abase, aelem, ashift) = add?;

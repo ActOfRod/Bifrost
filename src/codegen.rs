@@ -40,15 +40,25 @@ pub fn generate(lifted: &Lifted) -> GeneratedC {
         }
     }
     rows.sort_unstable();
-    let mut dispatch = String::from("#include \"bf_funcs.h\"\n#include \"bf_runtime.h\"\n\nconst BfEntry bf_entries[] = {\n");
+    let mut dispatch = String::from(
+        "#include \"bf_funcs.h\"\n#include \"bf_runtime.h\"\n\nconst BfEntry bf_entries[] = {\n",
+    );
     for (addr, f) in &rows {
         let _ = writeln!(dispatch, "    {{0x{addr:x}ull, f_{f:x}}},");
     }
     if rows.is_empty() {
         dispatch.push_str("    {0, 0},\n");
     }
-    let _ = writeln!(dispatch, "}};\nconst size_t bf_entry_count = {};", rows.len());
-    GeneratedC { header, units, dispatch }
+    let _ = writeln!(
+        dispatch,
+        "}};\nconst size_t bf_entry_count = {};",
+        rows.len()
+    );
+    GeneratedC {
+        header,
+        units,
+        dispatch,
+    }
 }
 
 fn emit_function(s: &mut String, lifted: &Lifted, entry: u64, leaders: &BTreeSet<u64>) {
@@ -124,13 +134,23 @@ fn emit_function(s: &mut String, lifted: &Lifted, entry: u64, leaders: &BTreeSet
                     let _ = writeln!(s, "    c->pc = c->x[{reg}]; return;");
                 }
                 Op::Svc { imm } => {
-                    let _ = writeln!(s, "    c->pc = 0x{next:x}ull; bf_svc(c, {imm}, 0x{pc:x}ull);");
+                    let _ = writeln!(
+                        s,
+                        "    c->pc = 0x{next:x}ull; bf_svc(c, {imm}, 0x{pc:x}ull);"
+                    );
                 }
                 Op::Brk { imm } => {
-                    let _ = writeln!(s, "    c->pc = 0x{pc:x}ull; bf_brk(c, {imm}, 0x{pc:x}ull); return;");
+                    let _ = writeln!(
+                        s,
+                        "    c->pc = 0x{pc:x}ull; bf_brk(c, {imm}, 0x{pc:x}ull); return;"
+                    );
                 }
                 Op::Udf | Op::Unsupported => {
-                    let _ = writeln!(s, "    c->pc = 0x{pc:x}ull; bf_unimpl(c, 0x{pc:x}ull, 0x{:08x}u); return;", insn.word);
+                    let _ = writeln!(
+                        s,
+                        "    c->pc = 0x{pc:x}ull; bf_unimpl(c, 0x{pc:x}ull, 0x{:08x}u); return;",
+                        insn.word
+                    );
                 }
             }
             if insn.op.is_terminator() {

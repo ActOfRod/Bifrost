@@ -130,11 +130,15 @@ impl Module {
     }
 
     pub fn exports(&self) -> impl Iterator<Item = &Symbol> {
-        self.symbols.iter().filter(|sym| sym.defined && !sym.name.is_empty())
+        self.symbols
+            .iter()
+            .filter(|sym| sym.defined && !sym.name.is_empty())
     }
 
     pub fn undefined(&self) -> impl Iterator<Item = &Symbol> {
-        self.symbols.iter().filter(|sym| !sym.defined && !sym.name.is_empty())
+        self.symbols
+            .iter()
+            .filter(|sym| !sym.defined && !sym.name.is_empty())
     }
 }
 

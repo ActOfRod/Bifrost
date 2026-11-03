@@ -69,16 +69,30 @@ pub fn parse(name: &str, data: &[u8]) -> Result<Module> {
         ".data",
     )?;
 
-    check_hash(".text", &text, &data[0xA0..0xC0], flags & FLAG_TEXT_HASH != 0)?;
+    check_hash(
+        ".text",
+        &text,
+        &data[0xA0..0xC0],
+        flags & FLAG_TEXT_HASH != 0,
+    )?;
     check_hash(".rodata", &ro, &data[0xC0..0xE0], flags & FLAG_RO_HASH != 0)?;
-    check_hash(".data", &data_seg, &data[0xE0..0x100], flags & FLAG_DATA_HASH != 0)?;
+    check_hash(
+        ".data",
+        &data_seg,
+        &data[0xE0..0x100],
+        flags & FLAG_DATA_HASH != 0,
+    )?;
 
     let mut module = empty_module(Format::Nso, name);
     module.module_id = module_id;
     module.image_base = 0;
-    module.notes.push(format!("NSO version {version}, flags {flags:#x}"));
+    module
+        .notes
+        .push(format!("NSO version {version}, flags {flags:#x}"));
     if flags & (FLAG_TEXT_COMPRESS | FLAG_RO_COMPRESS | FLAG_DATA_COMPRESS) != 0 {
-        module.notes.push("one or more segments were LZ4-compressed".into());
+        module
+            .notes
+            .push("one or more segments were LZ4-compressed".into());
     }
 
     let bss_va = data_mem as u64 + data_seg.len() as u64;
@@ -122,7 +136,10 @@ pub fn parse(name: &str, data: &[u8]) -> Result<Module> {
         let start = ro_mem as u64 + module_name_off as u64;
         if let Some(bytes) = module.read(start, module_name_size as usize) {
             let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-            if bytes[..end].iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+            if bytes[..end]
+                .iter()
+                .all(|b| b.is_ascii_graphic() || *b == b' ')
+            {
                 let label = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
                 if !label.is_empty() {
                     module.name = label;
@@ -139,7 +156,7 @@ pub fn parse(name: &str, data: &[u8]) -> Result<Module> {
     // module by encoding it into init temporarily? No — pass through a thread-local is
     // worse. analysis::finalize looks at MOD0 first and falls back to rodata-relative
     // header fields, which we store by writing them into notes as structured text.
-    // Cleaner: attach the hint by placing sentinel relocs? 
+    // Cleaner: attach the hint by placing sentinel relocs?
     // The parser returns the module and finalize is called by load_bytes, which does
     // not see the hint. Store the hint in unused relocation-sized notes instead.
     let _hint = SymbolHint {
@@ -162,13 +179,15 @@ fn inflate(
     name: &str,
 ) -> Result<Vec<u8>> {
     if mem_size as u64 > MAX_SEGMENT {
-        return Err(Error::message(format!("{name} is larger than {MAX_SEGMENT:#x}")));
+        return Err(Error::message(format!(
+            "{name} is larger than {MAX_SEGMENT:#x}"
+        )));
     }
     let take = if compressed { file_size } else { mem_size };
     let start = file_off as usize;
-    let end = start.checked_add(take as usize).ok_or_else(|| {
-        Error::message(format!("{name} file range overflows"))
-    })?;
+    let end = start
+        .checked_add(take as usize)
+        .ok_or_else(|| Error::message(format!("{name} file range overflows")))?;
     let bytes = file.get(start..end).ok_or_else(|| {
         Error::message(format!(
             "{name} file range {start:#x}..{end:#x} exceeds the file"
@@ -177,19 +196,18 @@ fn inflate(
     if !compressed {
         return Ok(bytes.to_vec());
     }
-    lz4_flex::block::decompress(bytes, mem_size as usize).map_err(|err| {
-        Error::message(format!("{name} LZ4 decompress failed: {err}"))
-    })
+    lz4_flex::block::decompress(bytes, mem_size as usize)
+        .map_err(|err| Error::message(format!("{name} LZ4 decompress failed: {err}")))
 }
 
 fn place(image: &mut [u8], mem_off: u32, bytes: &[u8]) -> Result<()> {
     let start = mem_off as usize;
-    let end = start.checked_add(bytes.len()).ok_or_else(|| {
-        Error::message("segment placement overflows")
-    })?;
-    let dst = image.get_mut(start..end).ok_or_else(|| {
-        Error::message(format!("segment at {start:#x} does not fit the image"))
-    })?;
+    let end = start
+        .checked_add(bytes.len())
+        .ok_or_else(|| Error::message("segment placement overflows"))?;
+    let dst = image
+        .get_mut(start..end)
+        .ok_or_else(|| Error::message(format!("segment at {start:#x} does not fit the image")))?;
     if dst.iter().any(|b| *b != 0) {
         return Err(Error::message(format!(
             "segment at {start:#x} overlaps another segment"

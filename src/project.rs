@@ -60,7 +60,12 @@ fn c_str(s: &str) -> String {
     out
 }
 
-pub fn write_project(program: &Program, lifted: &Lifted, info: &ProjectInfo, out: &Path) -> io::Result<BuildReport> {
+pub fn write_project(
+    program: &Program,
+    lifted: &Lifted,
+    info: &ProjectInfo,
+    out: &Path,
+) -> io::Result<BuildReport> {
     fs::create_dir_all(out)?;
     for (name, text) in RUNTIME_FILES {
         fs::write(out.join(name), text)?;
@@ -74,7 +79,8 @@ pub fn write_project(program: &Program, lifted: &Lifted, info: &ProjectInfo, out
 
     let segments = program.segments();
     let mut blob = Vec::new();
-    let mut image = String::from("#include \"bf_runtime.h\"\n\nconst BfSegment bf_segments[] = {\n");
+    let mut image =
+        String::from("#include \"bf_runtime.h\"\n\nconst BfSegment bf_segments[] = {\n");
     for s in &segments {
         let off = blob.len();
         blob.extend_from_slice(&s.bytes);
@@ -92,11 +98,27 @@ pub fn write_project(program: &Program, lifted: &Lifted, info: &ProjectInfo, out
     if segments.is_empty() {
         image.push_str("    {0, 0, 0, 0, 0, 0, \"\"},\n");
     }
-    let _ = writeln!(image, "}};\nconst size_t bf_segment_count = {};", segments.len());
-    let _ = writeln!(image, "const uint64_t bf_entry_point = 0x{:x}ull;", program.entry);
-    let _ = writeln!(image, "const int bf_entry_is_nro = {};", program.is_nro as i32);
+    let _ = writeln!(
+        image,
+        "}};\nconst size_t bf_segment_count = {};",
+        segments.len()
+    );
+    let _ = writeln!(
+        image,
+        "const uint64_t bf_entry_point = 0x{:x}ull;",
+        program.entry
+    );
+    let _ = writeln!(
+        image,
+        "const int bf_entry_is_nro = {};",
+        program.is_nro as i32
+    );
     let _ = writeln!(image, "const char bf_title_name[] = {};", c_str(info.title));
-    let _ = writeln!(image, "const uint64_t bf_title_id = 0x{:016x}ull;", info.title_id);
+    let _ = writeln!(
+        image,
+        "const uint64_t bf_title_id = 0x{:016x}ull;",
+        info.title_id
+    );
     image.push_str("const BfImport bf_imports[] = {\n");
     for (sentinel, name) in &program.imports {
         let _ = writeln!(image, "    {{0x{sentinel:x}ull, {}}},", c_str(name));
@@ -104,7 +126,11 @@ pub fn write_project(program: &Program, lifted: &Lifted, info: &ProjectInfo, out
     if program.imports.is_empty() {
         image.push_str("    {0, \"\"},\n");
     }
-    let _ = writeln!(image, "}};\nconst size_t bf_import_count = {};", program.imports.len());
+    let _ = writeln!(
+        image,
+        "}};\nconst size_t bf_import_count = {};",
+        program.imports.len()
+    );
     fs::write(out.join("bf_image.c"), image)?;
     fs::write(out.join("guest_image.bin"), &blob)?;
 

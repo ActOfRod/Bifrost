@@ -53,6 +53,8 @@ pub struct BuildOptions {
     pub target: Target,
     /// Android SDK folder; falls back to `ANDROID_HOME` / `ANDROID_SDK_ROOT`.
     pub android_sdk: Option<PathBuf>,
+    /// NVN → Vulkan renderer dependencies (scripts/build_android_deps.sh output).
+    pub android_deps: Option<PathBuf>,
     /// RomFS images above this size are left beside the APK instead of being embedded.
     pub android_embed_limit: u64,
 }
@@ -70,6 +72,7 @@ impl Default for BuildOptions {
             out: PathBuf::from("out"),
             target: Target::None,
             android_sdk: None,
+            android_deps: None,
             android_embed_limit: 1 << 30,
         }
     }
@@ -111,11 +114,19 @@ fn parse_hex(text: &str) -> Result<u64> {
 }
 
 /// Copy or pack a RomFS into `dst`, reporting byte progress mapped onto `lo..hi`.
-fn materialise_romfs(src: &RomfsSource, dst: &Path, r: &mut Reporter, lo: f32, hi: f32, label: &str) -> Result<u64> {
+fn materialise_romfs(
+    src: &RomfsSource,
+    dst: &Path,
+    r: &mut Reporter,
+    lo: f32,
+    hi: f32,
+    label: &str,
+) -> Result<u64> {
     match src {
         RomfsSource::Image(img) => {
             use std::io::{Read, Seek, SeekFrom, Write};
-            let mut f = std::fs::File::open(&img.path).with_context(|| format!("open {}", img.path.display()))?;
+            let mut f = std::fs::File::open(&img.path)
+                .with_context(|| format!("open {}", img.path.display()))?;
             f.seek(SeekFrom::Start(img.offset))?;
             let mut out = std::io::BufWriter::new(std::fs::File::create(dst)?);
             let mut buf = vec![0u8; 4 << 20];
@@ -128,7 +139,10 @@ fn materialise_romfs(src: &RomfsSource, dst: &Path, r: &mut Reporter, lo: f32, h
                 }
                 out.write_all(&buf[..n])?;
                 done += n as u64;
-                r.at(lo + (hi - lo) * done as f32 / img.size.max(1) as f32, format!("Copying {label}"));
+                r.at(
+                    lo + (hi - lo) * done as f32 / img.size.max(1) as f32,
+                    format!("Copying {label}"),
+                );
             }
             out.flush()?;
             Ok(img.size)
@@ -136,7 +150,10 @@ fn materialise_romfs(src: &RomfsSource, dst: &Path, r: &mut Reporter, lo: f32, h
         RomfsSource::Dir(dir) => {
             let label = format!("Packing {label} from {}", dir.display());
             crate::romfs::build_from_dir(dir, dst, &mut |done, total| {
-                r.at(lo + (hi - lo) * done as f32 / total.max(1) as f32, label.clone());
+                r.at(
+                    lo + (hi - lo) * done as f32 / total.max(1) as f32,
+                    label.clone(),
+                );
             })
         }
     }
@@ -158,14 +175,21 @@ fn compile_and_link(
     label: &str,
 ) -> Result<()> {
     std::fs::create_dir_all(obj_dir)?;
-    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let next = Arc::new(AtomicUsize::new(0));
     let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let (tx, rx) = mpsc::channel::<()>();
     let objs: Vec<PathBuf> = sources
         .iter()
         .enumerate()
-        .map(|(i, s)| obj_dir.join(format!("{i:04}_{}.o", s.file_stem().unwrap().to_string_lossy())))
+        .map(|(i, s)| {
+            obj_dir.join(format!(
+                "{i:04}_{}.o",
+                s.file_stem().unwrap().to_string_lossy()
+            ))
+        })
         .collect();
     std::thread::scope(|scope| {
         for _ in 0..jobs.min(sources.len().max(1)) {
@@ -187,10 +211,16 @@ fn compile_and_link(
                 match out {
                     Ok(o) if o.status.success() => {}
                     Ok(o) => {
-                        *failure.lock().unwrap() =
-                            Some(format!("{} failed on {}: {}", cc.display(), sources[i].display(), String::from_utf8_lossy(&o.stderr)))
+                        *failure.lock().unwrap() = Some(format!(
+                            "{} failed on {}: {}",
+                            cc.display(),
+                            sources[i].display(),
+                            String::from_utf8_lossy(&o.stderr)
+                        ))
                     }
-                    Err(e) => *failure.lock().unwrap() = Some(format!("cannot run {}: {e}", cc.display())),
+                    Err(e) => {
+                        *failure.lock().unwrap() = Some(format!("cannot run {}: {e}", cc.display()))
+                    }
                 }
                 let _ = tx.send(());
             });
@@ -199,7 +229,10 @@ fn compile_and_link(
         let mut done = 0;
         while rx.recv().is_ok() {
             done += 1;
-            r.at(lo + (hi - lo) * 0.9 * done as f32 / sources.len() as f32, format!("{label}: compiled {done}/{}", sources.len()));
+            r.at(
+                lo + (hi - lo) * 0.9 * done as f32 / sources.len() as f32,
+                format!("{label}: compiled {done}/{}", sources.len()),
+            );
         }
     });
     if let Some(e) = failure.lock().unwrap().take() {
@@ -215,7 +248,11 @@ fn compile_and_link(
         .output()
         .with_context(|| format!("run {}", cc.display()))?;
     if !out.status.success() {
-        bail!("linking {} failed: {}", output.display(), String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "linking {} failed: {}",
+            output.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Ok(())
 }
@@ -250,17 +287,24 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
     notes.extend(load_notes);
     let patches = intake::expand_patch_paths(&opts.patches)?;
     for (i, p) in patches.iter().enumerate() {
-        r.at(0.06 + 0.02 * i as f32 / patches.len() as f32, format!("Applying {}", p.display()));
+        r.at(
+            0.06 + 0.02 * i as f32 / patches.len() as f32,
+            format!("Applying {}", p.display()),
+        );
         notes.push(intake::apply_patch(&mut modules, p)?);
     }
     r.at(0.08, "Linking modules");
     let program = crate::link::link(modules);
     for m in &program.modules {
-        r.log(format!("module {:<10} base {:#x} entry {:#x} text {:#x} bytes", m.name, m.image_base, m.entry, m.text.size));
+        r.log(format!(
+            "module {:<10} base {:#x} entry {:#x} text {:#x} bytes",
+            m.name, m.image_base, m.entry, m.text.size
+        ));
     }
     let mut entries: BTreeSet<u64> = program.entry_points();
     for file in &opts.extra_entries {
-        let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+        let text =
+            std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let va = parse_hex(line)?;
             if program.is_code(va) {
@@ -273,13 +317,27 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
     let lifted = lift_program(&program, &entries);
     r.at(0.35, format!("Lifted {} functions", lifted.functions.len()));
     let title = content.title.clone().unwrap_or_else(|| {
-        opts.inputs[0].file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "guest".into())
+        opts.inputs[0]
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "guest".into())
     });
-    let exe: String = title.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    let exe = if exe.is_empty() { "guest".to_string() } else { exe };
+    let exe: String = title
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let exe = if exe.is_empty() {
+        "guest".to_string()
+    } else {
+        exe
+    };
 
     r.at(0.36, "Generating C");
-    let info = ProjectInfo { title: &title, title_id: content.title_id, exe_name: &exe };
+    let info = ProjectInfo {
+        title: &title,
+        title_id: content.title_id,
+        exe_name: &exe,
+    };
     let report = project::write_project(&program, &lifted, &info, out)?;
     for (va, word) in lifted.stats.examples.iter().take(8) {
         r.log(format!("unsupported {word:08x} at {va:#x}"));
@@ -288,15 +346,27 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
     let romfs_dst = out.join("romfs.bin");
     let same_file = |p: &Path| p.canonicalize().is_ok_and(|p| p == romfs_dst);
     let in_place = opts.romfs.as_deref().is_some_and(same_file)
-        || (opts.romfs.is_none() && content.romfs.as_ref().is_some_and(|r| r.offset == 0 && same_file(&r.path)));
+        || (opts.romfs.is_none()
+            && content
+                .romfs
+                .as_ref()
+                .is_some_and(|r| r.offset == 0 && same_file(&r.path)));
     if !in_place {
         let _ = std::fs::remove_file(&romfs_dst);
     }
     let romfs = match &opts.romfs {
         _ if in_place => None,
         Some(p) if p.is_dir() => Some(RomfsSource::Dir(p.clone())),
-        Some(p) => Some(RomfsSource::Image(RomfsRef { size: std::fs::metadata(p)?.len(), path: p.clone(), offset: 0 })),
-        None => content.romfs.clone().map(RomfsSource::Image).or_else(|| content.romfs_dir.clone().map(RomfsSource::Dir)),
+        Some(p) => Some(RomfsSource::Image(RomfsRef {
+            size: std::fs::metadata(p)?.len(),
+            path: p.clone(),
+            offset: 0,
+        })),
+        None => content
+            .romfs
+            .clone()
+            .map(RomfsSource::Image)
+            .or_else(|| content.romfs_dir.clone().map(RomfsSource::Dir)),
     };
     let romfs_size = match &romfs {
         Some(src) => materialise_romfs(src, &romfs_dst, &mut r, 0.45, 0.62, "RomFS")?,
@@ -315,7 +385,14 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
         for (i, p) in opts.dlc.iter().enumerate() {
             let src = intake::dlc_romfs(p)?;
             let (lo, hi) = (0.62 + 0.06 * i as f32 / n, 0.62 + 0.06 * (i + 1) as f32 / n);
-            materialise_romfs(&src, &dlc_dir.join(format!("{}.romfs", i + 1)), &mut r, lo, hi, &format!("DLC {}", i + 1))?;
+            materialise_romfs(
+                &src,
+                &dlc_dir.join(format!("{}.romfs", i + 1)),
+                &mut r,
+                lo,
+                hi,
+                &format!("DLC {}", i + 1),
+            )?;
             r.log(format!("DLC {} ← {}", i + 1, p.display()));
         }
     }
@@ -329,65 +406,174 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
     let artifact = match opts.target {
         Target::None => None,
         Target::Native | Target::Windows => {
-            let (cc, file, ldflags): (String, String, Vec<String>) = if opts.target == Target::Native {
-                let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-                let file = if cfg!(windows) { format!("{exe}.exe") } else { exe.clone() };
-                let ld = if cfg!(windows) { vec![] } else { vec!["-lpthread".into(), "-lm".into()] };
-                (cc, file, ld)
-            } else {
-                let cc = if cfg!(windows) { "gcc".to_string() } else { "x86_64-w64-mingw32-gcc".to_string() };
-                (cc, format!("{exe}.exe"), vec!["-static".into()])
-            };
+            let (cc, file, ldflags): (String, String, Vec<String>) =
+                if opts.target == Target::Native {
+                    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+                    let file = if cfg!(windows) {
+                        format!("{exe}.exe")
+                    } else {
+                        exe.clone()
+                    };
+                    let ld = if cfg!(windows) {
+                        vec![]
+                    } else {
+                        vec!["-lpthread".into(), "-lm".into()]
+                    };
+                    (cc, file, ld)
+                } else {
+                    let cc = if cfg!(windows) {
+                        "gcc".to_string()
+                    } else {
+                        "x86_64-w64-mingw32-gcc".to_string()
+                    };
+                    (cc, format!("{exe}.exe"), vec!["-static".into()])
+                };
             let output = out.join(&file);
-            compile_and_link(Path::new(&cc), out, &sources, &[], &ldflags, &out.join("obj"), &output, &mut r, 0.68, 0.99, "Compiling")?;
+            compile_and_link(
+                Path::new(&cc),
+                out,
+                &sources,
+                &[],
+                &ldflags,
+                &out.join("obj"),
+                &output,
+                &mut r,
+                0.68,
+                0.99,
+                "Compiling",
+            )?;
             Some(output)
         }
         Target::Android => {
             let sdk = sdk.expect("located above");
-            android::write_sources(out, &android::package_name(content.title_id, &exe), &title)?;
-            let clang = sdk.clang()?;
-            let glue = sdk.glue_dir().join("android_native_app_glue.c");
-            let mut all = sources.clone();
-            all.push(PathBuf::from("bf_android.c.in"));
-            all.push(glue);
-            let mut libs = Vec::new();
-            let n = android::ABIS.len() as f32;
-            for (i, (abi, triple)) in android::ABIS.iter().enumerate() {
-                let (lo, hi) = (0.68 + 0.27 * i as f32 / n, 0.68 + 0.27 * (i + 1) as f32 / n);
-                let mut cflags = android::compile_args(&sdk, triple);
+            let package = android::package_name(content.title_id, &exe);
+            let embed = romfs_size > 0 && romfs_size <= opts.android_embed_limit;
+            if romfs_size > 0 && !embed {
+                notes.push(format!(
+                    "RomFS is {} MiB, too large to embed: copy romfs.bin to /sdcard/Android/data/{package}/files/ on the device",
+                    romfs_size >> 20
+                ));
+            }
+            let nvn = program
+                .imports
+                .iter()
+                .any(|(_, n)| android::NVN_IMPORTS.contains(&n.as_str()));
+            let deps = if nvn {
+                android::RendererDeps::locate(opts.android_deps.as_deref())
+            } else {
+                None
+            };
+            if nvn && deps.is_none() {
+                notes.push(
+                    "title draws through NVN but the renderer dependencies were not found (run scripts/build_android_deps.sh, \
+                     then pass --android-deps); this APK has no renderer"
+                        .into(),
+                );
+            }
+            if let Some(deps) = deps {
+                android::write_sources(out, &package, &title)?;
+                std::fs::write(
+                    out.join("android").join("AndroidManifest.xml"),
+                    android::renderer_manifest(&package, &title),
+                )?;
+                let clang = sdk.clang()?;
+                let mut all = sources.clone();
+                all.extend(android::write_renderer_sources(out, &deps)?);
+                r.at(0.68, "Compiling the renderer's C++ part");
+                let vma = android::compile_vma(&sdk, &deps, out)?;
+                let mut cflags = android::renderer_compile_args(&deps, out);
                 cflags.extend(["-x".to_string(), "c".to_string()]);
-                let so = out.join("android").join("lib").join(abi).join("libbifrost.so");
+                let abi = android::RENDERER_ABI.0;
+                let so = out.join("android").join("lib").join(abi).join("libmain.so");
                 std::fs::create_dir_all(so.parent().unwrap())?;
                 compile_and_link(
                     &clang,
                     out,
                     &all,
                     &cflags,
-                    &android::link_args(triple),
+                    &android::renderer_link_args(&deps, &vma),
                     &out.join("obj").join(abi),
                     &so,
                     &mut r,
-                    lo,
-                    hi,
-                    &format!("Compiling {abi}"),
+                    0.69,
+                    0.93,
+                    &format!("Compiling {abi} with the Vulkan renderer"),
                 )?;
-                libs.push((abi.to_string(), so));
+                r.at(0.94, "Compiling the Java glue");
+                let dex = android::build_dex(&sdk, &deps, out)?;
+                r.at(0.96, "Packaging APK");
+                let extras = android::ApkExtras {
+                    lib_name: "libmain.so".into(),
+                    shared_libs: deps.shared_libs(),
+                    dex: Some(dex),
+                };
+                Some(android::package(
+                    out,
+                    &sdk,
+                    &exe,
+                    &[(abi.to_string(), so)],
+                    embed,
+                    &extras,
+                )?)
+            } else {
+                android::write_sources(
+                    out,
+                    &android::package_name(content.title_id, &exe),
+                    &title,
+                )?;
+                let clang = sdk.clang()?;
+                let glue = sdk.glue_dir().join("android_native_app_glue.c");
+                let mut all = sources.clone();
+                all.push(PathBuf::from("bf_android.c.in"));
+                all.push(glue);
+                let mut libs = Vec::new();
+                let n = android::ABIS.len() as f32;
+                for (i, (abi, triple)) in android::ABIS.iter().enumerate() {
+                    let (lo, hi) = (0.68 + 0.27 * i as f32 / n, 0.68 + 0.27 * (i + 1) as f32 / n);
+                    let mut cflags = android::compile_args(&sdk, triple);
+                    cflags.extend(["-x".to_string(), "c".to_string()]);
+                    let so = out
+                        .join("android")
+                        .join("lib")
+                        .join(abi)
+                        .join("libbifrost.so");
+                    std::fs::create_dir_all(so.parent().unwrap())?;
+                    compile_and_link(
+                        &clang,
+                        out,
+                        &all,
+                        &cflags,
+                        &android::link_args(triple),
+                        &out.join("obj").join(abi),
+                        &so,
+                        &mut r,
+                        lo,
+                        hi,
+                        &format!("Compiling {abi}"),
+                    )?;
+                    libs.push((abi.to_string(), so));
+                }
+                r.at(0.96, "Packaging APK");
+                Some(android::package(
+                    out,
+                    &sdk,
+                    &exe,
+                    &libs,
+                    embed,
+                    &Default::default(),
+                )?)
             }
-            r.at(0.96, "Packaging APK");
-            let embed = romfs_size > 0 && romfs_size <= opts.android_embed_limit;
-            if romfs_size > 0 && !embed {
-                notes.push(format!(
-                    "RomFS is {} MiB, too large to embed: copy romfs.bin to /sdcard/Android/data/{}/files/ on the device",
-                    romfs_size >> 20,
-                    android::package_name(content.title_id, &exe)
-                ));
-            }
-            Some(android::package(out, &sdk, &exe, &libs, embed)?)
         }
     };
     for n in &notes {
         r.log(format!("note: {n}"));
     }
     r.at(1.0, "Done");
-    Ok(BuildOutput { report, title, project: out.clone(), artifact, notes })
+    Ok(BuildOutput {
+        report,
+        title,
+        project: out.clone(),
+        artifact,
+        notes,
+    })
 }

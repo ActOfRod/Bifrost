@@ -10,15 +10,32 @@ use super::simd;
 pub enum Op {
     /// C statement(s) executed with `BfCpu *c` in scope.
     C(String),
-    B { target: u64 },
-    Bl { target: u64 },
+    B {
+        target: u64,
+    },
+    Bl {
+        target: u64,
+    },
     /// `cond` is a C expression; branch to `target` when it is true.
-    CondBranch { cond: String, target: u64 },
-    Br { reg: u8 },
-    Blr { reg: u8 },
-    Ret { reg: u8 },
-    Svc { imm: u16 },
-    Brk { imm: u16 },
+    CondBranch {
+        cond: String,
+        target: u64,
+    },
+    Br {
+        reg: u8,
+    },
+    Blr {
+        reg: u8,
+    },
+    Ret {
+        reg: u8,
+    },
+    Svc {
+        imm: u16,
+    },
+    Brk {
+        imm: u16,
+    },
     Udf,
     Unsupported,
 }
@@ -27,7 +44,12 @@ impl Op {
     pub fn is_terminator(&self) -> bool {
         matches!(
             self,
-            Op::B { .. } | Op::Br { .. } | Op::Ret { .. } | Op::Brk { .. } | Op::Udf | Op::Unsupported
+            Op::B { .. }
+                | Op::Br { .. }
+                | Op::Ret { .. }
+                | Op::Brk { .. }
+                | Op::Udf
+                | Op::Unsupported
         )
     }
 }
@@ -93,7 +115,11 @@ fn wsf(sf: bool, n: u32, e: &str) -> String {
     }
 }
 fn wsfsp(sf: bool, n: u32, e: &str) -> String {
-    let dst = if n == 31 { "c->sp".to_string() } else { format!("c->x[{n}]") };
+    let dst = if n == 31 {
+        "c->sp".to_string()
+    } else {
+        format!("c->x[{n}]")
+    };
     if sf {
         format!("{dst} = (uint64_t)({e});")
     } else {
@@ -112,7 +138,13 @@ fn hex(v: u64) -> String {
 }
 
 /// DecodeBitMasks from the ARM ARM: returns (wmask, tmask), or None for reserved encodings.
-pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, immediate: bool, width: u32) -> Option<(u64, u64)> {
+pub fn decode_bit_masks(
+    n: u32,
+    imms: u32,
+    immr: u32,
+    immediate: bool,
+    width: u32,
+) -> Option<(u64, u64)> {
     let combined = (n << 6) | (!imms & 0x3F);
     if combined == 0 {
         return None;
@@ -281,7 +313,11 @@ fn dp_imm(w: u32, pc: u64) -> Option<String> {
                 1 => Some(wsfsp(sf, rd, &format!("{a} | {i}"))),
                 2 => Some(wsfsp(sf, rd, &format!("{a} ^ {i}"))),
                 _ => {
-                    let lf = if sf { "bf_logic_flags64" } else { "bf_logic_flags32" };
+                    let lf = if sf {
+                        "bf_logic_flags64"
+                    } else {
+                        "bf_logic_flags32"
+                    };
                     Some(format!(
                         "{{ {t} r = ({t})({a} & {i}); {lf}(c, r); {} }}",
                         wsf(sf, rd, "r"),
@@ -305,7 +341,11 @@ fn dp_imm(w: u32, pc: u64) -> Option<String> {
                 2 => Some(wx(rd, &hex(imm))),
                 3 => {
                     let mask = 0xFFFFu64 << (hw * 16);
-                    Some(wsf(sf, rd, &format!("({} & {}) | {}", rx(rd), hex(!mask), hex(imm))))
+                    Some(wsf(
+                        sf,
+                        rd,
+                        &format!("({} & {}) | {}", rx(rd), hex(!mask), hex(imm)),
+                    ))
                 }
                 _ => None,
             }
@@ -393,7 +433,11 @@ fn branch_sys(w: u32, pc: u64) -> Op {
     let rt = bits(w, 4, 0);
     if w & 0x7C00_0000 == 0x1400_0000 {
         let target = pc.wrapping_add((sext(bits(w, 25, 0) as u64, 26) << 2) as u64);
-        return if bit(w, 31) { Op::Bl { target } } else { Op::B { target } };
+        return if bit(w, 31) {
+            Op::Bl { target }
+        } else {
+            Op::B { target }
+        };
     }
     if w & 0xFF00_0010 == 0x5400_0000 {
         let target = pc.wrapping_add((sext(bits(w, 23, 5) as u64, 19) << 2) as u64);
@@ -401,19 +445,28 @@ fn branch_sys(w: u32, pc: u64) -> Op {
         if cond >= 14 {
             return Op::B { target };
         }
-        return Op::CondBranch { cond: format!("BF_COND(c, {cond})"), target };
+        return Op::CondBranch {
+            cond: format!("BF_COND(c, {cond})"),
+            target,
+        };
     }
     if w & 0x7E00_0000 == 0x3400_0000 {
         let target = pc.wrapping_add((sext(bits(w, 23, 5) as u64, 19) << 2) as u64);
         let r = rsf(bit(w, 31), rt);
         let o = if bit(w, 24) { "!=" } else { "==" };
-        return Op::CondBranch { cond: format!("{r} {o} 0"), target };
+        return Op::CondBranch {
+            cond: format!("{r} {o} 0"),
+            target,
+        };
     }
     if w & 0x7E00_0000 == 0x3600_0000 {
         let target = pc.wrapping_add((sext(bits(w, 18, 5) as u64, 14) << 2) as u64);
         let b = (bits(w, 31, 31) << 5) | bits(w, 23, 19);
         let o = if bit(w, 24) { "!=" } else { "==" };
-        return Op::CondBranch { cond: format!("(({} >> {b}) & 1) {o} 0", rx(rt)), target };
+        return Op::CondBranch {
+            cond: format!("(({} >> {b}) & 1) {o} 0", rx(rt)),
+            target,
+        };
     }
     if w & 0xFE1F_FC1F == 0xD61F_0000 {
         let rn = bits(w, 9, 5) as u8;
@@ -425,10 +478,14 @@ fn branch_sys(w: u32, pc: u64) -> Op {
         };
     }
     if w & 0xFFE0_001F == 0xD400_0001 {
-        return Op::Svc { imm: bits(w, 20, 5) as u16 };
+        return Op::Svc {
+            imm: bits(w, 20, 5) as u16,
+        };
     }
     if w & 0xFFE0_001F == 0xD420_0000 {
-        return Op::Brk { imm: bits(w, 20, 5) as u16 };
+        return Op::Brk {
+            imm: bits(w, 20, 5) as u16,
+        };
     }
     if w & 0xFFFF_F01F == 0xD503_201F {
         let hint = bits(w, 11, 5);
@@ -494,8 +551,15 @@ fn dp_reg(w: u32) -> Option<String> {
                 1 => wsf(sf, rd, &format!("{a} | {b}")),
                 2 => wsf(sf, rd, &format!("{a} ^ {b}")),
                 _ => {
-                    let lf = if sf { "bf_logic_flags64" } else { "bf_logic_flags32" };
-                    format!("{{ {t} r = ({t})({a} & {b}); {lf}(c, r); {} }}", wsf(sf, rd, "r"))
+                    let lf = if sf {
+                        "bf_logic_flags64"
+                    } else {
+                        "bf_logic_flags32"
+                    };
+                    format!(
+                        "{{ {t} r = ({t})({a} & {b}); {lf}(c, r); {} }}",
+                        wsf(sf, rd, "r")
+                    )
                 }
             });
         }
@@ -529,7 +593,11 @@ fn dp_reg(w: u32) -> Option<String> {
         }
         let o = if sub { "-" } else { "+" };
         let e = format!("({t})({a}) {o} ({t})({b})");
-        return Some(if dst_sp { wsfsp(sf, rd, &e) } else { wsf(sf, rd, &e) });
+        return Some(if dst_sp {
+            wsfsp(sf, rd, &e)
+        } else {
+            wsf(sf, rd, &e)
+        });
     }
     match bits(w, 24, 21) {
         0b0000 => {
@@ -538,9 +606,17 @@ fn dp_reg(w: u32) -> Option<String> {
             }
             let sub = bit(w, 30);
             let s = bit(w, 29) as u32;
-            let b = if sub { format!("~({t}){}", rsf(sf, rm)) } else { rsf(sf, rm) };
+            let b = if sub {
+                format!("~({t}){}", rsf(sf, rm))
+            } else {
+                rsf(sf, rm)
+            };
             let f = if sf { "bf_adc64" } else { "bf_adc32" };
-            Some(wsf(sf, rd, &format!("{f}(c, {}, {b}, BF_CARRY(c), {s})", rsf(sf, rn))))
+            Some(wsf(
+                sf,
+                rd,
+                &format!("{f}(c, {}, {b}, BF_CARRY(c), {s})", rsf(sf, rn)),
+            ))
         }
         0b0010 => {
             if !bit(w, 29) || bit(w, 10) || bit(w, 4) {
@@ -548,7 +624,11 @@ fn dp_reg(w: u32) -> Option<String> {
             }
             let cond = bits(w, 15, 12);
             let nzcv = bits(w, 3, 0);
-            let b = if bit(w, 11) { hex(rm as u64) } else { rsf(sf, rm) };
+            let b = if bit(w, 11) {
+                hex(rm as u64)
+            } else {
+                rsf(sf, rm)
+            };
             let f = match (sf, bit(w, 30)) {
                 (true, true) => "bf_subs64",
                 (true, false) => "bf_adds64",
@@ -574,7 +654,11 @@ fn dp_reg(w: u32) -> Option<String> {
                 (true, 0) => format!("({t})~{m}"),
                 (true, _) => format!("({t})(0 - {m})"),
             };
-            Some(wsf(sf, rd, &format!("BF_COND(c, {cond}) ? ({t}){a} : ({t}){b}")))
+            Some(wsf(
+                sf,
+                rd,
+                &format!("BF_COND(c, {cond}) ? ({t}){a} : ({t}){b}"),
+            ))
         }
         0b0110 => {
             if bit(w, 29) {
@@ -635,9 +719,18 @@ fn dp_reg(w: u32) -> Option<String> {
             let op31 = bits(w, 23, 21);
             let sign = if o0 { "-" } else { "+" };
             let e = match op31 {
-                0 => format!("({t}){} {sign} ({t})({} * {})", rsf(sf, ra), rsf(sf, rn), rsf(sf, rm)),
+                0 => format!(
+                    "({t}){} {sign} ({t})({} * {})",
+                    rsf(sf, ra),
+                    rsf(sf, rn),
+                    rsf(sf, rm)
+                ),
                 1 | 5 if sf => {
-                    let cast = if op31 == 1 { "(uint64_t)(int64_t)(int32_t)" } else { "(uint64_t)(uint32_t)" };
+                    let cast = if op31 == 1 {
+                        "(uint64_t)(int64_t)(int32_t)"
+                    } else {
+                        "(uint64_t)(uint32_t)"
+                    };
                     format!("{} {sign} {cast}{} * {cast}{}", rx(ra), rx(rn), rx(rm))
                 }
                 2 if sf && !o0 => format!("bf_smulh({}, {})", rx(rn), rx(rm)),
@@ -679,11 +772,24 @@ fn st_int(size: u32, addr: &str, v: &str) -> String {
 fn addressing(rn: u32, offset: i64, mode: u32) -> (String, String) {
     // mode: 0 = offset, 1 = post-index, 2 = pre-index
     let base = rxsp(rn);
-    let wb = if rn == 31 { "c->sp".to_string() } else { format!("c->x[{rn}]") };
+    let wb = if rn == 31 {
+        "c->sp".to_string()
+    } else {
+        format!("c->x[{rn}]")
+    };
     match mode {
-        0 => (format!("uint64_t a = {base} + (uint64_t){offset}ll; "), String::new()),
-        1 => (format!("uint64_t a = {base}; "), format!(" {wb} = a + (uint64_t){offset}ll;")),
-        _ => (format!("uint64_t a = {base} + (uint64_t){offset}ll; "), format!(" {wb} = a;")),
+        0 => (
+            format!("uint64_t a = {base} + (uint64_t){offset}ll; "),
+            String::new(),
+        ),
+        1 => (
+            format!("uint64_t a = {base}; "),
+            format!(" {wb} = a + (uint64_t){offset}ll;"),
+        ),
+        _ => (
+            format!("uint64_t a = {base} + (uint64_t){offset}ll; "),
+            format!(" {wb} = a;"),
+        ),
     }
 }
 
@@ -788,7 +894,14 @@ fn ldst(w: u32, pc: u64) -> Option<String> {
         let scale = if v && opc & 2 != 0 { 4 } else { size };
         let amt = if bit(w, 12) { scale } else { 0 };
         let rm = bits(w, 20, 16);
-        (format!("uint64_t a = {} + {}; ", rxsp(rn), extended(rm, option, amt)), String::new())
+        (
+            format!(
+                "uint64_t a = {} + {}; ",
+                rxsp(rn),
+                extended(rm, option, amt)
+            ),
+            String::new(),
+        )
     } else {
         return None;
     };
@@ -833,9 +946,15 @@ fn ldst_excl(w: u32) -> Option<String> {
     match (o2, o1) {
         (false, false) => {
             if l {
-                Some(format!("{{ {}{fence} }}", wx(rt, &format!("bf_ldx{n}(c, {a})"))))
+                Some(format!(
+                    "{{ {}{fence} }}",
+                    wx(rt, &format!("bf_ldx{n}(c, {a})"))
+                ))
             } else {
-                Some(format!("{{{fence} {} }}", wx(rs, &format!("bf_stx{n}(c, {a}, {})", rx(rt)))))
+                Some(format!(
+                    "{{{fence} {} }}",
+                    wx(rs, &format!("bf_stx{n}(c, {a}, {})", rx(rt)))
+                ))
             }
         }
         (false, true) => {
@@ -852,7 +971,14 @@ fn ldst_excl(w: u32) -> Option<String> {
                 } else {
                     Some(format!(
                         "{{{fence} {} }}",
-                        wx(rs, &format!("bf_stx64(c, {a}, ((uint64_t){} << 32) | {})", rw(rt2), rw(rt)))
+                        wx(
+                            rs,
+                            &format!(
+                                "bf_stx64(c, {a}, ((uint64_t){} << 32) | {})",
+                                rw(rt2),
+                                rw(rt)
+                            )
+                        )
                     ))
                 }
             } else if l {
@@ -862,7 +988,10 @@ fn ldst_excl(w: u32) -> Option<String> {
                     wx(rt2, "hi")
                 ))
             } else {
-                Some(format!("{{{fence} {} }}", wx(rs, &format!("bf_stxp64(c, {a}, {}, {})", rx(rt), rx(rt2)))))
+                Some(format!(
+                    "{{{fence} {} }}",
+                    wx(rs, &format!("bf_stxp64(c, {a}, {}, {})", rx(rt), rx(rt2)))
+                ))
             }
         }
         (true, false) => {

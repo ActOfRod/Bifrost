@@ -14,9 +14,7 @@ pub fn parse(name: &str, data: &[u8]) -> Result<Module> {
         return Err(Error::message("ELF header is truncated"));
     }
     if data[4] != 2 || data[5] != 1 {
-        return Err(Error::message(
-            "only 64-bit little-endian ELF is supported",
-        ));
+        return Err(Error::message("only 64-bit little-endian ELF is supported"));
     }
     let e_type = read_u16(data, 16)?;
     let e_machine = read_u16(data, 18)?;
@@ -89,12 +87,14 @@ pub fn parse(name: &str, data: &[u8]) -> Result<Module> {
     for load in &loads {
         let dst_off = (load.va - image_base) as usize;
         let file_len = load.filesz.min(load.memsz) as usize;
-        let src = data.get(load.offset..load.offset + file_len).ok_or_else(|| {
-            Error::message(format!(
-                "ELF segment at file {:#x} is truncated",
-                load.offset
-            ))
-        })?;
+        let src = data
+            .get(load.offset..load.offset + file_len)
+            .ok_or_else(|| {
+                Error::message(format!(
+                    "ELF segment at file {:#x} is truncated",
+                    load.offset
+                ))
+            })?;
         image[dst_off..dst_off + file_len].copy_from_slice(src);
     }
 

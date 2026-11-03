@@ -33,7 +33,11 @@ pub struct Program {
 
 /// Horizon load order: rtld/main first, then subsdk0..9, then sdk, then anything else.
 pub fn module_rank(name: &str) -> (u32, String) {
-    let n = name.rsplit(['/', '\\']).next().unwrap_or(name).to_ascii_lowercase();
+    let n = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
     let stem = n.split('.').next().unwrap_or(&n).to_string();
     let rank = match stem.as_str() {
         "rtld" => 0,
@@ -50,10 +54,16 @@ fn align_up(v: u64, a: u64) -> u64 {
 }
 
 fn span(m: &Module) -> u64 {
-    let end = [m.text.end(), m.rodata.end(), m.data.end(), m.bss.end(), m.image_base + m.image.len() as u64]
-        .into_iter()
-        .max()
-        .unwrap_or(m.image_base);
+    let end = [
+        m.text.end(),
+        m.rodata.end(),
+        m.data.end(),
+        m.bss.end(),
+        m.image_base + m.image.len() as u64,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(m.image_base);
     end - m.image_base
 }
 
@@ -64,7 +74,10 @@ fn rebase(m: &mut Module, base: u64) {
     }
     let relocs = m.relocations.clone();
     for r in relocs.iter().filter(|r| r.applied) {
-        if matches!(r.kind, R_AARCH64_RELATIVE | R_AARCH64_ABS64 | R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT) {
+        if matches!(
+            r.kind,
+            R_AARCH64_RELATIVE | R_AARCH64_ABS64 | R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT
+        ) {
             if let Some(v) = m.read_u64(r.offset) {
                 if v < IMPORT_SENTINEL_BASE && (r.kind == R_AARCH64_RELATIVE || v != 0) {
                     m.write_bytes(r.offset, &v.wrapping_add(delta).to_le_bytes());
@@ -100,7 +113,11 @@ pub fn link(mut modules: Vec<Module>) -> Program {
     }
     let mut exports: BTreeMap<String, u64> = BTreeMap::new();
     for m in &modules {
-        for s in m.symbols.iter().filter(|s| s.defined && !s.name.is_empty() && s.va != 0) {
+        for s in m
+            .symbols
+            .iter()
+            .filter(|s| s.defined && !s.name.is_empty() && s.va != 0)
+        {
             exports.entry(s.name.clone()).or_insert(s.va);
         }
     }
@@ -111,7 +128,12 @@ pub fn link(mut modules: Vec<Module>) -> Program {
         for mut imp in std::mem::take(&mut m.imports) {
             let addend = imp
                 .slot_va
-                .and_then(|slot| m.relocations.iter().find(|r| r.offset == slot).map(|r| r.addend))
+                .and_then(|slot| {
+                    m.relocations
+                        .iter()
+                        .find(|r| r.offset == slot)
+                        .map(|r| r.addend)
+                })
                 .unwrap_or(0);
             match (exports.get(&imp.name), imp.slot_va) {
                 (Some(&va), Some(slot)) => {
@@ -131,13 +153,24 @@ pub fn link(mut modules: Vec<Module>) -> Program {
         m.imports = remaining;
     }
     let entry = modules.first().map(|m| m.entry).unwrap_or(0);
-    let is_nro = modules.first().map(|m| m.format == Format::Nro).unwrap_or(false);
-    Program { modules, entry, is_nro, imports, resolved_imports: resolved }
+    let is_nro = modules
+        .first()
+        .map(|m| m.format == Format::Nro)
+        .unwrap_or(false);
+    Program {
+        modules,
+        entry,
+        is_nro,
+        imports,
+        resolved_imports: resolved,
+    }
 }
 
 impl Program {
     pub fn module_at(&self, va: u64) -> Option<&Module> {
-        self.modules.iter().find(|m| va >= m.image_base && va < m.image_base + span(m))
+        self.modules
+            .iter()
+            .find(|m| va >= m.image_base && va < m.image_base + span(m))
     }
 
     pub fn segments(&self) -> Vec<ImageSegment> {
@@ -147,7 +180,14 @@ impl Program {
             let parts = [
                 (m.text.va, m.text.end(), 5u32, 3u32),
                 (m.rodata.va, m.rodata.end(), 1, 3),
-                (m.data.va.min(if m.bss.size > 0 { m.bss.va } else { m.data.va }), rw_end, 3, 4),
+                (
+                    m.data
+                        .va
+                        .min(if m.bss.size > 0 { m.bss.va } else { m.data.va }),
+                    rw_end,
+                    3,
+                    4,
+                ),
             ];
             for (start, end, perm, mem_type) in parts {
                 if end <= start {
@@ -155,9 +195,18 @@ impl Program {
                 }
                 let va = start & !0xFFF;
                 let size = align_up(end, 0x1000) - va;
-                let avail = (m.image_base + m.image.len() as u64).saturating_sub(va).min(size) as usize;
+                let avail = (m.image_base + m.image.len() as u64)
+                    .saturating_sub(va)
+                    .min(size) as usize;
                 let bytes = m.read(va, avail).map(|b| b.to_vec()).unwrap_or_default();
-                out.push(ImageSegment { va, size, perm, mem_type, module: m.name.clone(), bytes });
+                out.push(ImageSegment {
+                    va,
+                    size,
+                    perm,
+                    mem_type,
+                    module: m.name.clone(),
+                    bytes,
+                });
             }
         }
         // overlapping page-rounded segments: keep the earlier one's bytes, trim later starts
@@ -204,10 +253,17 @@ impl Program {
             }
             let mut va = m.text.va;
             while va + 8 <= m.text.end() {
-                let (Some(a), Some(b)) = (m.read_u32(va), m.read_u32(va + 4)) else { break };
-                if a & 0x9F00_0000 == 0x9000_0000 && b & 0xFF80_0000 == 0x9100_0000 && b & 0x1F == a & 0x1F && (b >> 5) & 0x1F == a & 0x1F {
+                let (Some(a), Some(b)) = (m.read_u32(va), m.read_u32(va + 4)) else {
+                    break;
+                };
+                if a & 0x9F00_0000 == 0x9000_0000
+                    && b & 0xFF80_0000 == 0x9100_0000
+                    && b & 0x1F == a & 0x1F
+                    && (b >> 5) & 0x1F == a & 0x1F
+                {
                     let imm = (((a >> 5) & 0x7FFFF) as u64) << 2 | ((a >> 29) & 3) as u64;
-                    let page = (va & !0xFFF).wrapping_add((((imm << 12) << 31) as i64 >> 31) as u64);
+                    let page =
+                        (va & !0xFFF).wrapping_add((((imm << 12) << 31) as i64 >> 31) as u64);
                     let t = page.wrapping_add(((b >> 10) & 0xFFF) as u64);
                     if t % 4 == 0 && self.is_code(t) {
                         out.insert(t);

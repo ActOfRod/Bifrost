@@ -24,7 +24,10 @@ pub fn hash_table_len(entries: usize) -> usize {
         return entries | 1;
     }
     let mut n = entries;
-    while [2, 3, 5, 7, 11, 13, 17].iter().any(|p| n.is_multiple_of(*p)) {
+    while [2, 3, 5, 7, 11, 13, 17]
+        .iter()
+        .any(|p| n.is_multiple_of(*p))
+    {
         n += 1;
     }
     n
@@ -54,7 +57,13 @@ struct FileEnt {
 /// Write `root` as a RomFS image to `out`; `progress(done, total)` is called as file data is copied.
 /// Returns the image size.
 pub fn build_from_dir(root: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<u64> {
-    let mut dirs = vec![Dir { name: Vec::new(), parent: 0, dirs: Vec::new(), files: Vec::new(), off: 0 }];
+    let mut dirs = vec![Dir {
+        name: Vec::new(),
+        parent: 0,
+        dirs: Vec::new(),
+        files: Vec::new(),
+        off: 0,
+    }];
     let mut files: Vec<FileEnt> = Vec::new();
     let mut stack = vec![(0usize, root.to_path_buf())];
     while let Some((di, path)) = stack.pop() {
@@ -67,12 +76,25 @@ pub fn build_from_dir(root: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64
             let ty = e.file_type()?;
             if ty.is_dir() {
                 let idx = dirs.len();
-                dirs.push(Dir { name, parent: di, dirs: Vec::new(), files: Vec::new(), off: 0 });
+                dirs.push(Dir {
+                    name,
+                    parent: di,
+                    dirs: Vec::new(),
+                    files: Vec::new(),
+                    off: 0,
+                });
                 dirs[di].dirs.push(idx);
                 stack.push((idx, e.path()));
             } else if ty.is_file() {
                 let idx = files.len();
-                files.push(FileEnt { name, parent: di, path: e.path(), size: e.metadata()?.len(), data: 0, off: 0 });
+                files.push(FileEnt {
+                    name,
+                    parent: di,
+                    path: e.path(),
+                    size: e.metadata()?.len(),
+                    data: 0,
+                    off: 0,
+                });
                 dirs[di].files.push(idx);
             }
         }
@@ -101,7 +123,8 @@ pub fn build_from_dir(root: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64
     let mut file_hash = vec![EMPTY; file_buckets];
     let mut dir_meta = vec![0u8; dir_meta_len];
     let mut file_meta = vec![0u8; file_meta_len];
-    let put = |buf: &mut Vec<u8>, at: usize, v: u32| buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let put =
+        |buf: &mut Vec<u8>, at: usize, v: u32| buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
 
     for (i, d) in dirs.iter().enumerate() {
         let parent_off = dirs[d.parent].off;
@@ -116,8 +139,16 @@ pub fn build_from_dir(root: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64
         let at = d.off as usize;
         put(&mut dir_meta, at, parent_off);
         put(&mut dir_meta, at + 4, sibling);
-        put(&mut dir_meta, at + 8, d.dirs.first().map_or(EMPTY, |&c| dirs[c].off));
-        put(&mut dir_meta, at + 12, d.files.first().map_or(EMPTY, |&c| files[c].off));
+        put(
+            &mut dir_meta,
+            at + 8,
+            d.dirs.first().map_or(EMPTY, |&c| dirs[c].off),
+        );
+        put(
+            &mut dir_meta,
+            at + 12,
+            d.files.first().map_or(EMPTY, |&c| files[c].off),
+        );
         put(&mut dir_meta, at + 16, dir_hash[bucket]);
         put(&mut dir_meta, at + 20, d.name.len() as u32);
         dir_meta[at + 24..at + 24 + d.name.len()].copy_from_slice(&d.name);
@@ -125,7 +156,11 @@ pub fn build_from_dir(root: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64
     }
     for f in &files {
         let parent = &dirs[f.parent];
-        let pos = parent.files.iter().position(|&s| files[s].off == f.off).unwrap();
+        let pos = parent
+            .files
+            .iter()
+            .position(|&s| files[s].off == f.off)
+            .unwrap();
         let sibling = parent.files.get(pos + 1).map_or(EMPTY, |&s| files[s].off);
         let bucket = path_hash(parent.off, &f.name) as usize % file_buckets;
         let at = f.off as usize;
@@ -157,7 +192,10 @@ pub fn build_from_dir(root: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64
         DATA_OFFSET,
     ];
 
-    let mut w = BufWriter::with_capacity(1 << 20, File::create(out).with_context(|| format!("create {}", out.display()))?);
+    let mut w = BufWriter::with_capacity(
+        1 << 20,
+        File::create(out).with_context(|| format!("create {}", out.display()))?,
+    );
     for v in header {
         w.write_all(&v.to_le_bytes())?;
     }
@@ -204,13 +242,23 @@ pub fn read_file(image: &Path, path: &str) -> Result<Option<Vec<u8>>> {
         f.read_exact(&mut v)?;
         Ok(v)
     };
-    let (dh, dm, fh, fm) = (table(h(1), h(2))?, table(h(3), h(4))?, table(h(5), h(6))?, table(h(7), h(8))?);
+    let (dh, dm, fh, fm) = (
+        table(h(1), h(2))?,
+        table(h(3), h(4))?,
+        table(h(5), h(6))?,
+        table(h(7), h(8))?,
+    );
     let u32at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let Some((leaf, dirs)) = parts.split_last() else { return Ok(None) };
+    let Some((leaf, dirs)) = parts.split_last() else {
+        return Ok(None);
+    };
     let mut cur = 0u32;
     for name in dirs {
-        let mut e = u32at(&dh, (path_hash(cur, name.as_bytes()) as usize % (dh.len() / 4)) * 4);
+        let mut e = u32at(
+            &dh,
+            (path_hash(cur, name.as_bytes()) as usize % (dh.len() / 4)) * 4,
+        );
         loop {
             if e == EMPTY {
                 return Ok(None);
@@ -224,7 +272,10 @@ pub fn read_file(image: &Path, path: &str) -> Result<Option<Vec<u8>>> {
             e = u32at(&dm, at + 16);
         }
     }
-    let mut e = u32at(&fh, (path_hash(cur, leaf.as_bytes()) as usize % (fh.len() / 4)) * 4);
+    let mut e = u32at(
+        &fh,
+        (path_hash(cur, leaf.as_bytes()) as usize % (fh.len() / 4)) * 4,
+    );
     while e != EMPTY {
         let at = e as usize;
         let len = u32at(&fm, at + 28) as usize;

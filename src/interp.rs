@@ -31,7 +31,9 @@ impl fmt::Display for Stop {
             }
             Self::Unmapped { addr } => write!(f, "unmapped address {addr:#x}"),
             Self::StepLimit => write!(f, "step limit"),
-            Self::Svc { addr, imm, name } => write!(f, "unimplemented {name} #{imm:#x} at {addr:#x}"),
+            Self::Svc { addr, imm, name } => {
+                write!(f, "unimplemented {name} #{imm:#x} at {addr:#x}")
+            }
         }
     }
 }
@@ -280,7 +282,16 @@ fn step(
                 return Step::Stop(Stop::Unmapped { addr });
             };
             let value = extend_load(raw, width, signed);
-            write_reg(cpu, dst, if signed { Width::W64 } else { width_for_load(width) }, value);
+            write_reg(
+                cpu,
+                dst,
+                if signed {
+                    Width::W64
+                } else {
+                    width_for_load(width)
+                },
+                value,
+            );
             if index == IndexMode::Post {
                 if let Some(updated) = writeback {
                     write_reg(cpu, base, Width::W64, updated);
@@ -328,7 +339,11 @@ fn step(
             write_reg(
                 cpu,
                 dst,
-                if signed { Width::W64 } else { width_for_load(width) },
+                if signed {
+                    Width::W64
+                } else {
+                    width_for_load(width)
+                },
                 extend_load(raw, width, signed),
             );
             cpu.pc = pc.wrapping_add(4);
@@ -419,7 +434,11 @@ fn step(
             write_reg(
                 cpu,
                 dst,
-                if signed { Width::W64 } else { width_for_load(width) },
+                if signed {
+                    Width::W64
+                } else {
+                    width_for_load(width)
+                },
                 extend_load(raw, width, signed),
             );
             cpu.pc = pc.wrapping_add(4);
@@ -480,9 +499,7 @@ fn step(
             SvcEffect::Exit => return Step::Stop(Stop::Exit),
             SvcEffect::Break => return Step::Stop(Stop::Break),
             SvcEffect::Unimplemented => {
-                let name = hos::svc_name(imm)
-                    .unwrap_or("svc")
-                    .to_string();
+                let name = hos::svc_name(imm).unwrap_or("svc").to_string();
                 return Step::Stop(Stop::Svc {
                     addr: pc,
                     imm,
@@ -726,4 +743,3 @@ fn cond_holds(cond: u8, nzcv: u32) -> bool {
         base
     }
 }
-

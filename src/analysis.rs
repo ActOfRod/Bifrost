@@ -101,11 +101,9 @@ fn find_mod0(module: &Module) -> Option<u64> {
         text.wrapping_add(word),
         text.wrapping_add(4).wrapping_add(word as i32 as u64),
     ];
-    candidates.into_iter().find(|va| {
-        module
-            .read(*va, 4)
-            .is_some_and(|bytes| bytes == b"MOD0")
-    })
+    candidates
+        .into_iter()
+        .find(|va| module.read(*va, 4).is_some_and(|bytes| bytes == b"MOD0"))
 }
 
 fn read_i32(module: &Module, va: u64) -> Option<i32> {
@@ -164,13 +162,7 @@ fn scan_symbol_count(module: &Module, symtab: u64, strsz: u64) -> u64 {
     count
 }
 
-fn read_symbols(
-    module: &Module,
-    symtab: u64,
-    count: u64,
-    strtab: u64,
-    strsz: u64,
-) -> Vec<Symbol> {
+fn read_symbols(module: &Module, symtab: u64, count: u64, strtab: u64, strsz: u64) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for i in 0..count {
         let va = symtab + i * 24;
@@ -205,9 +197,9 @@ fn read_symbols(
 
 fn parse_rela(module: &mut Module, rela: u64, relasz: u64) -> Result<()> {
     if !relasz.is_multiple_of(24) {
-        module
-            .notes
-            .push(format!("ignoring RELA at {rela:#x}: size {relasz} is not a multiple of 24"));
+        module.notes.push(format!(
+            "ignoring RELA at {rela:#x}: size {relasz} is not a multiple of 24"
+        ));
         return Ok(());
     }
     let count = relasz / 24;
@@ -242,14 +234,13 @@ fn parse_rela(module: &mut Module, rela: u64, relasz: u64) -> Result<()> {
 }
 
 fn apply_relocs(module: &mut Module) -> Result<()> {
-    let mut next_import = module
-        .imports
-        .len() as u64;
+    let mut next_import = module.imports.len() as u64;
     let relocs = module.relocations.clone();
     for reloc in relocs {
-        let symbol = module.symbols.iter().find(|sym| {
-            !reloc.symbol.is_empty() && sym.name == reloc.symbol
-        });
+        let symbol = module
+            .symbols
+            .iter()
+            .find(|sym| !reloc.symbol.is_empty() && sym.name == reloc.symbol);
         let defined = symbol.map(|sym| sym.defined).unwrap_or(false);
         let symbol_va = symbol.map(|sym| sym.va).unwrap_or(0);
         let applied = match reloc.kind {
@@ -272,11 +263,10 @@ fn apply_relocs(module: &mut Module) -> Result<()> {
                     write_u64(module, reloc.offset, sentinel)
                 }
             }
-            R_AARCH64_ABS32
-                if (defined || reloc.symbol.is_empty()) => {
-                    let value = symbol_va.wrapping_add(reloc.addend as u64) as u32;
-                    write_u32(module, reloc.offset, value)
-                }
+            R_AARCH64_ABS32 if (defined || reloc.symbol.is_empty()) => {
+                let value = symbol_va.wrapping_add(reloc.addend as u64) as u32;
+                write_u32(module, reloc.offset, value)
+            }
             _ => false,
         };
         if let Some(stored) = module.relocations.iter_mut().find(|item| {
