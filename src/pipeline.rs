@@ -504,7 +504,7 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
                 r.at(0.96, "Packaging APK");
                 let extras = android::ApkExtras {
                     lib_name: "libmain.so".into(),
-                    shared_libs: deps.shared_libs(),
+                    shared_libs: deps.shared_libs(&sdk, out)?,
                     dex: Some(dex),
                 };
                 Some(android::package(

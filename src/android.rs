@@ -401,11 +401,18 @@ impl RendererDeps {
         .all(|p| self.root.join(p).is_file())
     }
 
-    pub fn shared_libs(&self) -> Vec<PathBuf> {
-        vec![
-            self.root.join("lib/libSDL3.so"),
-            self.root.join("lib/libshaderc_shared.so"),
-        ]
+    /// Stripped copies of the shared libraries the APK ships (shaderc alone is ~160 MiB with symbols).
+    pub fn shared_libs(&self, sdk: &AndroidSdk, out: &Path) -> Result<Vec<PathBuf>> {
+        let strip = sdk.clang()?.with_file_name(exe("llvm-strip"));
+        let dir = out.join("android").join("prebuilt");
+        fs::create_dir_all(&dir)?;
+        let mut v = Vec::new();
+        for name in ["libSDL3.so", "libshaderc_shared.so"] {
+            let dst = dir.join(name);
+            run(Command::new(&strip).arg("--strip-unneeded").arg("-o").arg(&dst).arg(self.root.join("lib").join(name)))?;
+            v.push(dst);
+        }
+        Ok(v)
     }
 }
 
@@ -527,7 +534,9 @@ pub fn renderer_link_args(deps: &RendererDeps, vma: &Path) -> Vec<String> {
         format!("-L{}", deps.root.join("lib").display()),
         "-lSDL3".into(),
         "-lshaderc_shared".into(),
-        "-static-libstdc++".into(),
+        "-l:libc++_static.a".into(),
+        "-l:libc++abi.a".into(),
+        "-Wl,--no-undefined".into(),
         "-landroid".into(),
         "-llog".into(),
         "-lm".into(),
