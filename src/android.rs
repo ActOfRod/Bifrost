@@ -208,6 +208,8 @@ pub fn package(out: &Path, sdk: &AndroidSdk, exe_name: &str, libs: &[(String, Pa
             link_or_copy(&p, &assets.join("dlc").join(p.file_name().unwrap()))?;
         }
     }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    fs::write(assets.join("bifrost.stamp"), format!("{stamp}\n"))?;
     let unsigned = dir.join("unsigned.apk");
     run(Command::new(sdk.tool("aapt2"))
         .arg("link")

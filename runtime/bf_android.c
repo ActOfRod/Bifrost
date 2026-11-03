@@ -44,6 +44,26 @@ static int extract(AAssetManager *am, const char *name, const char *dst, int alw
     return 1;
 }
 
+// Each APK build carries a unique bifrost.stamp; a mismatch with the unpacked copy means the APK was
+// replaced, so every bundled asset is unpacked again.
+static int assets_changed(AAssetManager *am, const char *dir) {
+    char want[64] = {0}, have[64] = {0}, path[1100];
+    AAsset *a = AAssetManager_open(am, "bifrost.stamp", AASSET_MODE_BUFFER);
+    if (!a) return 1;
+    AAsset_read(a, want, sizeof want - 1);
+    AAsset_close(a);
+    snprintf(path, sizeof path, "%s/bifrost.stamp", dir);
+    FILE *f = fopen(path, "rb");
+    if (f) { if (!fread(have, 1, sizeof have - 1, f)) have[0] = 0; fclose(f); }
+    return strcmp(want, have) != 0;
+}
+
+static void save_stamp(AAssetManager *am, const char *dir) {
+    char path[1100];
+    snprintf(path, sizeof path, "%s/bifrost.stamp", dir);
+    extract(am, "bifrost.stamp", path, 1);
+}
+
 static void *guest_main(void *arg) {
     (void)arg;
     char *argv[] = {"bifrost", "--image", image_path, "--romfs", romfs_path, "--dlc", dlc_path, NULL};
@@ -86,10 +106,11 @@ void android_main(struct android_app *app) {
     const char *in = app->activity->internalDataPath;
     const char *ext = app->activity->externalDataPath;
     mkdir(in, 0700);
+    int fresh = assets_changed(am, in);
     snprintf(image_path, sizeof image_path, "%s/guest_image.bin", in);
     extract(am, "guest_image.bin", image_path, 1);
     snprintf(romfs_path, sizeof romfs_path, "%s/romfs.bin", in);
-    if (!extract(am, "romfs.bin", romfs_path, 0) && ext) snprintf(romfs_path, sizeof romfs_path, "%s/romfs.bin", ext);
+    if (!extract(am, "romfs.bin", romfs_path, fresh) && ext) snprintf(romfs_path, sizeof romfs_path, "%s/romfs.bin", ext);
     snprintf(dlc_path, sizeof dlc_path, "%s/dlc", in);
     mkdir(dlc_path, 0700);
     int bundled_dlc = 0;
@@ -99,9 +120,10 @@ void android_main(struct android_app *app) {
         char src[512], dst[1600];
         snprintf(src, sizeof src, "dlc/%s", name);
         snprintf(dst, sizeof dst, "%s/%s", dlc_path, name);
-        bundled_dlc |= extract(am, src, dst, 0);
+        bundled_dlc |= extract(am, src, dst, fresh);
     }
     if (d) AAssetDir_close(d);
+    if (fresh) save_stamp(am, in);
     if (!bundled_dlc && ext) snprintf(dlc_path, sizeof dlc_path, "%s/dlc", ext);
     __android_log_print(ANDROID_LOG_INFO, "bifrost", "starting %s (romfs %s)", bf_title_name, romfs_path);
 

@@ -223,8 +223,9 @@ fn compile_and_link(
 pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutput> {
     let mut r = Reporter { sink };
     let InputSystem::Switch = opts.system;
-    let out = &opts.out;
     anyhow::ensure!(!opts.inputs.is_empty(), "no base game selected");
+    std::fs::create_dir_all(&opts.out).with_context(|| format!("create {}", opts.out.display()))?;
+    let out = &opts.out.canonicalize()?;
 
     // Validate the toolchain before the long steps.
     let sdk = match opts.target {
@@ -285,14 +286,21 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
     }
 
     let romfs_dst = out.join("romfs.bin");
-    let _ = std::fs::remove_file(&romfs_dst);
+    let same_file = |p: &Path| p.canonicalize().is_ok_and(|p| p == romfs_dst);
+    let in_place = opts.romfs.as_deref().is_some_and(same_file)
+        || (opts.romfs.is_none() && content.romfs.as_ref().is_some_and(|r| r.offset == 0 && same_file(&r.path)));
+    if !in_place {
+        let _ = std::fs::remove_file(&romfs_dst);
+    }
     let romfs = match &opts.romfs {
+        _ if in_place => None,
         Some(p) if p.is_dir() => Some(RomfsSource::Dir(p.clone())),
         Some(p) => Some(RomfsSource::Image(RomfsRef { size: std::fs::metadata(p)?.len(), path: p.clone(), offset: 0 })),
         None => content.romfs.clone().map(RomfsSource::Image).or_else(|| content.romfs_dir.clone().map(RomfsSource::Dir)),
     };
     let romfs_size = match &romfs {
         Some(src) => materialise_romfs(src, &romfs_dst, &mut r, 0.45, 0.62, "RomFS")?,
+        None if in_place => std::fs::metadata(&romfs_dst)?.len(),
         None => {
             notes.push("no RomFS supplied; the game will not find its assets".into());
             0

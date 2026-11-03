@@ -103,12 +103,14 @@ fn path_list(ui: &mut egui::Ui, id: &str, paths: &mut Vec<PathBuf>, filters: &[&
                 }
             }
             ui.push_id(id, |ui| {
-                let mut typed = String::new();
+                let field = ui.make_persistent_id("typed_path");
+                let mut typed: String = ui.data_mut(|d| d.get_temp(field).unwrap_or_default());
                 let r = ui.add(egui::TextEdit::singleline(&mut typed).hint_text("or paste a path and press Enter").desired_width(260.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !typed.trim().is_empty() {
                     paths.push(PathBuf::from(typed.trim()));
+                    typed.clear();
                 }
-                ui.data_mut(|d| d.insert_temp(r.id, typed));
+                ui.data_mut(|d| d.insert_temp(field, typed));
             });
         });
     });

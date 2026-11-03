@@ -156,13 +156,28 @@ fn read_nca(f: &mut File, path: &Path, base: u64, name: &str, content: &mut Cont
             0 => {
                 let ivfc = &fs[0x8..];
                 if &ivfc[0..4] == b"IVFC" {
+                    // num_levels counts the master hash (7 for a RomFS: data is descriptor 5); accept a
+                    // count that excludes it as well, and pick the descriptor whose data is a RomFS header.
                     let levels = u32le(ivfc, 0xC) as usize;
-                    let last = 0x10 + (levels.saturating_sub(2)) * 0x18;
-                    let (off, size) = (u64le(ivfc, last), u64le(ivfc, last + 8));
-                    let probe = read_at(f, sec + off, 8)?;
-                    if u64le(&probe, 0) != 0x50 {
-                        bail!("{name}: RomFS section {i} is not plaintext; decrypt it with your own tools first");
+                    let sec_size = end - start;
+                    let mut found = None;
+                    for idx in [levels.saturating_sub(2), levels.saturating_sub(1)] {
+                        if idx == 0 || idx > 5 {
+                            continue;
+                        }
+                        let d = 0x10 + idx * 0x18;
+                        let (off, size) = (u64le(ivfc, d), u64le(ivfc, d + 8));
+                        if size == 0 || off.checked_add(size).is_none_or(|e| e > sec_size) {
+                            continue;
+                        }
+                        if u64le(&read_at(f, sec + off, 8)?, 0) == 0x50 {
+                            found = Some((off, size));
+                            break;
+                        }
                     }
+                    let Some((off, size)) = found else {
+                        bail!("{name}: RomFS section {i} is not plaintext; decrypt it with your own tools first");
+                    };
                     content.romfs = Some(RomfsRef { path: path.to_path_buf(), offset: sec + off, size });
                 } else if fs[4] == 4 || &fs[0x100 + 0x10..0x100 + 0x14] == b"BKTR" {
                     content.notes.push(format!(
@@ -343,7 +358,8 @@ fn module_for<'a>(modules: &'a mut [Module], build_id: Option<&str>) -> Option<&
             let id = id.to_ascii_uppercase();
             modules.iter_mut().find(|m| {
                 let mid = hex(&m.module_id);
-                mid.starts_with(&id) || id.starts_with(mid.trim_end_matches('0'))
+                let significant = mid.trim_end_matches('0');
+                !significant.is_empty() && (mid.starts_with(&id) || (significant.len() >= 8 && id.starts_with(significant)))
             })
         }
         _ => modules.iter_mut().find(|m| crate::link::module_rank(&m.name).0 == 1),
