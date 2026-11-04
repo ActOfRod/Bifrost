@@ -2,7 +2,7 @@
 //! Bifrost desktop front end. Pick a task:
 //! - Recomp: input/output systems and content, then Begin Recomp.
 //! - Modernize: an older Windows game and the upgrades to apply, then Begin Modernization.
-use bifrost::modernize::{self, Api, Arch, ApiReport, Compat, DxvkSource, ModernizeOptions, Scan};
+use bifrost::modernize::{self, Api, Arch, ApiReport, Compat, DxvkSource, ModernizeOptions, Scan, Upscale};
 use bifrost::pipeline::{self, BuildOptions, Event, InputSystem, Target};
 use eframe::egui;
 use std::path::PathBuf;
@@ -50,6 +50,8 @@ struct Modern {
     laa: bool,
     compat: Compat,
     apply_compat: bool,
+    ddraw: bool,
+    upscale: Upscale,
     out_dir: String,
 }
 
@@ -70,6 +72,8 @@ impl Default for Modern {
             laa: d.large_address_aware,
             compat: d.compat,
             apply_compat: false,
+            ddraw: true,
+            upscale: Upscale::Off,
             out_dir: out.display().to_string(),
         }
     }
@@ -248,6 +252,8 @@ impl App {
             large_address_aware: m.laa,
             compat: m.compat.clone(),
             apply_compat: m.apply_compat,
+            ddraw: m.ddraw.then_some(DxvkSource::Download),
+            upscale: if m.ddraw { m.upscale } else { Upscale::Off },
         };
         self.spawn(ctx, move |sink| {
             let out = modernize::run(&opts, sink)?;
@@ -438,8 +444,11 @@ impl App {
                 });
             });
             ui.end_row();
+            ui.label("DirectDraw");
+            ui.checkbox(&mut m.ddraw, format!("cnc-ddraw {} (renders old 2D DirectDraw games through OpenGL / Direct3D 9)", modernize::CNC_DDRAW_VERSION));
+            ui.end_row();
             ui.label("Frame-rate cap");
-            ui.add_enabled_ui(m.dxvk, |ui| {
+            ui.add_enabled_ui(m.dxvk || m.ddraw, |ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut m.cap_fps, "");
                     ui.add_enabled(m.cap_fps, egui::DragValue::new(&mut m.max_fps).range(20..=360).suffix(" FPS"));
@@ -448,9 +457,11 @@ impl App {
             ui.end_row();
             ui.label("Upscaling");
             ui.horizontal(|ui| {
-                let _ = ui.radio(true, "Off");
-                ui.add_enabled(false, egui::RadioButton::new(false, "AMD FSR 1"))
-                    .on_disabled_hover_text("Coming soon: spatial upscaling that only needs the finished frame.");
+                ui.radio_value(&mut m.upscale, Upscale::Off, "Off");
+                ui.add_enabled_ui(m.ddraw, |ui| {
+                    ui.radio_value(&mut m.upscale, Upscale::Fsr1, "AMD FSR 1")
+                        .on_hover_text("Upscales to your display, borderless. DirectDraw games for now (through cnc-ddraw); Direct3D games are next.")
+                });
                 ui.add_enabled(false, egui::RadioButton::new(false, "NVIDIA DLSS"))
                     .on_disabled_hover_text("Coming later: DLSS needs depth, motion vectors and camera jitter, which older games don't provide.");
             });

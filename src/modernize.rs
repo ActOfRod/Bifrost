@@ -181,6 +181,8 @@ pub fn patch_large_address_aware(d: &mut [u8]) -> Result<bool> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Api {
     DirectDraw,
+    /// Direct3D 7 or older, reached through DirectDraw (found by its interface IDs).
+    Direct3D7,
     Direct3D8,
     Direct3D9,
     Direct3D10,
@@ -216,6 +218,7 @@ impl Api {
     pub fn label(self) -> &'static str {
         match self {
             Api::DirectDraw => "DirectDraw",
+            Api::Direct3D7 => "Direct3D 7 or older",
             Api::Direct3D8 => "Direct3D 8",
             Api::Direct3D9 => "Direct3D 9",
             Api::Direct3D10 => "Direct3D 10",
@@ -360,7 +363,8 @@ pub fn detect_apis(root: &Path, exe: &Path) -> ApiReport {
         let Ok(data) = fs::read(&f) else { continue };
         let Ok(info) = parse_pe(&data) else { continue };
         let rel = f.strip_prefix(root).unwrap_or(&f).to_path_buf();
-        for api in info.imports.iter().filter_map(|d| Api::from_dll(d)) {
+        let legacy_d3d = uses_legacy_d3d(&data).then_some(Api::Direct3D7);
+        for api in info.imports.iter().filter_map(|d| Api::from_dll(d)).chain(legacy_d3d) {
             let v = rep.apis.entry(api).or_default();
             if !v.contains(&rel) {
                 v.push(rel.clone());
@@ -370,11 +374,35 @@ pub fn detect_apis(root: &Path, exe: &Path) -> ApiReport {
     rep
 }
 
+/// Whether `data` holds the interface ID of IDirect3D, IDirect3D2, IDirect3D3 or IDirect3D7. Games ask DirectDraw
+/// for these to draw 3D, which cnc-ddraw (2D DirectDraw only) can't render.
+fn uses_legacy_d3d(data: &[u8]) -> bool {
+    const IIDS: [(u32, u16, u16, [u8; 8]); 4] = [
+        (0x3bba0080, 0x2421, 0x11cf, [0xa3, 0x1a, 0x00, 0x20, 0xaf, 0x6d, 0x2a, 0x9b]),
+        (0x6aae1ec1, 0x662a, 0x11d0, [0x88, 0x9d, 0x00, 0xaa, 0x00, 0xbb, 0xb7, 0x6a]),
+        (0xbb223240, 0xe72b, 0x11d0, [0xa9, 0xb4, 0x00, 0xaa, 0x00, 0xc0, 0x99, 0x3e]),
+        (0xf5049e77, 0x4861, 0x11d2, [0xa4, 0x07, 0x00, 0xa0, 0xc9, 0x06, 0x29, 0xa8]),
+    ];
+    let guids: Vec<[u8; 16]> = IIDS
+        .iter()
+        .map(|(a, b, c, d)| {
+            let mut g = [0u8; 16];
+            g[..4].copy_from_slice(&a.to_le_bytes());
+            g[4..6].copy_from_slice(&b.to_le_bytes());
+            g[6..8].copy_from_slice(&c.to_le_bytes());
+            g[8..].copy_from_slice(d);
+            g
+        })
+        .collect();
+    data.windows(16).any(|w| guids.iter().any(|g| w == g))
+}
+
 // ---- DXVK ----
 
 pub const DXVK_VERSION: &str = "3.1.1";
 const DXVK_URL: &str = "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz";
 const DXVK_SHA256: &str = "40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608";
+const DXVK_DLL_NAMES: &[&str] = &["d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"];
 const DXVK_LICENSE: &str = include_str!("../third_party/dxvk/LICENSE");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,31 +429,36 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn download_dxvk(r: &mut Reporter, lo: f32, hi: f32) -> Result<Vec<u8>> {
-    let path = cache_dir().join(format!("dxvk-{DXVK_VERSION}.tar.gz"));
+    download(&format!("DXVK {DXVK_VERSION}"), DXVK_URL, DXVK_SHA256, &format!("dxvk-{DXVK_VERSION}.tar.gz"), r, lo, hi)
+}
+
+/// Downloads a pinned release, checks its SHA-256 and caches it under `cache_file`.
+fn download(what: &str, url: &str, sha256: &str, cache_file: &str, r: &mut Reporter, lo: f32, hi: f32) -> Result<Vec<u8>> {
+    let path = cache_dir().join(cache_file);
     if let Ok(data) = fs::read(&path) {
-        if sha256_hex(&data) == DXVK_SHA256 {
-            r.log(format!("Using cached DXVK {DXVK_VERSION} ({})", path.display()));
+        if sha256_hex(&data) == sha256 {
+            r.log(format!("Using cached {what} ({})", path.display()));
             return Ok(data);
         }
     }
-    r.at(lo, format!("Downloading DXVK {DXVK_VERSION}"));
-    let resp = ureq::get(DXVK_URL).call().context("downloading DXVK")?;
+    r.at(lo, format!("Downloading {what}"));
+    let resp = ureq::get(url).call().with_context(|| format!("downloading {what}"))?;
     let total: Option<u64> = resp.header("Content-Length").and_then(|v| v.parse().ok());
     let mut reader = resp.into_reader().take(256 << 20);
     let mut data = Vec::new();
     let mut buf = [0u8; 1 << 16];
     loop {
-        let n = reader.read(&mut buf).context("downloading DXVK")?;
+        let n = reader.read(&mut buf).with_context(|| format!("downloading {what}"))?;
         if n == 0 {
             break;
         }
         data.extend_from_slice(&buf[..n]);
         if let Some(t) = total.filter(|&t| t > 0) {
-            r.at(lo + (hi - lo) * (data.len() as f32 / t as f32), format!("Downloading DXVK {DXVK_VERSION}"));
+            r.at(lo + (hi - lo) * (data.len() as f32 / t as f32), format!("Downloading {what}"));
         }
     }
-    if sha256_hex(&data) != DXVK_SHA256 {
-        bail!("the downloaded DXVK archive does not match its expected SHA-256; not using it");
+    if sha256_hex(&data) != sha256 {
+        bail!("the downloaded {what} archive does not match its expected SHA-256; not using it");
     }
     if fs::create_dir_all(path.parent().unwrap()).is_ok() {
         let _ = fs::write(&path, &data);
@@ -439,7 +472,7 @@ fn read_capped(r: impl Read) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     r.take(CAP + 1).read_to_end(&mut data)?;
     if data.len() as u64 > CAP {
-        bail!("a file in the DXVK release is larger than 256 MB; not using it");
+        bail!("a downloaded or selected file is larger than 256 MB; not using it");
     }
     Ok(data)
 }
@@ -458,7 +491,7 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
             let dir = dir.with_context(|| format!("{} has no {sub}/d3d9.dll; expected an extracted DXVK release", p.display()))?;
             for e in fs::read_dir(&dir)?.flatten() {
                 let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-                if GENERATED_BESIDE_EXE.contains(&name.as_str()) && name.ends_with(".dll") {
+                if DXVK_DLL_NAMES.contains(&name.as_str()) && name.ends_with(".dll") {
                     out.insert(name, read_capped(fs::File::open(e.path())?)?);
                 }
             }
@@ -473,7 +506,7 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
         let parent = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str());
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
         // Only the DLLs Bifrost installs are kept, so the total stays bounded too.
-        if parent == Some(sub) && name.ends_with(".dll") && GENERATED_BESIDE_EXE.contains(&name.as_str()) {
+        if parent == Some(sub) && name.ends_with(".dll") && DXVK_DLL_NAMES.contains(&name.as_str()) {
             out.insert(name, read_capped(&mut entry)?);
         }
     }
@@ -534,6 +567,9 @@ pub struct ModernizeOptions {
     pub compat: Compat,
     /// Also apply the compatibility settings to this user's registry (Windows only); the script is written either way.
     pub apply_compat: bool,
+    /// Where to get cnc-ddraw for DirectDraw games (`None` leaves DirectDraw alone).
+    pub ddraw: Option<DxvkSource>,
+    pub upscale: Upscale,
 }
 
 impl Default for ModernizeOptions {
@@ -548,6 +584,8 @@ impl Default for ModernizeOptions {
             large_address_aware: true,
             compat: Compat::default(),
             apply_compat: false,
+            ddraw: Some(DxvkSource::Download),
+            upscale: Upscale::Off,
         }
     }
 }
@@ -572,6 +610,64 @@ impl Reporter<'_> {
     fn log(&mut self, s: impl Into<String>) {
         (self.sink)(Event::Log(s.into()));
     }
+}
+
+// ---- cnc-ddraw (DirectDraw) ----
+
+pub const CNC_DDRAW_VERSION: &str = "7.1.0.0";
+const CNC_DDRAW_URL: &str = "https://github.com/FunkyFr3sh/cnc-ddraw/releases/download/v7.1.0.0/cnc-ddraw.zip";
+const CNC_DDRAW_SHA256: &str = "0b13ab89a64c9918189b1dadd449ef6ed3cb3b7b19cabd96d8adbd95505bb908";
+const CNC_DDRAW_LICENSE: &str = include_str!("../third_party/cnc-ddraw/LICENSE");
+/// Files taken from a cnc-ddraw release, relative to the game executable's folder.
+const CNC_DDRAW_FILES: &[&str] = &["ddraw.dll", "Shaders/interpolation/fsr.glsl", "Shaders/interpolation/fsr.glsl.pass1"];
+const FSR_SHADER: &str = r"Shaders\interpolation\fsr.glsl";
+
+/// Spatial upscaling of the finished frame to the display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Upscale {
+    #[default]
+    Off,
+    /// AMD FidelityFX Super Resolution 1 (EASU + RCAS). DirectDraw games only for now, through cnc-ddraw's shader.
+    Fsr1,
+}
+
+/// Reads `CNC_DDRAW_FILES` from a cnc-ddraw release (`cnc-ddraw.zip` or its extracted folder).
+fn cnc_ddraw_files(src: &DxvkSource, r: &mut Reporter, lo: f32, hi: f32) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut out = BTreeMap::new();
+    if let DxvkSource::Local(dir) = src {
+        if dir.is_dir() {
+            for f in CNC_DDRAW_FILES {
+                let p = dir.join(f);
+                let data = fs::File::open(&p).with_context(|| format!("{} has no {f}; expected an extracted cnc-ddraw release", dir.display()))?;
+                out.insert(f.to_string(), read_capped(data)?);
+            }
+            return Ok(out);
+        }
+    }
+    let archive = match src {
+        DxvkSource::Download => download(&format!("cnc-ddraw {CNC_DDRAW_VERSION}"), CNC_DDRAW_URL, CNC_DDRAW_SHA256, &format!("cnc-ddraw-{CNC_DDRAW_VERSION}.zip"), r, lo, hi)?,
+        DxvkSource::Local(p) => read_capped(fs::File::open(p).with_context(|| format!("reading {}", p.display()))?)?,
+    };
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).context("reading the cnc-ddraw archive")?;
+    for f in CNC_DDRAW_FILES {
+        let entry = zip.by_name(f).with_context(|| format!("the cnc-ddraw release has no {f}"))?;
+        out.insert(f.to_string(), read_capped(entry)?);
+    }
+    Ok(out)
+}
+
+/// cnc-ddraw settings. With FSR 1 the game is drawn borderless at the display's size through the FSR shader;
+/// otherwise it keeps its own mode and gets bicubic scaling.
+fn ddraw_ini(upscale: Upscale, max_fps: u32) -> String {
+    let fsr = upscale == Upscale::Fsr1;
+    let fps = if max_fps > 0 { max_fps.to_string() } else { "-1".into() };
+    format!(
+        "; Written by the Bifrost Modernizer. All options: https://github.com/FunkyFr3sh/cnc-ddraw/blob/master/ddraw.ini\r\n\
+         [ddraw]\r\nfullscreen={fsr}\r\nwindowed={fsr}\r\nborder=false\r\nmaintas=true\r\nboxing=false\r\nmaxfps={fps}\r\n\
+         vsync=false\r\nadjmouse=true\r\nnonexclusive=true\r\nrenderer={}\r\nshader={}\r\n",
+        if fsr { "opengl" } else { "auto" },
+        if fsr { FSR_SHADER } else { "Bicubic" },
+    )
 }
 
 const REPORT: &str = "bifrost_modernize.txt";
@@ -692,7 +788,12 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     // Fallible work that doesn't touch the output comes first.
     let wanted: BTreeSet<&str> = if opts.dxvk.is_some() { apis.apis.keys().flat_map(|a| a.dxvk_dlls().iter().copied()).collect() } else { BTreeSet::new() };
     if opts.dxvk.is_some() && wanted.is_empty() {
-        let other: Vec<_> = apis.apis.keys().filter(|a| matches!(a, Api::DirectDraw | Api::OpenGl | Api::Glide)).map(|a| a.label()).collect();
+        let other: Vec<_> = apis
+            .apis
+            .keys()
+            .filter(|a| matches!(a, Api::Direct3D7 | Api::OpenGl | Api::Glide) || **a == Api::DirectDraw && opts.ddraw.is_none())
+            .map(|a| a.label())
+            .collect();
         warnings.push(if other.is_empty() {
             "No Direct3D 8-11 use found, so DXVK was not installed".into()
         } else {
@@ -707,6 +808,34 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         if let Some(missing) = wanted.iter().find(|n| !d.contains_key(**n)) {
             bail!("the DXVK release has no {missing}");
         }
+    }
+    let has = |a: Api| apis.apis.contains_key(&a);
+    let exe_dir_rel = exe_rel.parent().map(Path::to_path_buf).unwrap_or_default();
+    let ddraw_files = match &opts.ddraw {
+        Some(src) if has(Api::DirectDraw) => {
+            let skip = if info.arch != Arch::X86 {
+                Some("cnc-ddraw is 32-bit only")
+            } else if has(Api::Direct3D7) {
+                Some("the game draws 3D with Direct3D 7 or older, which cnc-ddraw doesn't render")
+            } else if [Api::Direct3D8, Api::Direct3D9, Api::Direct3D10, Api::Direct3D11, Api::Dxgi].into_iter().any(has) {
+                Some("the game also uses Direct3D 8 or newer")
+            } else if sc.root.join(&exe_dir_rel).join("ddraw.dll").exists() {
+                Some("the game ships its own ddraw.dll (probably a wrapper already)")
+            } else {
+                None
+            };
+            match skip {
+                Some(why) => {
+                    warnings.push(format!("DirectDraw left alone: {why}"));
+                    None
+                }
+                None => Some(cnc_ddraw_files(src, &mut r, 0.2, 0.25)?),
+            }
+        }
+        _ => None,
+    };
+    if opts.upscale == Upscale::Fsr1 && ddraw_files.is_none() {
+        warnings.push("FSR 1 is only available for DirectDraw games (through cnc-ddraw) so far, so it was skipped".into());
     }
 
     let target = if rerun {
@@ -749,7 +878,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         // Back up every file a re-run may touch so a failure leaves the previous output as it was.
         let backup: Vec<(PathBuf, Option<Vec<u8>>)> =
             job.touched(previous_exe.as_deref()).into_iter().chain([report_rel]).map(|p| (p.clone(), fs::read(out.join(&p)).ok())).collect();
-        let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
+        let res = job.apply(&apis, &wanted, dlls.as_ref(), ddraw_files.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
         let res = res.and_then(|()| Ok(fs::write(out.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings))?));
         if let Err(e) = res {
             for (p, data) in backup {
@@ -761,7 +890,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
             return Err(e);
         }
     } else {
-        let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
+        let res = job.apply(&apis, &wanted, dlls.as_ref(), ddraw_files.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
         let res = res.and_then(|()| {
             fs::write(target.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings))?;
             if out.exists() {
@@ -837,7 +966,20 @@ fn report(exe_rel: &Path, info: &PeInfo, apis: &ApiReport, changes: &[String], w
 const EXE_LINE: &str = "Game executable: ";
 const COMPAT_KEY: &str = r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 /// Files the Modernizer may write beside the game's executable.
-const GENERATED_BESIDE_EXE: &[&str] = &["d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll", "DXVK_LICENSE.txt", "dxvk.conf"];
+const GENERATED_BESIDE_EXE: &[&str] = &[
+    "d3d8.dll",
+    "d3d9.dll",
+    "d3d10core.dll",
+    "d3d11.dll",
+    "dxgi.dll",
+    "DXVK_LICENSE.txt",
+    "dxvk.conf",
+    "ddraw.dll",
+    "ddraw.ini",
+    "CNC_DDRAW_LICENSE.txt",
+    "Shaders/interpolation/fsr.glsl",
+    "Shaders/interpolation/fsr.glsl.pass1",
+];
 
 /// The executable named in a previous output's report, if it's a plain relative path.
 fn previous_exe(out: &Path) -> Option<PathBuf> {
@@ -900,6 +1042,7 @@ impl Job<'_> {
         apis: &ApiReport,
         wanted: &BTreeSet<&str>,
         dlls: Option<&BTreeMap<String, Vec<u8>>>,
+        ddraw: Option<&BTreeMap<String, Vec<u8>>>,
         previous_exe: Option<&Path>,
         changes: &mut Vec<String>,
         warnings: &mut Vec<String>,
@@ -913,6 +1056,10 @@ impl Job<'_> {
             // Back to the game's own files (this also un-patches a previously selected executable).
             for p in self.touched(previous_exe) {
                 self.reset(&p)?;
+            }
+            for e in [Some(exe_rel), previous_exe].into_iter().flatten() {
+                let d = self.target.join(e.parent().unwrap_or(Path::new("")));
+                let _ = fs::remove_dir(d.join("Shaders/interpolation")).and_then(|()| fs::remove_dir(d.join("Shaders"))); // only if empty
             }
         }
 
@@ -949,6 +1096,26 @@ impl Job<'_> {
             changes.push(format!("Installed DXVK {DXVK_VERSION} ({}): Direct3D now runs on Vulkan", names.join(", ")));
         }
 
+        if let Some(files) = ddraw {
+            r.at(0.88, "Installing cnc-ddraw");
+            for (rel, data) in files {
+                let dst = exe_dir.join(rel);
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(dst, data)?;
+            }
+            fs::write(exe_dir.join("CNC_DDRAW_LICENSE.txt"), CNC_DDRAW_LICENSE)?;
+            fs::write(exe_dir.join("ddraw.ini"), ddraw_ini(opts.upscale, opts.max_fps))?;
+            changes.push(format!("Installed cnc-ddraw {CNC_DDRAW_VERSION}: DirectDraw now renders through OpenGL / Direct3D 9"));
+            if opts.upscale == Upscale::Fsr1 {
+                changes.push("AMD FSR 1 upscales the game to the display (borderless fullscreen, aspect ratio kept)".into());
+            }
+            if opts.max_fps > 0 {
+                changes.push(format!("Capped the DirectDraw frame rate at {} FPS", opts.max_fps));
+            }
+        }
+
         let mut conf = Vec::new();
         if opts.anisotropy > 0 {
             conf.push(format!("d3d9.samplerAnisotropy = {}", opts.anisotropy));
@@ -968,8 +1135,8 @@ impl Job<'_> {
                 if opts.max_fps > 0 {
                     changes.push(format!("Capped the frame rate at {} FPS", opts.max_fps));
                 }
-            } else {
-                warnings.push("Anisotropic filtering and the frame-rate cap need DXVK, so they were skipped".into());
+            } else if ddraw.is_none() {
+                warnings.push("Anisotropic filtering and the frame-rate cap need DXVK or cnc-ddraw, so they were skipped".into());
             }
         }
 
