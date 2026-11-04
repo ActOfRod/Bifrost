@@ -35,9 +35,6 @@ object WindowsRuntime {
         withContext(Dispatchers.IO) {
             val rootFs = RootFS.find(appContext)
             val rootDir = rootFs.getRootDir()
-            resetPreferenceVersions(appContext)
-            clearRootDir(rootDir)
-
             val contentLength = TarCompressorUtils.getContentLength(
                 TarCompressorUtils.Type.ZSTD,
                 appContext,
@@ -46,12 +43,16 @@ object WindowsRuntime {
             )
             if (contentLength <= 0L) throw IOException("Could not read Windows runtime system files")
             val requiredSpace = contentLength + STORAGE_RESERVE_BYTES
-            if (rootDir.usableSpace < requiredSpace) {
+            val storageDirectory = rootDir.parentFile ?: rootDir
+            if (storageDirectory.usableSpace < requiredSpace) {
                 throw IOException(
                     "Not enough free storage to install Windows runtime; " +
                         "requires ${requiredSpace / (1024 * 1024)} MiB including reserve",
                 )
             }
+
+            resetPreferenceVersions(appContext)
+            clearRootDir(rootDir)
 
             progress(0)
             val totalSize = AtomicLong()
