@@ -361,12 +361,7 @@ impl App {
             ui.end_row();
             ui.label("Output system");
             if self.source == Source::Windows {
-                egui::ComboBox::from_id_salt("output_system")
-                    .selected_text("Android — Bifrost for Android package (.bifrost)")
-                    .width(380.0)
-                    .show_ui(ui, |ui| {
-                        let _ = ui.selectable_label(true, "Android — Bifrost for Android package (.bifrost)");
-                    });
+                ui.label("Android: Bifrost for Android package (.bifrost)");
             } else {
                 egui::ComboBox::from_id_salt("output_system").selected_text(self.output.label()).width(260.0).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.output, Output::Windows, Output::Windows.label());
@@ -447,45 +442,54 @@ impl App {
         ui.add_space(8.0);
 
         let mut picked = None;
-        egui::Grid::new("windows_package").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+        egui::Grid::new("windows_package").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
             ui.label("Game folder");
-            ui.label(self.windows_package.game.as_ref().map_or("none selected".to_string(), |path| path.display().to_string()));
-            if ui.button("Browse…").clicked() {
-                picked = rfd::FileDialog::new().pick_folder();
-            }
+            ui.horizontal(|ui| {
+                ui.label(self.windows_package.game.as_ref().map_or("none selected".to_string(), |path| path.display().to_string()));
+                if ui.button("Browse…").clicked() {
+                    picked = rfd::FileDialog::new().pick_folder();
+                }
+            });
             ui.end_row();
-        });
-        if let Some(path) = picked {
-            self.windows_package.set_game(path);
-        }
 
-        if let Some(Err(error)) = &self.windows_package.scan {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        }
-        if let Some(Ok(scan)) = &self.windows_package.scan {
-            let choices: Vec<_> = scan.exes.iter().map(exe_label).collect();
-            let selected = choices.get(self.windows_package.exe).cloned().unwrap_or_else(|| choices[0].clone());
-            egui::Grid::new("windows_package_details").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("");
+            ui.push_id("windows_package_game", |ui| {
+                let field = ui.make_persistent_id("typed_path");
+                let mut typed: String = ui.data_mut(|data| data.get_temp(field).unwrap_or_default());
+                let response = ui.add(egui::TextEdit::singleline(&mut typed).hint_text("or paste a path and press Enter").desired_width(380.0));
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) && !typed.trim().is_empty() {
+                    picked = Some(PathBuf::from(typed.trim()));
+                    typed.clear();
+                }
+                ui.data_mut(|data| data.insert_temp(field, typed));
+            });
+            ui.end_row();
+
+            if let Some(path) = picked.take() {
+                self.windows_package.set_game(path);
+            }
+
+            if let Some(Ok(scan)) = &self.windows_package.scan {
+                let choices: Vec<_> = scan.exes.iter().map(exe_label).collect();
+                let selected = choices.get(self.windows_package.exe).cloned().unwrap_or_else(|| choices[0].clone());
                 ui.label("Game .exe");
                 egui::ComboBox::from_id_salt("windows_package_exe").selected_text(selected).width(380.0).show_ui(ui, |ui| {
                     for (index, label) in choices.iter().enumerate() {
                         ui.selectable_value(&mut self.windows_package.exe, index, label);
                     }
                 });
-                ui.label("");
                 ui.end_row();
-            });
-        }
+            }
 
-        egui::Grid::new("windows_package_metadata").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Title (optional)");
-            ui.add(egui::TextEdit::singleline(&mut self.windows_package.title).hint_text("defaults to the folder name").desired_width(380.0));
-            ui.label("");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.windows_package.title).hint_text("defaults to the folder name").desired_width(380.0));
+            });
             ui.end_row();
 
             ui.label("Cover image (optional)");
-            ui.label(self.windows_package.cover.as_ref().map_or("none selected".to_string(), |path| path.display().to_string()));
             ui.horizontal(|ui| {
+                ui.label(self.windows_package.cover.as_ref().map_or("none selected".to_string(), |path| path.display().to_string()));
                 if ui.button("Choose…").clicked() {
                     self.windows_package.cover = rfd::FileDialog::new().add_filter("Cover image", &["png", "jpg", "jpeg"]).pick_file();
                 }
@@ -496,23 +500,27 @@ impl App {
             ui.end_row();
 
             ui.label("Package file");
-            let response = ui.add(egui::TextEdit::singleline(&mut self.windows_package.out).desired_width(380.0));
-            if response.changed() {
-                self.windows_package.out_edited = true;
-            }
-            if ui.button("Save as…").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Bifrost package", &["bifrost"]).save_file() {
-                    self.windows_package.out = path.display().to_string();
+            ui.horizontal(|ui| {
+                let response = ui.add(egui::TextEdit::singleline(&mut self.windows_package.out).desired_width(380.0));
+                if response.changed() {
                     self.windows_package.out_edited = true;
                 }
-            }
+                if ui.button("Save as…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Bifrost package", &["bifrost"]).save_file() {
+                        self.windows_package.out = path.display().to_string();
+                        self.windows_package.out_edited = true;
+                    }
+                }
+            });
             ui.end_row();
+
             ui.label("");
             ui.weak("An existing file is replaced.");
-            ui.label("");
             ui.end_row();
         });
-
+        if let Some(Err(error)) = &self.windows_package.scan {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
     }
 
     fn modern_form(&mut self, ui: &mut egui::Ui) {
