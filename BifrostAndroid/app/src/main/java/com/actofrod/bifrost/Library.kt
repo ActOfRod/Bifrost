@@ -31,6 +31,7 @@ data class LibraryEntry(
     val cover: String? = null,
     val addedAt: Long,
     val lastPlayed: Long? = null,
+    val containerId: Int? = null,
 )
 
 @Serializable

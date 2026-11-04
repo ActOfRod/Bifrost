@@ -1,6 +1,6 @@
 # Bifrost
 
-Bifrost recompiles decrypted Nintendo Switch games for Windows and Android, modernizes older Windows games, and provides an Android library for native apps and Windows games (with PC runtime planned).
+Bifrost recompiles decrypted Nintendo Switch games for Windows and Android, modernizes older Windows games, and provides an Android library for native apps and Windows games.
 
 Bifrost has four targets. Switch → Windows, Switch → Android, Windows → Android and the Modernizer are in progress.
 
@@ -8,7 +8,7 @@ Bifrost has four targets. Switch → Windows, Switch → Android, Windows → An
 |---|---|---|
 | **Switch → Windows** | Recompiles a Switch title into a Windows `.exe` | `█████▌░░░░` 5.5 / 10 stages |
 | **Switch → Android** | Recompiles a Switch title into an arm64 APK with a Vulkan renderer | `█████░░░░░` 5.5 / 11 stages |
-| **Windows → Android** | A launcher for native Android apps and Windows games imported as `.bifrost` packages | `██████░░░░` 4 / 7 stages |
+| **Windows → Android** | A launcher for native Android apps and Windows games imported as `.bifrost` packages | `███████░░░` 5 / 7 stages |
 | **Modernizer** | Updates an old Windows game (XP / Windows 7 era) to run better on current Windows and hardware | `███▌░░░░░░` 2.5 / 7 stages |
 
 The stage counts come from the checklists below: ✅ counts as 1, 🟡 (partly done) counts as ½ and ⬜ counts as 0. "Validated on a real title" is its own stage, and no target has reached it yet. All testing so far has used small test programs written for Bifrost.
@@ -48,7 +48,7 @@ The stage counts come from the checklists below: ✅ counts as 1, 🟡 (partly d
 
 ### Windows → Android
 
-The first stage is a landscape Big Picture-style Android launcher for native apps and Windows games packaged on a PC. The launcher installs or lists Android apps, auto-detects Bifrost ports, and imports `.bifrost` packages. Stage 2 will integrate Winlator's LGPL Wine/Box64/DXVK/Turnip runtime for PC games; the launcher does not recompile Windows games.
+The launcher is a landscape Big Picture-style Android library for native apps and Windows games packaged on a PC. It installs or lists Android apps, auto-detects Bifrost ports, imports `.bifrost` packages, and launches PC games through Winlator. Runtime integration is implemented but has not been tested on a device; the launcher does not recompile Windows games.
 
 | Stage | Status |
 |---|---|
@@ -56,9 +56,27 @@ The first stage is a landscape Big Picture-style Android launcher for native app
 | Native port library (install APK / installed apps / auto-detect Bifrost ports) | ✅ |
 | `.bifrost` packaging on PC (`bifrost pack`, GUI checkbox) | ✅ |
 | Import `.bifrost` into the launcher | ✅ |
-| Windows runtime (Wine + Box64 + DXVK + Turnip) | ⬜ |
+| Windows runtime (Wine + Box64 + Mesa + DXVK) | ✅ Implemented; not tested on a device |
 | Controller/touch input mapping for PC games | ⬜ |
 | Validated on a real title | ⬜ |
+
+#### Android runtime and source checkout
+
+The Android app ID is `com.actofrod`, and its arm64-v8a-only APK is about 250 MB. Winlator is included as an LGPL-2.1 submodule pinned at `2c33741d50c5daab0521a098be5c969f63b9e887`. Bifrost distributes modified Winlator build outputs: `scripts/prepare_winlator.py` rewrites the baked app-data path and provider/action identifiers, then repacks the `.tzst` runtime assets; the source submodule itself remains unmodified. The pinned source and preparation script are the corresponding source for those build outputs. Winlator includes Wine, Box64, Mesa Turnip/Zink/VirGL, DXVK/D8VK/VKD3D, cnc-ddraw, and Termux glibc patches.
+
+Clone with submodules, or initialize them after cloning:
+
+```sh
+git clone --recursive https://github.com/ActOfRod/Bifrost.git
+# For an existing checkout:
+git submodule update --init --recursive
+```
+
+Building the APK requires the `zstd` CLI. Run the preparation script once before Gradle, and again after any Winlator submodule bump:
+
+```sh
+python3 BifrostAndroid/scripts/prepare_winlator.py
+```
 
 ### Modernizer
 

@@ -8,19 +8,40 @@ plugins {
 val releaseKeystore = System.getenv("BIFROST_ANDROID_KEYSTORE")
 val appVersionCode = System.getenv("BIFROST_VERSION_CODE")?.toInt() ?: 1
 val appVersionName = System.getenv("BIFROST_VERSION_NAME") ?: "0.1.0-dev"
+val winlatorSource = file("../third_party/winlator-app")
+val winlatorOutput = layout.buildDirectory.dir("winlator")
+val winlatorStamp = file("build/winlator/.source-sha")
+val winlatorRevisionProcess = ProcessBuilder(
+    "git",
+    "-C",
+    winlatorSource.absolutePath,
+    "rev-parse",
+    "HEAD",
+).redirectErrorStream(true).start()
+val winlatorRevision = winlatorRevisionProcess.inputStream.bufferedReader().readText().trim()
+if (winlatorRevisionProcess.waitFor() != 0) {
+    throw GradleException("Unable to read the Winlator submodule revision")
+}
+if (!winlatorStamp.isFile || winlatorStamp.readText().trim() != winlatorRevision) {
+    throw GradleException("Prepared Winlator sources are missing or stale; run python3 scripts/prepare_winlator.py from BifrostAndroid")
+}
 
 android {
-    namespace = "com.actofrod.bifrost"
-    compileSdk = 34
+    namespace = "com.winlator"
+    compileSdk = 35
+    ndkVersion = "24.0.8215888"
 
     defaultConfig {
-        applicationId = "com.actofrod.bifrost"
+        applicationId = "com.actofrod"
         minSdk = 26
         // Stage 2 executes Wine/Box64 from app storage; target SDK 29+ blocks this with W^X.
         targetSdk = 28
         versionCode = appVersionCode
         versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     signingConfigs {
@@ -54,12 +75,35 @@ android {
         compose = true
     }
 
+    externalNativeBuild {
+        cmake {
+            path = file("build/winlator/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            java.srcDir(winlatorOutput.map { it.dir("java") })
+            res.srcDir(winlatorOutput.map { it.dir("res") })
+            assets.srcDir(winlatorOutput.map { it.dir("assets") })
+            jniLibs.srcDir(winlatorOutput.map { it.dir("jniLibs") })
+        }
+    }
+
     lint {
         disable += "ExpiredTargetSdkVersion"
     }
 }
 
 dependencies {
+    implementation("androidx.appcompat:appcompat:1.4.0")
+    implementation("androidx.preference:preference:1.2.1")
+    implementation("com.google.android.material:material:1.4.0")
+    implementation("com.github.luben:zstd-jni:1.5.2-3@aar")
+    implementation("org.tukaani:xz:1.7")
+    implementation("org.apache.commons:commons-compress:1.20")
+    implementation("androidx.lifecycle:lifecycle-process:2.5.1")
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.13.1")
