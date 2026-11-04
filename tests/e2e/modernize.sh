@@ -97,6 +97,11 @@ mv "$W/olink/System" "$W/elsewhere"; ln -s "$W/elsewhere" "$W/olink/System"; tou
 if $BF modernize "$W/g32" -o "$W/olink" >/dev/null 2>&1; then fail "re-run through a linked output folder accepted"; fi
 [ -f "$W/elsewhere/keep.dll" ] && [ ! -f "$W/elsewhere/d3d9.dll" ] || fail "re-run wrote through a link"
 rm "$W/g32/leak.txt" "$W/g32/Loop" "$W/g32/Other"
+if $BF modernize "$W/g32" -o "$W/missing/../g32/out2" >/dev/null 2>&1; then fail "output inside the game via .. accepted"; fi
+[ ! -e "$W/g32/out2" ] || fail "staging created inside the game via .."
+ln -s Game64.exe "$W/g64/Linked.exe"
+if $BF modernize "$W/g64/Linked.exe" -o "$W/olinkexe" --no-dxvk >/dev/null 2>&1; then fail "linked exe input accepted"; fi
+rm "$W/g64/Linked.exe"
 mkdir "$W/.ostage.bifrost-staging"; echo mine > "$W/.ostage.bifrost-staging/notes.txt"
 $BF modernize "$W/g32" -o "$W/ostage" --no-dxvk >/dev/null 2>&1 || fail "run beside an old staging-named folder"
 grep -q mine "$W/.ostage.bifrost-staging/notes.txt" || fail "unrelated staging-named folder deleted"

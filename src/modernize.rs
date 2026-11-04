@@ -299,6 +299,9 @@ fn ext_is(p: &Path, ext: &str) -> bool {
 
 /// Finds the game's executables. `game` may be the install folder or the game's .exe itself.
 pub fn scan(game: &Path) -> Result<Scan> {
+    if fs::symlink_metadata(game).is_ok_and(|m| m.file_type().is_symlink()) && game.is_file() {
+        bail!("{} is a link; choose the game's real executable or its folder", game.display());
+    }
     let (root, only) = if game.is_file() {
         let parent = game.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         (parent.to_path_buf(), Some(game.to_path_buf()))
@@ -455,7 +458,7 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
             let dir = dir.with_context(|| format!("{} has no {sub}/d3d9.dll; expected an extracted DXVK release", p.display()))?;
             for e in fs::read_dir(&dir)?.flatten() {
                 let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.ends_with(".dll") {
+                if GENERATED_BESIDE_EXE.contains(&name.as_str()) && name.ends_with(".dll") {
                     out.insert(name, read_capped(fs::File::open(e.path())?)?);
                 }
             }
@@ -469,7 +472,8 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
         let path = entry.path()?.to_path_buf();
         let parent = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str());
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-        if parent == Some(sub) && name.ends_with(".dll") {
+        // Only the DLLs Bifrost installs are kept, so the total stays bounded too.
+        if parent == Some(sub) && name.ends_with(".dll") && GENERATED_BESIDE_EXE.contains(&name.as_str()) {
             out.insert(name, read_capped(&mut entry)?);
         }
     }
@@ -711,8 +715,12 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         out.clone()
     } else {
         let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = out.parent().context("the output folder needs a parent folder")?;
+        fs::create_dir_all(parent)?;
+        // Re-check now the parent exists and resolves, so `..` or links in the path can't place staging inside the game.
+        let real = fs::canonicalize(parent)?;
+        if real.starts_with(&root) || root.starts_with(real.join(&name)) {
+            bail!("the output folder must be outside the game folder (and not contain it)");
         }
         // A fresh, exclusively created folder, so only a folder this run made is ever removed.
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
