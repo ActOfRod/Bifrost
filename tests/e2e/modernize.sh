@@ -37,7 +37,7 @@ echo "ok   scan"
 
 $BF modernize "$W/g32" -o "$W/o32" --max-fps 60 > /dev/null 2>&1 || $BF modernize "$W/g32" -o "$W/o32" --max-fps 60
 O=$W/o32/System
-i686-w64-mingw32-objdump -p "$O/Game.exe" | grep -q "large address aware" || fail "LAA flag"
+grep -q "large address aware" <(i686-w64-mingw32-objdump -p "$O/Game.exe") || fail "LAA flag"
 python3 - "$O/Game.exe" <<'PY' || fail "PE checksum"
 import struct, sys
 d = open(sys.argv[1], 'rb').read(); off = struct.unpack_from('<I', d, 0x3c)[0] + 24 + 64
@@ -49,7 +49,7 @@ s = (s & 0xffff) + (s >> 16)
 sys.exit(0 if struct.unpack_from('<I', d, off)[0] == (s + len(d)) & 0xffffffff else 1)
 PY
 for f in d3d8.dll d3d9.dll DXVK_LICENSE.txt; do [ -f "$O/$f" ] || fail "missing $f"; done
-file "$O/d3d9.dll" | grep -q "Intel 80386" || fail "32-bit DXVK expected"
+grep -q "Intel 80386" <(file "$O/d3d9.dll") || fail "32-bit DXVK expected"
 grep -q "d3d9.samplerAnisotropy = 16" "$O/dxvk.conf" && grep -q "d3d9.maxFrameRate = 60" "$O/dxvk.conf" || fail dxvk.conf
 grep -q 'System\\Game.exe" /t REG_SZ /d "~ HIGHDPIAWARE DISABLEDXMAXIMIZEDWINDOWEDMODE"' "$W/o32/bifrost_compat.bat" || fail "compat script"
 [ -f "$W/o32/unins000.exe" ] && [ -f "$W/o32/bifrost_modernize.txt" ] || fail "copy/report"
@@ -57,7 +57,7 @@ echo "ok   32-bit Direct3D 8 game"
 
 $BF modernize "$W/g64/Game64.exe" -o "$W/o64" --anisotropy 8 --xp-mode > /dev/null 2>&1
 [ -f "$W/o64/d3d11.dll" ] && [ -f "$W/o64/dxgi.dll" ] && [ ! -f "$W/o64/d3d9.dll" ] || fail "64-bit DXVK set"
-file "$W/o64/d3d11.dll" | grep -q "x86-64" || fail "64-bit DXVK expected"
+grep -q "x86-64" <(file "$W/o64/d3d11.dll") || fail "64-bit DXVK expected"
 grep -q "d3d11.samplerAnisotropy = 8" "$W/o64/dxvk.conf" || fail "64-bit dxvk.conf"
 grep -q "WINXPSP3" "$W/o64/bifrost_compat.bat" || fail "XP mode"
 cmp -s "$W/g64/Game64.exe" "$W/o64/Game64.exe" || fail "64-bit exe should not be patched"
@@ -76,7 +76,7 @@ grep -q keep "$W/forged/notes.txt" || fail "forged output touched"
 mkdir -p "$W/forged/System" && cp "$W/g64/Game64.exe" "$W/forged/System/Game.exe"
 if $BF modernize "$W/g32" -o "$W/forged" >/dev/null 2>&1; then fail "folder with a different exe accepted"; fi
 cmp -s "$W/g64/Game64.exe" "$W/forged/System/Game.exe" || fail "unrelated exe overwritten"
-ls -a "$W" | grep -q bifrost- && fail "staging folder left behind"
+grep -q bifrost- <(ls -a "$W") && fail "staging folder left behind"
 if $BF modernize "$W/g32" -o "$W/o32" --dxvk "$W/missing.tar.gz" >/dev/null 2>&1; then fail "missing DXVK accepted"; fi
 [ -f "$W/o32/Saves/slot1.sav" ] && [ -f "$W/o32/System/Game.exe" ] || fail "failed re-run damaged the previous output"
 (cd "$W/g64" && $BF modernize Game64.exe -o "$W/o64cwd" --no-dxvk >/dev/null 2>&1) || fail "exe in the current directory"
