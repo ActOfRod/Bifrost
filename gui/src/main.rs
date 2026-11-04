@@ -139,7 +139,17 @@ impl WindowsPackage {
         };
         if !self.out_edited {
             let name = p.file_name().map(|name| name.to_string_lossy().into_owned()).filter(|name| !name.is_empty()).unwrap_or_else(|| "game".into());
-            let out_dir = std::env::current_dir().map(|cwd| cwd.join("bifrost-out")).unwrap_or_else(|_| PathBuf::from("bifrost-out"));
+            let game_root = std::fs::canonicalize(&p).ok();
+            let proposed_out_dir = std::env::current_dir()
+                .and_then(std::fs::canonicalize)
+                .map(|cwd| cwd.join("bifrost-out"))
+                .unwrap_or_else(|_| PathBuf::from("bifrost-out"));
+            let out_dir = match game_root {
+                Some(game_root) if proposed_out_dir.starts_with(&game_root) => {
+                    game_root.parent().map(|parent| parent.to_path_buf()).unwrap_or(proposed_out_dir)
+                }
+                _ => proposed_out_dir,
+            };
             self.out = out_dir.join(format!("{name}.bifrost")).display().to_string();
         }
         self.game = Some(p);
