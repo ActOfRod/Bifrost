@@ -1163,3 +1163,24 @@ impl Job<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ddraw_ini, uses_legacy_d3d, Upscale};
+
+    #[test]
+    fn detects_direct3d7_interface_id_bytes() {
+        let iid_d3d7 = [
+            0x77, 0x9e, 0x04, 0xf5, 0x61, 0x48, 0xd2, 0x11, 0xa4, 0x07, 0x00, 0xa0, 0xc9, 0x06, 0x29, 0xa8,
+        ];
+        assert!(uses_legacy_d3d(&iid_d3d7));
+        assert!(!uses_legacy_d3d(&[0; 32]));
+    }
+
+    #[test]
+    fn fsr_ddraw_ini_sets_fps_and_shader() {
+        let ini = ddraw_ini(Upscale::Fsr1, 60);
+        assert!(ini.contains("maxfps=60"));
+        assert!(ini.contains(r"shader=Shaders\interpolation\fsr.glsl"));
+    }
+}
