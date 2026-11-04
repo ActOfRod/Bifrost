@@ -88,6 +88,18 @@ mkdir -p "$W/busy" && touch "$W/busy/keep"
 if $BF modernize "$W/g32" -o "$W/busy" >/dev/null 2>&1; then fail "non-empty output accepted"; fi
 if $BF modernize "$W/g32" -o "$W/g32/out" >/dev/null 2>&1; then fail "output inside the game accepted"; fi
 [ ! -e "$W/g32/out" ] || fail "rejected output folder was created inside the game"
+echo secret > "$W/secret.txt"
+ln -s "$W/secret.txt" "$W/g32/leak.txt"; ln -s "$W/g32" "$W/g32/Loop"; ln -s "$W/g64" "$W/g32/Other"
+$BF modernize "$W/g32" -o "$W/olink" --no-dxvk >/dev/null 2>&1 || fail "game with links"
+[ ! -e "$W/olink/leak.txt" ] && [ ! -e "$W/olink/Loop" ] || fail "links in the game were copied"
+if $BF modernize "$W/g32" --exe Other/Game64.exe -o "$W/olink2" >/dev/null 2>&1; then fail "--exe through a link accepted"; fi
+mv "$W/olink/System" "$W/elsewhere"; ln -s "$W/elsewhere" "$W/olink/System"; touch "$W/elsewhere/keep.dll"
+if $BF modernize "$W/g32" -o "$W/olink" >/dev/null 2>&1; then fail "re-run through a linked output folder accepted"; fi
+[ -f "$W/elsewhere/keep.dll" ] && [ ! -f "$W/elsewhere/d3d9.dll" ] || fail "re-run wrote through a link"
+rm "$W/g32/leak.txt" "$W/g32/Loop" "$W/g32/Other"
+mkdir "$W/.ostage.bifrost-staging"; echo mine > "$W/.ostage.bifrost-staging/notes.txt"
+$BF modernize "$W/g32" -o "$W/ostage" --no-dxvk >/dev/null 2>&1 || fail "run beside an old staging-named folder"
+grep -q mine "$W/.ostage.bifrost-staging/notes.txt" || fail "unrelated staging-named folder deleted"
 [ "$before" == "$(cd "$W" && find g32 g64 -type f -exec sha256sum {} + | sort)" ] || fail "original files changed"
 echo "ok   safety checks"
 echo "all modernizer checks passed"

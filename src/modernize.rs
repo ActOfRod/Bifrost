@@ -45,13 +45,19 @@ pub struct PeInfo {
 }
 
 fn rd16(d: &[u8], o: usize) -> Result<u16> {
-    d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]])).context("truncated PE")
+    d.get(o..o + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .context("truncated PE")
 }
 fn rd32(d: &[u8], o: usize) -> Result<u32> {
-    d.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).context("truncated PE")
+    d.get(o..o + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .context("truncated PE")
 }
 fn rd64(d: &[u8], o: usize) -> Result<u64> {
-    d.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap())).context("truncated PE")
+    d.get(o..o + 8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        .context("truncated PE")
 }
 
 pub fn parse_pe(d: &[u8]) -> Result<PeInfo> {
@@ -78,10 +84,18 @@ pub fn parse_pe(d: &[u8]) -> Result<PeInfo> {
         0x20b => true,
         m => bail!("unknown optional header magic {m:#x}"),
     };
-    let image_base = if pe32plus { rd64(d, opt + 24)? } else { rd32(d, opt + 28)? as u64 };
+    let image_base = if pe32plus {
+        rd64(d, opt + 24)?
+    } else {
+        rd32(d, opt + 28)? as u64
+    };
     let checksum_off = opt + 64;
     let subsystem = rd16(d, opt + 68)?;
-    let (ndirs_off, dirs) = if pe32plus { (opt + 108, opt + 112) } else { (opt + 92, opt + 96) };
+    let (ndirs_off, dirs) = if pe32plus {
+        (opt + 108, opt + 112)
+    } else {
+        (opt + 92, opt + 96)
+    };
     let ndirs = rd32(d, ndirs_off)? as usize;
     let dir = |i: usize| -> Result<(u32, u32)> {
         if i >= ndirs {
@@ -272,33 +286,58 @@ pub struct ApiReport {
 }
 
 const SKIP_EXE: &[&str] = &[
-    "unins", "setup", "install", "vcredist", "vc_redist", "dxsetup", "dxwebsetup", "dotnet", "crashreport", "crashhandler",
-    "bugreport", "uninst", "autorun", "launcherupdate", "updater", "physx", "oalinst",
+    "unins",
+    "setup",
+    "install",
+    "vcredist",
+    "vc_redist",
+    "dxsetup",
+    "dxwebsetup",
+    "dotnet",
+    "crashreport",
+    "crashhandler",
+    "bugreport",
+    "uninst",
+    "autorun",
+    "launcherupdate",
+    "updater",
+    "physx",
+    "oalinst",
 ];
 
 fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
+    // Links are never followed, so a link can't loop or pull in files from outside the game.
+    let mut entries: Vec<_> = rd
+        .flatten()
+        .filter_map(|e| Some((e.path(), e.file_type().ok()?)))
+        .filter(|(_, t)| !t.is_symlink())
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (p, t) in entries {
+        if t.is_dir() {
             if depth > 0 {
                 walk(&p, depth - 1, out);
             }
-        } else {
+        } else if t.is_file() {
             out.push(p);
         }
     }
 }
 
 fn ext_is(p: &Path, ext: &str) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
 /// Finds the game's executables. `game` may be the install folder or the game's .exe itself.
 pub fn scan(game: &Path) -> Result<Scan> {
     let (root, only) = if game.is_file() {
-        let parent = game.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let parent = game
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         (parent.to_path_buf(), Some(game.to_path_buf()))
     } else if game.is_dir() {
         (game.to_path_buf(), None)
@@ -312,17 +351,30 @@ pub fn scan(game: &Path) -> Result<Scan> {
     }
     let mut exes = Vec::new();
     for f in files.into_iter().filter(|f| ext_is(f, "exe")) {
-        let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let name = f
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if only.is_none() && SKIP_EXE.iter().any(|s| name.contains(s)) {
             continue;
         }
         let Ok(data) = fs::read(&f) else { continue };
         let Ok(info) = parse_pe(&data) else { continue };
         let rel = f.strip_prefix(&root).unwrap_or(&f).to_path_buf();
-        exes.push(ExeCandidate { path: rel, info, size: data.len() as u64 });
+        exes.push(ExeCandidate {
+            path: rel,
+            info,
+            size: data.len() as u64,
+        });
     }
     let score = |e: &ExeCandidate| -> u64 {
-        let draws = e.info.imports.iter().filter_map(|d| Api::from_dll(d)).any(|a| a <= Api::Glide);
+        let draws = e
+            .info
+            .imports
+            .iter()
+            .filter_map(|d| Api::from_dll(d))
+            .any(|a| a <= Api::Glide);
         (draws as u64) * (1 << 40) + (e.info.gui as u64) * (1 << 39) + e.size
     };
     let main = (0..exes.len()).max_by_key(|&i| score(&exes[i]));
@@ -335,10 +387,18 @@ pub fn scan(game: &Path) -> Result<Scan> {
 /// Collects the APIs used by `exe` (relative to `root`) and the DLLs in its folder.
 pub fn detect_apis(root: &Path, exe: &Path) -> ApiReport {
     let mut rep = ApiReport::default();
-    let exe_dir = root.join(exe).parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+    let exe_dir = root
+        .join(exe)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
     let mut files = vec![root.join(exe)];
     if let Ok(rd) = fs::read_dir(&exe_dir) {
-        let mut dlls: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| ext_is(p, "dll")).collect();
+        let mut dlls: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| ext_is(p, "dll"))
+            .collect();
         dlls.sort();
         files.extend(dlls);
     }
@@ -347,7 +407,11 @@ pub fn detect_apis(root: &Path, exe: &Path) -> ApiReport {
         .flat_map(|a| a.dxvk_dlls().iter().copied())
         .collect();
     for f in files {
-        let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let name = f
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if installable.contains(name.as_str()) {
             rep.bundled_system_dlls.push(name);
             continue; // a bundled d3d9.dll etc. is a wrapper, not the game
@@ -368,7 +432,8 @@ pub fn detect_apis(root: &Path, exe: &Path) -> ApiReport {
 // ---- DXVK ----
 
 pub const DXVK_VERSION: &str = "3.1.1";
-const DXVK_URL: &str = "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz";
+const DXVK_URL: &str =
+    "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz";
 const DXVK_SHA256: &str = "40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608";
 const DXVK_LICENSE: &str = include_str!("../third_party/dxvk/LICENSE");
 
@@ -392,14 +457,20 @@ pub fn cache_dir() -> PathBuf {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn download_dxvk(r: &mut Reporter, lo: f32, hi: f32) -> Result<Vec<u8>> {
     let path = cache_dir().join(format!("dxvk-{DXVK_VERSION}.tar.gz"));
     if let Ok(data) = fs::read(&path) {
         if sha256_hex(&data) == DXVK_SHA256 {
-            r.log(format!("Using cached DXVK {DXVK_VERSION} ({})", path.display()));
+            r.log(format!(
+                "Using cached DXVK {DXVK_VERSION} ({})",
+                path.display()
+            ));
             return Ok(data);
         }
     }
@@ -416,7 +487,10 @@ fn download_dxvk(r: &mut Reporter, lo: f32, hi: f32) -> Result<Vec<u8>> {
         }
         data.extend_from_slice(&buf[..n]);
         if let Some(t) = total.filter(|&t| t > 0) {
-            r.at(lo + (hi - lo) * (data.len() as f32 / t as f32), format!("Downloading DXVK {DXVK_VERSION}"));
+            r.at(
+                lo + (hi - lo) * (data.len() as f32 / t as f32),
+                format!("Downloading DXVK {DXVK_VERSION}"),
+            );
         }
     }
     if sha256_hex(&data) != DXVK_SHA256 {
@@ -428,8 +502,25 @@ fn download_dxvk(r: &mut Reporter, lo: f32, hi: f32) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Reads at most 256 MB, so a crafted archive or file can't exhaust memory.
+fn read_capped(r: impl Read) -> Result<Vec<u8>> {
+    const CAP: u64 = 256 << 20;
+    let mut data = Vec::new();
+    r.take(CAP + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > CAP {
+        bail!("a file in the DXVK release is larger than 256 MB; not using it");
+    }
+    Ok(data)
+}
+
 /// Reads the DLLs for `arch` from a DXVK release, keyed by lower-case file name.
-fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -> Result<BTreeMap<String, Vec<u8>>> {
+fn dxvk_dlls(
+    src: &DxvkSource,
+    arch: Arch,
+    r: &mut Reporter,
+    lo: f32,
+    hi: f32,
+) -> Result<BTreeMap<String, Vec<u8>>> {
     let sub = match arch {
         Arch::X86 => "x32",
         Arch::X64 => "x64",
@@ -438,28 +529,42 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
     let archive = match src {
         DxvkSource::Download => download_dxvk(r, lo, hi)?,
         DxvkSource::Local(p) if p.is_dir() => {
-            let dir = [p.join(sub), p.clone()].into_iter().find(|d| d.join("d3d9.dll").is_file());
-            let dir = dir.with_context(|| format!("{} has no {sub}/d3d9.dll; expected an extracted DXVK release", p.display()))?;
+            let dir = [p.join(sub), p.clone()]
+                .into_iter()
+                .find(|d| d.join("d3d9.dll").is_file());
+            let dir = dir.with_context(|| {
+                format!(
+                    "{} has no {sub}/d3d9.dll; expected an extracted DXVK release",
+                    p.display()
+                )
+            })?;
             for e in fs::read_dir(&dir)?.flatten() {
                 let name = e.file_name().to_string_lossy().to_ascii_lowercase();
                 if name.ends_with(".dll") {
-                    out.insert(name, fs::read(e.path())?);
+                    out.insert(name, read_capped(fs::File::open(e.path())?)?);
                 }
             }
             return Ok(out);
         }
-        DxvkSource::Local(p) => fs::read(p).with_context(|| format!("reading {}", p.display()))?,
+        DxvkSource::Local(p) => {
+            read_capped(fs::File::open(p).with_context(|| format!("reading {}", p.display()))?)?
+        }
     };
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]));
     for entry in tar.entries().context("reading the DXVK archive")? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
-        let parent = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str());
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if parent == Some(sub) && name.ends_with(".dll") {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data)?;
-            out.insert(name, data);
+            out.insert(name, read_capped(&mut entry)?);
         }
     }
     if out.is_empty() {
@@ -498,7 +603,11 @@ impl Compat {
 
 impl Default for Compat {
     fn default() -> Self {
-        Compat { high_dpi: true, disable_fullscreen_optimizations: true, xp_mode: false }
+        Compat {
+            high_dpi: true,
+            disable_fullscreen_optimizations: true,
+            xp_mode: false,
+        }
     }
 }
 
@@ -561,29 +670,73 @@ impl Reporter<'_> {
 
 const REPORT: &str = "bifrost_modernize.txt";
 
-fn copy_tree(src: &Path, dst: &Path, total: u64, done: &mut u64, r: &mut Reporter, lo: f32, hi: f32) -> Result<()> {
+/// Copies `src` into `dst`, skipping links (returned) so nothing outside the game is copied.
+#[allow(clippy::too_many_arguments)]
+fn copy_tree(
+    src: &Path,
+    dst: &Path,
+    total: u64,
+    done: &mut u64,
+    r: &mut Reporter,
+    lo: f32,
+    hi: f32,
+    links: &mut Vec<PathBuf>,
+) -> Result<()> {
     fs::create_dir_all(dst)?;
     for e in fs::read_dir(src)?.flatten() {
         let (s, d) = (e.path(), dst.join(e.file_name()));
-        if e.file_type()?.is_dir() {
-            copy_tree(&s, &d, total, done, r, lo, hi)?;
+        let t = e.file_type()?;
+        if t.is_symlink() || is_reparse_point(&s) {
+            links.push(s);
+        } else if t.is_dir() {
+            copy_tree(&s, &d, total, done, r, lo, hi, links)?;
         } else {
             *done += fs::copy(&s, &d).with_context(|| format!("copying {}", s.display()))?;
-            r.at(lo + (hi - lo) * (*done as f32 / total.max(1) as f32), "Copying the game");
+            r.at(
+                lo + (hi - lo) * (*done as f32 / total.max(1) as f32),
+                "Copying the game",
+            );
         }
     }
     Ok(())
 }
 
+#[cfg(windows)]
+fn is_reparse_point(p: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    fs::symlink_metadata(p).is_ok_and(|m| m.file_attributes() & 0x400 != 0) // FILE_ATTRIBUTE_REPARSE_POINT (junctions)
+}
+#[cfg(not(windows))]
+fn is_reparse_point(_: &Path) -> bool {
+    false
+}
+
+/// Whether `rel` (or any folder on the way to it) under `base` is a link, which a write could be redirected through.
+fn through_link(base: &Path, rel: &Path) -> bool {
+    let mut p = base.to_path_buf();
+    rel.components().any(|c| {
+        p.push(c);
+        fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) || is_reparse_point(&p)
+    })
+}
+
 fn tree_size(p: &Path) -> u64 {
     let mut files = Vec::new();
     walk(p, usize::MAX, &mut files);
-    files.iter().filter_map(|f| f.metadata().ok()).map(|m| m.len()).sum()
+    files
+        .iter()
+        .filter_map(|f| f.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// Absolute, symlink-free form of `p`, which need not exist yet.
 fn resolve(p: &Path) -> Result<PathBuf> {
-    let abs = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir()?.join(p) };
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(p)
+    };
     let mut base = abs.as_path();
     let mut rest = Vec::new();
     loop {
@@ -601,7 +754,10 @@ fn resolve(p: &Path) -> Result<PathBuf> {
 }
 
 fn win_path(p: &Path) -> String {
-    p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("\\")
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("\\")
 }
 
 pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<ModernizeOutput> {
@@ -614,7 +770,15 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     let exe_rel = match &opts.exe {
         Some(e) => {
             let e = e.strip_prefix(&sc.root).unwrap_or(e).to_path_buf();
-            if !e.components().all(|c| matches!(c, Component::Normal(_))) || !sc.root.join(&e).is_file() {
+            let inside = fs::canonicalize(sc.root.join(&e))
+                .ok()
+                .zip(fs::canonicalize(&sc.root).ok())
+                .is_some_and(|(f, r)| f.starts_with(r));
+            if !e.components().all(|c| matches!(c, Component::Normal(_)))
+                || !sc.root.join(&e).is_file()
+                || !inside
+                || through_link(&sc.root, &e)
+            {
                 bail!("{} is not in {}", e.display(), sc.root.display());
             }
             e
@@ -624,7 +788,11 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     let exe_data = fs::read(sc.root.join(&exe_rel))?;
     let info = parse_pe(&exe_data).with_context(|| format!("reading {}", exe_rel.display()))?;
     let apis = detect_apis(&sc.root, &exe_rel);
-    r.log(format!("Game executable: {} ({})", exe_rel.display(), info.arch.label()));
+    r.log(format!(
+        "Game executable: {} ({})",
+        exe_rel.display(),
+        info.arch.label()
+    ));
     for (api, files) in &apis.apis {
         let names: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
         r.log(format!("  uses {} ({})", api.label(), names.join(", ")));
@@ -637,7 +805,8 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     }
     // A previous output of this game is updated in place: only the executable and the files Bifrost writes are
     // touched, so saves and edited settings survive. A new output is built in a staging folder and moved into place.
-    let rerun = out.join(REPORT).is_file() && fs::read(out.join(&exe_rel)).is_ok_and(|d| same_exe(&exe_data, &info, &d));
+    let rerun = out.join(REPORT).is_file()
+        && fs::read(out.join(&exe_rel)).is_ok_and(|d| same_exe(&exe_data, &info, &d));
     if out.is_file() || !rerun && fs::read_dir(&out).is_ok_and(|mut d| d.next().is_some()) {
         if out.join(REPORT).is_file() {
             bail!(
@@ -646,13 +815,28 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
                 exe_rel.display()
             );
         }
-        bail!("{} is not empty; choose an empty folder or a previous Modernizer output of this game", out.display());
+        bail!(
+            "{} is not empty; choose an empty folder or a previous Modernizer output of this game",
+            out.display()
+        );
     }
 
     // Fallible work that doesn't touch the output comes first.
-    let wanted: BTreeSet<&str> = if opts.dxvk.is_some() { apis.apis.keys().flat_map(|a| a.dxvk_dlls().iter().copied()).collect() } else { BTreeSet::new() };
+    let wanted: BTreeSet<&str> = if opts.dxvk.is_some() {
+        apis.apis
+            .keys()
+            .flat_map(|a| a.dxvk_dlls().iter().copied())
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
     if opts.dxvk.is_some() && wanted.is_empty() {
-        let other: Vec<_> = apis.apis.keys().filter(|a| matches!(a, Api::DirectDraw | Api::OpenGl | Api::Glide)).map(|a| a.label()).collect();
+        let other: Vec<_> = apis
+            .apis
+            .keys()
+            .filter(|a| matches!(a, Api::DirectDraw | Api::OpenGl | Api::Glide))
+            .map(|a| a.label())
+            .collect();
         warnings.push(if other.is_empty() {
             "No Direct3D 8-11 use found, so DXVK was not installed".into()
         } else {
@@ -670,32 +854,98 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     }
 
     let target = if rerun {
-        r.log("Updating the previous Modernizer output in place (saves and edited settings are kept)");
-        changes.push("Updated the existing modernized copy; files the player added or changed were kept".into());
+        r.log(
+            "Updating the previous Modernizer output in place (saves and edited settings are kept)",
+        );
+        changes.push(
+            "Updated the existing modernized copy; files the player added or changed were kept"
+                .into(),
+        );
         out.clone()
     } else {
-        let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let stage = out.with_file_name(format!(".{name}.bifrost-staging"));
-        if stage.exists() {
-            fs::remove_dir_all(&stage)?;
+        let name = out
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
         }
+        // A fresh, exclusively created folder, so only a folder this run made is ever removed.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let stage = out.with_file_name(format!(
+            ".{name}.bifrost-staging-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&stage).with_context(|| format!("creating {}", stage.display()))?;
         let total = tree_size(&root);
-        let mut done = 0;
-        if let Err(e) = copy_tree(&root, &stage, total, &mut done, &mut r, 0.2, 0.7) {
+        let (mut done, mut links) = (0, Vec::new());
+        if let Err(e) = copy_tree(
+            &root, &stage, total, &mut done, &mut r, 0.2, 0.7, &mut links,
+        ) {
             let _ = fs::remove_dir_all(&stage);
             return Err(e);
         }
-        changes.push(format!("Copied the game ({:.1} MB); the original install is unchanged", total as f64 / 1e6));
+        if !links.is_empty() {
+            warnings.push(format!(
+                "Skipped {} link(s) in the game folder (links aren't copied)",
+                links.len()
+            ));
+        }
+        changes.push(format!(
+            "Copied the game ({:.1} MB); the original install is unchanged",
+            total as f64 / 1e6
+        ));
         stage
     };
 
     let previous_exe = if rerun { previous_exe(&out) } else { None };
-    let job = Job { opts, root: &root, target: &target, exe_rel: &exe_rel, exe_data: &exe_data, info: &info, rerun };
+    let job = Job {
+        opts,
+        root: &root,
+        target: &target,
+        exe_rel: &exe_rel,
+        exe_data: &exe_data,
+        info: &info,
+        rerun,
+    };
+    if rerun {
+        if let Some(p) = job
+            .touched(previous_exe.as_deref())
+            .iter()
+            .chain([&PathBuf::from(REPORT)])
+            .find(|p| through_link(&out, p))
+        {
+            bail!(
+                "{} in the output is (or is inside) a link; not updating it",
+                p.display()
+            );
+        }
+    }
     if rerun {
         // Back up every file a re-run may touch so a failure leaves the previous output as it was.
-        let backup: Vec<(PathBuf, Option<Vec<u8>>)> =
-            job.touched(previous_exe.as_deref()).into_iter().map(|p| (p.clone(), fs::read(out.join(&p)).ok())).collect();
-        if let Err(e) = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r) {
+        let backup: Vec<(PathBuf, Option<Vec<u8>>)> = job
+            .touched(previous_exe.as_deref())
+            .into_iter()
+            .chain([PathBuf::from(REPORT)])
+            .map(|p| (p.clone(), fs::read(out.join(&p)).ok()))
+            .collect();
+        let res = job.apply(
+            &apis,
+            &wanted,
+            dlls.as_ref(),
+            previous_exe.as_deref(),
+            &mut changes,
+            &mut warnings,
+            &mut r,
+        );
+        if let Err(e) = res.and_then(|()| {
+            Ok(fs::write(
+                out.join(REPORT),
+                report(&exe_rel, &info, &apis, &changes, &warnings),
+            )?)
+        }) {
             for (p, data) in backup {
                 let _ = match data {
                     Some(d) => fs::write(out.join(&p), d),
@@ -705,8 +955,20 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
             return Err(e);
         }
     } else {
-        let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
+        let res = job.apply(
+            &apis,
+            &wanted,
+            dlls.as_ref(),
+            previous_exe.as_deref(),
+            &mut changes,
+            &mut warnings,
+            &mut r,
+        );
         let res = res.and_then(|()| {
+            fs::write(
+                target.join(REPORT),
+                report(&exe_rel, &info, &apis, &changes, &warnings),
+            )?;
             if out.exists() {
                 fs::remove_dir(&out)?; // empty, checked above
             }
@@ -730,13 +992,33 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
             if layers.is_empty() {
                 cmd.args(["delete", COMPAT_KEY, "/v", &value, "/f"]);
             } else {
-                cmd.args(["add", COMPAT_KEY, "/v", &value, "/t", "REG_SZ", "/d", &format!("~ {}", layers.join(" ")), "/f"]);
+                cmd.args([
+                    "add",
+                    COMPAT_KEY,
+                    "/v",
+                    &value,
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &format!("~ {}", layers.join(" ")),
+                    "/f",
+                ]);
             }
-            let ok = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+            let ok = cmd
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
             match (layers.is_empty(), ok) {
-                (false, true) => changes.push("Applied the compatibility settings for this user".into()),
-                (false, false) => warnings.push("Could not apply the compatibility settings; run bifrost_compat.bat".into()),
-                (true, true) => changes.push("Cleared previously applied compatibility settings".into()),
+                (false, true) => {
+                    changes.push("Applied the compatibility settings for this user".into())
+                }
+                (false, false) => warnings.push(
+                    "Could not apply the compatibility settings; run bifrost_compat.bat".into(),
+                ),
+                (true, true) => {
+                    changes.push("Cleared previously applied compatibility settings".into())
+                }
                 (true, false) => {} // nothing was applied before
             }
         } else {
@@ -744,22 +1026,13 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         }
     }
 
-    let mut report = format!("Bifrost Modernizer\n\n{EXE_LINE}{} ({})\n\nAPIs used:\n", exe_rel.display(), info.arch.label());
-    for (api, files) in &apis.apis {
-        let names: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
-        report += &format!("  {} ({})\n", api.label(), names.join(", "));
+    if opts.apply_compat {
+        // Best effort: the report already written above stays valid if this fails.
+        let _ = fs::write(
+            out.join(REPORT),
+            report(&exe_rel, &info, &apis, &changes, &warnings),
+        );
     }
-    report += "\nChanges:\n";
-    for c in &changes {
-        report += &format!("  - {c}\n");
-    }
-    if !warnings.is_empty() {
-        report += "\nWarnings:\n";
-        for w in &warnings {
-            report += &format!("  - {w}\n");
-        }
-    }
-    fs::write(out.join(REPORT), report)?;
     for c in &changes {
         r.log(format!("done: {c}"));
     }
@@ -767,27 +1040,79 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         r.log(format!("warning: {w}"));
     }
     r.at(1.0, "Done");
-    Ok(ModernizeOutput { exe: out.join(&exe_rel), out, changes, warnings })
+    Ok(ModernizeOutput {
+        exe: out.join(&exe_rel),
+        out,
+        changes,
+        warnings,
+    })
+}
+
+fn report(
+    exe_rel: &Path,
+    info: &PeInfo,
+    apis: &ApiReport,
+    changes: &[String],
+    warnings: &[String],
+) -> String {
+    let mut report = format!(
+        "Bifrost Modernizer\n\n{EXE_LINE}{} ({})\n\nAPIs used:\n",
+        exe_rel.display(),
+        info.arch.label()
+    );
+    for (api, files) in &apis.apis {
+        let names: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
+        report += &format!("  {} ({})\n", api.label(), names.join(", "));
+    }
+    report += "\nChanges:\n";
+    for c in changes {
+        report += &format!("  - {c}\n");
+    }
+    if !warnings.is_empty() {
+        report += "\nWarnings:\n";
+        for w in warnings {
+            report += &format!("  - {w}\n");
+        }
+    }
+    report
 }
 
 const EXE_LINE: &str = "Game executable: ";
 const COMPAT_KEY: &str = r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 /// Files the Modernizer may write beside the game's executable.
-const GENERATED_BESIDE_EXE: &[&str] = &["d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll", "DXVK_LICENSE.txt", "dxvk.conf"];
+const GENERATED_BESIDE_EXE: &[&str] = &[
+    "d3d8.dll",
+    "d3d9.dll",
+    "d3d10core.dll",
+    "d3d11.dll",
+    "dxgi.dll",
+    "DXVK_LICENSE.txt",
+    "dxvk.conf",
+];
 
 /// The executable named in a previous output's report, if it's a plain relative path.
 fn previous_exe(out: &Path) -> Option<PathBuf> {
     let report = fs::read_to_string(out.join(REPORT)).ok()?;
     let line = report.lines().find_map(|l| l.strip_prefix(EXE_LINE))?;
     let p = PathBuf::from(line.rsplit_once(" (").map_or(line, |(p, _)| p));
-    p.components().all(|c| matches!(c, Component::Normal(_))).then_some(p)
+    p.components()
+        .all(|c| matches!(c, Component::Normal(_)))
+        .then_some(p)
 }
 
 /// Whether `copy` is `orig`, allowing only the header fields the Modernizer patches to differ (so a folder is only
 /// treated as an earlier output when it holds this game's own executable).
 fn same_exe(orig: &[u8], info: &PeInfo, copy: &[u8]) -> bool {
-    let patched = |i: usize| (info.characteristics_off..info.characteristics_off + 2).contains(&i) || (info.checksum_off..info.checksum_off + 4).contains(&i);
-    orig.len() == copy.len() && orig.iter().zip(copy).enumerate().all(|(i, (a, b))| a == b || patched(i))
+    let patched = |i: usize| {
+        (info.characteristics_off..info.characteristics_off + 2).contains(&i)
+            || (info.checksum_off..info.checksum_off + 4).contains(&i)
+    };
+    orig.len() == copy.len()
+        && orig
+            .iter()
+            .zip(copy)
+            .enumerate()
+            .all(|(i, (a, b))| a == b || patched(i))
 }
 
 /// Characters that would let a file name escape a quoted argument in a .bat file.
@@ -808,9 +1133,16 @@ struct Job<'a> {
 impl Job<'_> {
     /// Every output file (relative) a re-run may write or remove.
     fn touched(&self, previous_exe: Option<&Path>) -> BTreeSet<PathBuf> {
-        let exes: Vec<&Path> = [Some(self.exe_rel), previous_exe].into_iter().flatten().collect();
+        let exes: Vec<&Path> = [Some(self.exe_rel), previous_exe]
+            .into_iter()
+            .flatten()
+            .collect();
         // An executable is only reset when the game still has it; generated files beside it are always cleaned.
-        let mut t: BTreeSet<PathBuf> = exes.iter().filter(|e| self.root.join(e).is_file()).map(|e| e.to_path_buf()).collect();
+        let mut t: BTreeSet<PathBuf> = exes
+            .iter()
+            .filter(|e| self.root.join(e).is_file())
+            .map(|e| e.to_path_buf())
+            .collect();
         for e in exes {
             let d = e.parent().map(Path::to_path_buf).unwrap_or_default();
             t.extend(GENERATED_BESIDE_EXE.iter().map(|n| d.join(n)));
@@ -843,7 +1175,10 @@ impl Job<'_> {
     ) -> Result<()> {
         let (opts, info, exe_rel) = (self.opts, self.info, self.exe_rel);
         let exe_out = self.target.join(exe_rel);
-        let exe_dir = exe_out.parent().map(Path::to_path_buf).unwrap_or_else(|| self.target.to_path_buf());
+        let exe_dir = exe_out
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.target.to_path_buf());
 
         if self.rerun {
             // Back to the game's own files (this also un-patches a previously selected executable).
@@ -860,7 +1195,10 @@ impl Job<'_> {
                 let mut d = self.exe_data.to_vec();
                 if patch_large_address_aware(&mut d)? {
                     fs::write(&exe_out, &d)?;
-                    changes.push(format!("Marked {} Large Address Aware (4 GB of memory instead of 2 GB)", exe_rel.display()));
+                    changes.push(format!(
+                        "Marked {} Large Address Aware (4 GB of memory instead of 2 GB)",
+                        exe_rel.display()
+                    ));
                     if info.signed {
                         warnings.push("The executable was digitally signed; the patch invalidates that signature".into());
                     }
@@ -874,15 +1212,22 @@ impl Job<'_> {
         if let Some(dlls) = dlls {
             r.at(0.86, "Installing DXVK");
             for name in wanted {
-                let data = dlls.get(*name).with_context(|| format!("the DXVK release has no {name}"))?;
+                let data = dlls
+                    .get(*name)
+                    .with_context(|| format!("the DXVK release has no {name}"))?;
                 if apis.bundled_system_dlls.iter().any(|b| b == name) {
-                    warnings.push(format!("Replaced the game's own {name} (an existing wrapper) with DXVK's"));
+                    warnings.push(format!(
+                        "Replaced the game's own {name} (an existing wrapper) with DXVK's"
+                    ));
                 }
                 fs::write(exe_dir.join(name), data)?;
             }
             fs::write(exe_dir.join("DXVK_LICENSE.txt"), DXVK_LICENSE)?;
             let names: Vec<_> = wanted.iter().copied().collect();
-            changes.push(format!("Installed DXVK {DXVK_VERSION} ({}): Direct3D now runs on Vulkan", names.join(", ")));
+            changes.push(format!(
+                "Installed DXVK {DXVK_VERSION} ({}): Direct3D now runs on Vulkan",
+                names.join(", ")
+            ));
         }
 
         let mut conf = Vec::new();
@@ -905,7 +1250,10 @@ impl Job<'_> {
                     changes.push(format!("Capped the frame rate at {} FPS", opts.max_fps));
                 }
             } else {
-                warnings.push("Anisotropic filtering and the frame-rate cap need DXVK, so they were skipped".into());
+                warnings.push(
+                    "Anisotropic filtering and the frame-rate cap need DXVK, so they were skipped"
+                        .into(),
+                );
             }
         }
 
