@@ -1,0 +1,3 @@
+[submodule "BifrostAndroid/third_party/winlator-app"]
+	path = BifrostAndroid/third_party/winlator-app
+	url = https://github.com/brunodev85/winlator-app.git

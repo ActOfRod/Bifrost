@@ -80,16 +80,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import com.winlator.XServerDisplayActivity
+import com.winlator.container.Container
+import com.winlator.container.ContainerManager
+import com.winlator.container.DXWrappers
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 private const val PORT_META = "com.actofrod.bifrost.PORT"
-private const val INSTALL_ACTION = "com.actofrod.bifrost.INSTALL_RESULT"
+private const val INSTALL_ACTION = "com.actofrod.INSTALL_RESULT"
 private val GAME_COVER_ID_PATTERN =
     Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
@@ -123,7 +129,11 @@ class MainActivity : ComponentActivity() {
     internal var confirmRemove by mutableStateOf<LibraryEntry?>(null)
     internal var message by mutableStateOf<String?>(null)
     internal var importBytes by mutableStateOf<Long?>(null)
+    internal var showRuntimeInstallDialog by mutableStateOf(false)
+    internal var runtimeInstallProgress by mutableStateOf<Int?>(null)
+    internal var runtimeInstallError by mutableStateOf<String?>(null)
     private var pendingApk by mutableStateOf<File?>(null)
+    private var pendingPcEntry: LibraryEntry? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -512,7 +522,14 @@ class MainActivity : ComponentActivity() {
 
     fun play(entry: LibraryEntry) {
         if (entry.kind == Kind.PC) {
-            message = "Running PC games arrives in the next Bifrost update (Windows runtime). The game is imported and ready."
+            if (WindowsRuntime.isInstalled(this)) {
+                lifecycleScope.launch { launchPcEntry(entry) }
+            } else {
+                pendingPcEntry = entry
+                runtimeInstallProgress = null
+                runtimeInstallError = null
+                showRuntimeInstallDialog = true
+            }
             return
         }
         val launch = entry.packageName?.let(packageManager::getLaunchIntentForPackage)
@@ -526,6 +543,109 @@ class MainActivity : ComponentActivity() {
         startActivity(launch)
     }
 
+    internal fun installWindowsRuntime() {
+        if (runtimeInstallProgress != null) return
+        val entry = pendingPcEntry ?: return
+        runtimeInstallError = null
+        runtimeInstallProgress = 0
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        lifecycleScope.launch {
+            try {
+                WindowsRuntime.install(this@MainActivity) { progress ->
+                    runOnUiThread {
+                        if (runtimeInstallProgress != null) runtimeInstallProgress = progress
+                    }
+                }
+                runtimeInstallProgress = null
+                runtimeInstallError = null
+                showRuntimeInstallDialog = false
+                pendingPcEntry = null
+                launchPcEntry(entry)
+            } catch (error: Exception) {
+                runtimeInstallProgress = null
+                runtimeInstallError = error.message ?: "Could not install Windows runtime"
+            } finally {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
+    internal fun dismissRuntimeInstallDialog() {
+        if (runtimeInstallProgress != null) return
+        showRuntimeInstallDialog = false
+        runtimeInstallError = null
+        pendingPcEntry = null
+    }
+
+    private suspend fun launchPcEntry(entry: LibraryEntry) {
+        try {
+            val gameDirPath = entry.gameDir ?: throw IllegalArgumentException("Game files are missing")
+            val gameDir = resolveGameDirectory(filesDir, gameDirPath)
+            if (!gameDir.isDirectory) throw IllegalArgumentException("Imported game files are missing")
+
+            val exe = entry.exe ?: throw IllegalArgumentException("Game executable is missing")
+            val executable = File(gameDir, exe).canonicalFile
+            if (!executable.path.startsWith(gameDir.path + File.separator) || !executable.isFile) {
+                throw IllegalArgumentException("Game executable is missing or invalid")
+            }
+
+            val manager = ContainerManager(this)
+            val existingContainer = entry.containerId?.let(manager::getContainerById)
+            val createdContainer = existingContainer == null
+            val container = if (existingContainer != null) {
+                existingContainer
+            } else {
+                val drives = containerDrives(Container.DEFAULT_DRIVES, gameDir.absolutePath)
+                val wrapper = when (dxwrapperFor(entry.apis)) {
+                    DXWrappers.VKD3D -> DXWrappers.VKD3D
+                    DXWrappers.CNC_DDRAW -> DXWrappers.CNC_DDRAW
+                    else -> DXWrappers.DXVK
+                }
+                val data = JSONObject().apply {
+                    put("name", entry.title)
+                    put("drives", drives)
+                    put("dxwrapper", wrapper)
+                }
+                createContainer(manager, data)
+            }
+
+            if (snapshot.entries.none { it.id == entry.id }) {
+                if (createdContainer) manager.removeContainerAsync(container) {}
+                return
+            }
+            val next = snapshot.copy(entries = snapshot.entries.map {
+                if (it.id == entry.id) it.copy(containerId = container.id, lastPlayed = System.currentTimeMillis()) else it
+            })
+            val saved = persist(next)
+            if (!saved && createdContainer) {
+                manager.removeContainerAsync(container) {}
+                return
+            }
+            if (saved) selected = next.entries.firstOrNull { it.id == entry.id }
+
+            startActivity(
+                Intent(this, XServerDisplayActivity::class.java)
+                    .putExtra("container_id", container.id)
+                    .putExtra("exec_path", executable.absolutePath),
+            )
+        } catch (error: Exception) {
+            message = error.message ?: "Could not launch PC game"
+        }
+    }
+
+    private suspend fun createContainer(manager: ContainerManager, data: JSONObject): Container =
+        suspendCancellableCoroutine { continuation ->
+            manager.createContainerAsync(data) { container ->
+                if (!continuation.isActive) {
+                    container?.let { manager.removeContainerAsync(it) {} }
+                } else if (container == null) {
+                    continuation.resumeWith(Result.failure(IllegalStateException("Could not create Winlator container")))
+                } else {
+                    continuation.resumeWith(Result.success(container))
+                }
+            }
+        }
+
     fun requestRemove(entry: LibraryEntry) { confirmRemove = entry }
 
     fun removeEntry(entry: LibraryEntry, uninstall: Boolean = false) {
@@ -535,6 +655,12 @@ class MainActivity : ComponentActivity() {
         )
         if (!persist(updated)) return
         if (entry.kind == Kind.PC) {
+            entry.containerId?.let { containerId ->
+                runCatching {
+                    val manager = ContainerManager(this)
+                    manager.getContainerById(containerId)?.let { manager.removeContainerAsync(it) {} }
+                }
+            }
             File(filesDir, "games/${entry.id}").deleteRecursively()
             entry.cover?.let { File(it).delete() }
         }
@@ -742,6 +868,38 @@ private fun LauncherScreen(activity: MainActivity) {
                     if (entry.kind == Kind.NATIVE) TextButton(onClick = { activity.removeEntry(entry) }) { Text("Remove from library") }
                     TextButton(onClick = { activity.confirmRemove = null }) { Text("Cancel") }
                 }
+            },
+        )
+    }
+
+    if (activity.showRuntimeInstallDialog) {
+        val progress = activity.runtimeInstallProgress
+        val error = activity.runtimeInstallError
+        AlertDialog(
+            onDismissRequest = activity::dismissRuntimeInstallDialog,
+            title = { Text("Install Windows runtime") },
+            text = {
+                Text(
+                    when {
+                        progress != null -> "Installing Windows runtime: $progress%"
+                        error != null -> "Could not install the Windows runtime: $error"
+                        else -> "Install the bundled Windows runtime once to launch PC games."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = activity::installWindowsRuntime,
+                    enabled = progress == null,
+                ) {
+                    Text(if (progress != null) "Installing…" else if (error != null) "Retry" else "Install")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = activity::dismissRuntimeInstallDialog,
+                    enabled = progress == null,
+                ) { Text("Not now") }
             },
         )
     }
