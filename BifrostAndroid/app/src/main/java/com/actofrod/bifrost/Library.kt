@@ -118,6 +118,7 @@ fun extractBifrostPackage(
     gamesDirectory: File,
     id: String = UUID.randomUUID().toString(),
     minFreeBytes: Long = DEFAULT_MIN_FREE_BYTES,
+    freeSpace: () -> Long = { gamesDirectory.usableSpace },
     progress: (Long) -> Unit = {},
 ): ImportedPackage {
     require(id.matches(Regex("[A-Za-z0-9-]+"))) { "Invalid game id" }
@@ -133,7 +134,7 @@ fun extractBifrostPackage(
         var copied = 0L
         var bytesSinceSpaceCheck = 0L
         fun checkFreeSpace() {
-            if (gamesDirectory.usableSpace < minFreeBytes) {
+            if (freeSpace() < minFreeBytes) {
                 throw IOException("Not enough free storage to import this game")
             }
             bytesSinceSpaceCheck = 0L
@@ -201,6 +202,7 @@ fun extractBifrostPackage(
                 zip.closeEntry()
             }
         }
+        checkFreeSpace()
         val validManifest = manifest ?: throw IOException("Package is missing bifrost.json")
         val gameExe = File(partial, "game/${validManifest.exe}")
         if (!gameExe.isFile) throw IOException("Package executable game/${validManifest.exe} is missing")
@@ -218,7 +220,8 @@ fun extractBifrostPackage(
     gamesDirectory: File,
     id: String = UUID.randomUUID().toString(),
     minFreeBytes: Long = DEFAULT_MIN_FREE_BYTES,
+    freeSpace: () -> Long = { gamesDirectory.usableSpace },
     progress: (Long) -> Unit = {},
 ): ImportedPackage = archive.inputStream().use { input ->
-    extractBifrostPackage(input, gamesDirectory, id, minFreeBytes, progress)
+    extractBifrostPackage(input, gamesDirectory, id, minFreeBytes, freeSpace, progress)
 }

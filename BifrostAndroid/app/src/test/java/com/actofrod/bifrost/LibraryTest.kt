@@ -113,6 +113,47 @@ class LibraryTest {
         }
     }
 
+    @Test
+    fun storageReserveIsCheckedAfterArchiveEntries() {
+        val temp = createTempDir(prefix = "bifrost-final-storage-check")
+        try {
+            val archive = File(temp, "game.bifrost")
+            ZipOutputStream(archive.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("bifrost.json"))
+                zip.write("""{"format":1,"title":"Game","exe":"Game.exe","arch":"x86"}""".toByteArray())
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("cover.png"))
+                zip.write(byteArrayOf(1, 2, 3))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("game/Game.exe"))
+                zip.write(byteArrayOf(1, 2, 3))
+                zip.closeEntry()
+            }
+            var checks = 0
+
+            try {
+                extractBifrostPackage(
+                    archive,
+                    File(temp, "files/games"),
+                    "end-low",
+                    minFreeBytes = 1L,
+                    freeSpace = {
+                        checks++
+                        if (checks <= 3) 1L else 0L
+                    },
+                )
+                throw AssertionError("Expected final storage check to fail")
+            } catch (error: IOException) {
+                assertEquals("Not enough free storage to import this game", error.message)
+            }
+            assertEquals(4, checks)
+            assertFalse(File(temp, "files/games/end-low.partial").exists())
+            assertFalse(File(temp, "files/covers/end-low.png").exists())
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
     private fun assertFails(block: () -> Unit) {
         try {
             block()

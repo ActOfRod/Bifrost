@@ -90,6 +90,8 @@ import kotlinx.coroutines.withContext
 
 private const val PORT_META = "com.actofrod.bifrost.PORT"
 private const val INSTALL_ACTION = "com.actofrod.bifrost.INSTALL_RESULT"
+private val GAME_COVER_ID_PATTERN =
+    Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 private fun deleteCachedInstallApk(context: Context, path: String?) {
     if (path == null) return
@@ -134,10 +136,12 @@ class MainActivity : ComponentActivity() {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
         cleanupStaleInstallApks()
         store = LibraryStore(File(filesDir, "library.json"))
-        snapshot = runCatching { store.read() }.getOrElse {
+        val storedSnapshot = runCatching { store.read() }
+        snapshot = storedSnapshot.getOrElse {
             Toast.makeText(this, "Could not read library: ${it.message}", Toast.LENGTH_LONG).show()
             LibrarySnapshot()
         }
+        cleanupOrphanedLibraryFiles(storedSnapshot.isSuccess)
 
         apkPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) prepareApk(uri)
@@ -170,6 +174,33 @@ class MainActivity : ComponentActivity() {
         cacheDir.listFiles()?.filter {
             it.isFile && it.name.startsWith("install-") && it.name.endsWith(".apk") && it.lastModified() < cutoff
         }?.forEach { deleteCachedInstallApk(this, it.absolutePath) }
+    }
+
+    private fun cleanupOrphanedLibraryFiles(snapshotLoaded: Boolean) {
+        val gameDirectory = File(filesDir, "games")
+        val gameIds = snapshot.entries.filter { it.kind == Kind.PC }.map { it.id }.toSet()
+        gameDirectory.listFiles()?.filter {
+            it.isDirectory && (it.name.endsWith(".partial") || (snapshotLoaded && it.name !in gameIds))
+        }?.forEach { it.deleteRecursively() }
+        if (!snapshotLoaded) return
+
+        val coversDirectory = File(filesDir, "covers")
+        val referencedCovers = snapshot.entries.mapNotNull { entry ->
+            entry.cover?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
+        }.toSet()
+        val nativeCoverNames = snapshot.entries.asSequence()
+            .filter { it.kind == Kind.NATIVE }
+            .mapNotNull { it.packageName }
+            .map { "${it.replace(Regex("[^A-Za-z0-9._-]"), "_")}.png" }
+            .toSet()
+        coversDirectory.listFiles()?.filter { cover ->
+            val canonicalPath = runCatching { cover.canonicalPath }.getOrNull()
+            cover.isFile &&
+                GAME_COVER_ID_PATTERN.matches(cover.nameWithoutExtension) &&
+                cover.nameWithoutExtension !in gameIds &&
+                cover.name !in nativeCoverNames &&
+                canonicalPath !in referencedCovers
+        }?.forEach { it.delete() }
     }
 
     override fun onResume() {
@@ -462,6 +493,9 @@ class MainActivity : ComponentActivity() {
                     page = Page.HOME
                     selected = null
                     message = "Imported ${entry.title}"
+                } else {
+                    File(filesDir, "games/${entry.id}").deleteRecursively()
+                    imported.cover?.delete()
                 }
             } catch (error: Exception) {
                 message = error.message ?: "Could not import package"
