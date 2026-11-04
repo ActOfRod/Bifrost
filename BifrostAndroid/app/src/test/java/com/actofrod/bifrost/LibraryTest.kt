@@ -1,6 +1,7 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.io.IOException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
@@ -77,6 +78,36 @@ class LibraryTest {
             }
             assertFalse(File(temp, "files/escape").exists())
             assertFalse(File(temp, "files/games/unsafe.partial").exists())
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun insufficientStorageRemovesPartialImportAndCover() {
+        val temp = createTempDir(prefix = "bifrost-insufficient-storage")
+        try {
+            val archive = File(temp, "large.bifrost")
+            ZipOutputStream(archive.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("bifrost.json"))
+                zip.write("""{"format":1,"title":"Game","exe":"Game.exe","arch":"x86"}""".toByteArray())
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("cover.png"))
+                zip.write(byteArrayOf(1, 2, 3))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("game/Game.exe"))
+                zip.write(byteArrayOf(1, 2, 3))
+                zip.closeEntry()
+            }
+
+            try {
+                extractBifrostPackage(archive, File(temp, "files/games"), "low-space", Long.MAX_VALUE)
+                throw AssertionError("Expected insufficient-storage import to fail")
+            } catch (error: IOException) {
+                assertEquals("Not enough free storage to import this game", error.message)
+            }
+            assertFalse(File(temp, "files/games/low-space.partial").exists())
+            assertFalse(File(temp, "files/covers/low-space.png").exists())
         } finally {
             temp.deleteRecursively()
         }

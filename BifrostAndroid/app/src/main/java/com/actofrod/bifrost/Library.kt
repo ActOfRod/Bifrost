@@ -12,6 +12,9 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+private const val DEFAULT_MIN_FREE_BYTES = 512L * 1024 * 1024
+private const val STORAGE_CHECK_INTERVAL_BYTES = 64L * 1024 * 1024
+
 @Serializable
 enum class Kind { NATIVE, PC }
 
@@ -114,6 +117,7 @@ fun extractBifrostPackage(
     archive: InputStream,
     gamesDirectory: File,
     id: String = UUID.randomUUID().toString(),
+    minFreeBytes: Long = DEFAULT_MIN_FREE_BYTES,
     progress: (Long) -> Unit = {},
 ): ImportedPackage {
     require(id.matches(Regex("[A-Za-z0-9-]+"))) { "Invalid game id" }
@@ -127,9 +131,23 @@ fun extractBifrostPackage(
         var manifest: BifrostManifest? = null
         val names = mutableSetOf<String>()
         var copied = 0L
+        var bytesSinceSpaceCheck = 0L
+        fun checkFreeSpace() {
+            if (gamesDirectory.usableSpace < minFreeBytes) {
+                throw IOException("Not enough free storage to import this game")
+            }
+            bytesSinceSpaceCheck = 0L
+        }
+        fun accountCopied(count: Int) {
+            copied += count
+            bytesSinceSpaceCheck += count
+            if (bytesSinceSpaceCheck >= STORAGE_CHECK_INTERVAL_BYTES) checkFreeSpace()
+            progress(copied)
+        }
         ZipInputStream(archive.buffered()).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
+                checkFreeSpace()
                 val name = entry.name
                 val target = validateEntry(name, partial)
                 if (!names.add(name)) throw IOException("Duplicate archive entry: $name")
@@ -150,17 +168,16 @@ fun extractBifrostPackage(
                         coverDir.mkdirs()
                         val ext = name.substringAfterLast('.')
                         val stored = File(coverDir, "$id.$ext")
+                        coverFile = stored
                         FileOutputStream(stored).use { output ->
                             val buffer = ByteArray(64 * 1024)
                             while (true) {
                                 val count = zip.read(buffer)
                                 if (count < 0) break
                                 output.write(buffer, 0, count)
-                                copied += count
-                                progress(copied)
+                                accountCopied(count)
                             }
                         }
-                        coverFile = stored
                     }
                     name == "game" && entry.isDirectory -> target.mkdirs()
                     name.startsWith("game/") -> {
@@ -174,8 +191,7 @@ fun extractBifrostPackage(
                                     val count = zip.read(buffer)
                                     if (count < 0) break
                                     output.write(buffer, 0, count)
-                                    copied += count
-                                    progress(copied)
+                                    accountCopied(count)
                                 }
                             }
                         }
@@ -201,7 +217,8 @@ fun extractBifrostPackage(
     archive: File,
     gamesDirectory: File,
     id: String = UUID.randomUUID().toString(),
+    minFreeBytes: Long = DEFAULT_MIN_FREE_BYTES,
     progress: (Long) -> Unit = {},
 ): ImportedPackage = archive.inputStream().use { input ->
-    extractBifrostPackage(input, gamesDirectory, id, progress)
+    extractBifrostPackage(input, gamesDirectory, id, minFreeBytes, progress)
 }

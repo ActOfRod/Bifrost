@@ -91,6 +91,17 @@ import kotlinx.coroutines.withContext
 private const val PORT_META = "com.actofrod.bifrost.PORT"
 private const val INSTALL_ACTION = "com.actofrod.bifrost.INSTALL_RESULT"
 
+private fun deleteCachedInstallApk(context: Context, path: String?) {
+    if (path == null) return
+    runCatching {
+        val cacheDirectory = context.cacheDir.canonicalFile
+        val apk = File(path).canonicalFile
+        if (apk.parentFile == cacheDirectory && apk.isFile && apk.name.startsWith("install-") && apk.extension == "apk") {
+            apk.delete()
+        }
+    }
+}
+
 internal enum class Page { HOME, DETAIL }
 internal enum class Tab { ALL, NATIVE, PC }
 
@@ -121,6 +132,7 @@ class MainActivity : ComponentActivity() {
             View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        cleanupStaleInstallApks()
         store = LibraryStore(File(filesDir, "library.json"))
         snapshot = runCatching { store.read() }.getOrElse {
             Toast.makeText(this, "Could not read library: ${it.message}", Toast.LENGTH_LONG).show()
@@ -151,6 +163,13 @@ class MainActivity : ComponentActivity() {
             }
         }
         handleInstallIntent(intent)
+    }
+
+    private fun cleanupStaleInstallApks() {
+        val cutoff = System.currentTimeMillis() - 60L * 60L * 1000L
+        cacheDir.listFiles()?.filter {
+            it.isFile && it.name.startsWith("install-") && it.name.endsWith(".apk") && it.lastModified() < cutoff
+        }?.forEach { deleteCachedInstallApk(this, it.absolutePath) }
     }
 
     override fun onResume() {
@@ -194,10 +213,14 @@ class MainActivity : ComponentActivity() {
         tab = tabs[(tabs.indexOf(tab) + direction + tabs.size) % tabs.size]
     }
 
-    private fun persist(next: LibrarySnapshot) {
-        snapshot = next
-        runCatching { store.write(next) }.onFailure {
-            Toast.makeText(this, "Could not save library: ${it.message}", Toast.LENGTH_LONG).show()
+    private fun persist(next: LibrarySnapshot): Boolean {
+        return try {
+            store.write(next)
+            snapshot = next
+            true
+        } catch (error: Exception) {
+            Toast.makeText(this, "Could not save library: ${error.message}", Toast.LENGTH_LONG).show()
+            false
         }
     }
 
@@ -208,7 +231,7 @@ class MainActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         val resolved = packageManager.queryIntentActivities(
             launcher,
-            PackageManager.MATCH_DEFAULT_ONLY or PackageManager.GET_META_DATA,
+            PackageManager.GET_META_DATA,
         )
         val found = resolved.mapNotNull { it.activityInfo?.applicationInfo }.distinctBy { it.packageName }
             .filter { app -> app.packageName !in current && app.packageName !in dismissed && app.metaData?.containsKey(PORT_META) == true }
@@ -234,7 +257,7 @@ class MainActivity : ComponentActivity() {
         @Suppress("DEPRECATION")
         return packageManager.queryIntentActivities(
             launcher,
-            PackageManager.MATCH_DEFAULT_ONLY or PackageManager.GET_META_DATA,
+            PackageManager.GET_META_DATA,
         )
             .mapNotNull { result ->
                 val info = result.activityInfo ?: return@mapNotNull null
@@ -261,24 +284,34 @@ class MainActivity : ComponentActivity() {
             cover = icon?.let { saveIcon(app.packageName, it).absolutePath },
             addedAt = System.currentTimeMillis(),
         )
-        persist(snapshot.copy(
+        if (persist(snapshot.copy(
             entries = (snapshot.entries.filterNot { it.packageName == app.packageName } + entry),
             dismissed = snapshot.dismissed - app.packageName,
-        ))
-        installedApps = null
+        ))) {
+            installedApps = null
+        }
     }
 
     private fun prepareApk(uri: Uri) {
         lifecycleScope.launch {
+            var newApk: File? = null
+            var keepApk = false
             try {
                 val apk = withContext(Dispatchers.IO) {
                     val copy = File(cacheDir, "install-${UUID.randomUUID()}.apk")
-                    contentResolver.openInputStream(uri).use { input ->
-                        requireNotNull(input) { "Could not open selected APK" }
-                        copy.outputStream().use { output -> input.copyTo(output) }
+                    try {
+                        val input = contentResolver.openInputStream(uri)
+                            ?: throw java.io.IOException("Could not open selected APK")
+                        input.use { source ->
+                            copy.outputStream().use { output -> source.copyTo(output) }
+                        }
+                        copy
+                    } catch (error: Throwable) {
+                        copy.delete()
+                        throw error
                     }
-                    copy
                 }
+                newApk = apk
                 @Suppress("DEPRECATION")
                 val packageInfo = packageManager.getPackageArchiveInfo(apk.absolutePath, 0)
                     ?: throw IllegalArgumentException("The selected file is not a valid APK")
@@ -289,17 +322,33 @@ class MainActivity : ComponentActivity() {
                 val label = packageManager.getApplicationLabel(appInfo).toString()
                 val icon = packageManager.getApplicationIcon(appInfo)
                 val cover = saveIcon(packageInfo.packageName, icon)
+                val previousApk = pendingApk
+                val previousPackage = pendingInstallPackage
+                val previousLabel = pendingInstallLabel
+                val previousCover = pendingInstallCover
                 pendingApk = apk
                 pendingInstallPackage = packageInfo.packageName
                 pendingInstallLabel = label
                 pendingInstallCover = cover.absolutePath
-                if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
-                    unknownAppsSettings.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-                } else {
-                    installPendingApk()
+                try {
+                    if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                        unknownAppsSettings.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                    } else {
+                        installPendingApk()
+                    }
+                } catch (error: Throwable) {
+                    pendingApk = previousApk
+                    pendingInstallPackage = previousPackage
+                    pendingInstallLabel = previousLabel
+                    pendingInstallCover = previousCover
+                    throw error
                 }
+                previousApk?.let { deleteCachedInstallApk(this@MainActivity, it.absolutePath) }
+                keepApk = true
             } catch (error: Exception) {
                 message = error.message ?: "Could not prepare APK"
+            } finally {
+                if (!keepApk) newApk?.let { deleteCachedInstallApk(this@MainActivity, it.absolutePath) }
             }
         }
     }
@@ -329,6 +378,7 @@ class MainActivity : ComponentActivity() {
                             putExtra("packageName", pendingInstallPackage)
                             putExtra("title", pendingInstallLabel)
                             putExtra("cover", pendingInstallCover)
+                            putExtra("apkPath", apk.absolutePath)
                         }
                         val pending = PendingIntent.getBroadcast(
                             this@MainActivity,
@@ -341,6 +391,8 @@ class MainActivity : ComponentActivity() {
                 }
                 message = "APK install started. Confirm the Android install prompt."
             } catch (error: Exception) {
+                deleteCachedInstallApk(this@MainActivity, apk.absolutePath)
+                if (pendingApk == apk) pendingApk = null
                 message = error.message ?: "APK installation failed"
             }
         }
@@ -354,7 +406,8 @@ class MainActivity : ComponentActivity() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
         }.getOrDefault(packageName)
         val cover = intent.getStringExtra("cover") ?: pendingInstallCover
-        persist(snapshot.copy(
+        val apkPath = intent.getStringExtra("apkPath") ?: pendingApk?.absolutePath
+        val saved = persist(snapshot.copy(
             entries = snapshot.entries.filterNot { it.packageName == packageName } + LibraryEntry(
                 id = "native-$packageName",
                 kind = Kind.NATIVE,
@@ -365,12 +418,14 @@ class MainActivity : ComponentActivity() {
             ),
             dismissed = snapshot.dismissed - packageName,
         ))
-        pendingApk?.delete()
-        pendingApk = null
-        pendingInstallPackage = null
-        pendingInstallLabel = null
-        pendingInstallCover = null
-        message = "Installed $label"
+        if (saved) deleteCachedInstallApk(this, apkPath)
+        if (pendingApk?.absolutePath == apkPath) {
+            pendingApk = null
+            pendingInstallPackage = null
+            pendingInstallLabel = null
+            pendingInstallCover = null
+        }
+        message = if (saved) "Installed $label" else null
         intent.action = null
     }
 
@@ -403,10 +458,11 @@ class MainActivity : ComponentActivity() {
                     cover = imported.cover?.absolutePath,
                     addedAt = System.currentTimeMillis(),
                 )
-                persist(snapshot.copy(entries = snapshot.entries + entry))
-                page = Page.HOME
-                selected = null
-                message = "Imported ${entry.title}"
+                if (persist(snapshot.copy(entries = snapshot.entries + entry))) {
+                    page = Page.HOME
+                    selected = null
+                    message = "Imported ${entry.title}"
+                }
             } catch (error: Exception) {
                 message = error.message ?: "Could not import package"
             } finally {
@@ -443,7 +499,7 @@ class MainActivity : ComponentActivity() {
             entries = snapshot.entries.filterNot { it.id == entry.id },
             dismissed = if (entry.kind == Kind.NATIVE && entry.packageName != null) snapshot.dismissed + entry.packageName else snapshot.dismissed,
         )
-        persist(updated)
+        if (!persist(updated)) return
         if (entry.kind == Kind.PC) {
             File(filesDir, "games/${entry.id}").deleteRecursively()
             entry.cover?.let { File(it).delete() }
@@ -486,11 +542,15 @@ class InstallStatusReceiver : BroadcastReceiver() {
                     putExtra("packageName", intent.getStringExtra("packageName"))
                     putExtra("title", intent.getStringExtra("title"))
                     putExtra("cover", intent.getStringExtra("cover"))
+                    putExtra("apkPath", intent.getStringExtra("apkPath"))
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
                 context.startActivity(result)
             }
-            else -> Toast.makeText(context, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "APK installation failed", Toast.LENGTH_LONG).show()
+            else -> {
+                deleteCachedInstallApk(context, intent.getStringExtra("apkPath"))
+                Toast.makeText(context, intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "APK installation failed", Toast.LENGTH_LONG).show()
+            }
         }
     }
 }
