@@ -64,9 +64,15 @@ cmp -s "$W/g64/Game64.exe" "$W/o64/Game64.exe" || fail "64-bit exe should not be
 echo "ok   64-bit Direct3D 11 game"
 
 mkdir -p "$W/o32/Saves" && echo slot1 > "$W/o32/Saves/slot1.sav"
+echo "volume=10" > "$W/o32/System/Engine.dll.ini"
 $BF modernize "$W/g32" -o "$W/o32" --no-dxvk > /dev/null 2>&1 || fail "re-run into a previous output"
 [ ! -f "$W/o32/System/d3d9.dll" ] || fail "stale DXVK after re-run"
 grep -q slot1 "$W/o32/Saves/slot1.sav" || fail "player files lost on re-run"
+grep -q volume=10 "$W/o32/System/Engine.dll.ini" || fail "edited settings lost on re-run"
+[ ! -f "$W/o32/System/dxvk.conf" ] || fail "stale dxvk.conf after re-run"
+mkdir -p "$W/forged" && touch "$W/forged/bifrost_modernize.txt" && echo keep > "$W/forged/notes.txt"
+if $BF modernize "$W/g32" -o "$W/forged" >/dev/null 2>&1; then fail "folder with only a report accepted"; fi
+grep -q keep "$W/forged/notes.txt" || fail "forged output touched"
 ls -a "$W" | grep -q bifrost- && fail "staging folder left behind"
 if $BF modernize "$W/g32" -o "$W/o32" --dxvk "$W/missing.tar.gz" >/dev/null 2>&1; then fail "missing DXVK accepted"; fi
 [ -f "$W/o32/Saves/slot1.sav" ] && [ -f "$W/o32/System/Game.exe" ] || fail "failed re-run damaged the previous output"
