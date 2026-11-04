@@ -248,7 +248,7 @@ mod tests {
         let result = run(&PackOptions {
             game: game.clone(), exe: None, out: output.clone(), title: Some("A \"Game\"".into()), cover: None, replace: false,
         }, &mut |_| {}).unwrap();
-        assert_eq!(result, output);
+        assert_eq!(result, output.canonicalize().unwrap());
         let mut zip = ZipArchive::new(File::open(&output).unwrap()).unwrap();
         let mut manifest = String::new();
         zip.by_name("bifrost.json").unwrap().read_to_string(&mut manifest).unwrap();
