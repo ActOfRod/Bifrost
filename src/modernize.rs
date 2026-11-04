@@ -278,14 +278,16 @@ const SKIP_EXE: &[&str] = &[
 
 fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
+    // Links are never followed, so a link can't loop or pull in files from outside the game.
+    let mut entries: Vec<_> =
+        rd.flatten().filter_map(|e| Some((e.path(), e.file_type().ok()?))).filter(|(p, t)| !t.is_symlink() && !is_reparse_point(p)).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (p, t) in entries {
+        if t.is_dir() {
             if depth > 0 {
                 walk(&p, depth - 1, out);
             }
-        } else {
+        } else if t.is_file() {
             out.push(p);
         }
     }
@@ -297,6 +299,9 @@ fn ext_is(p: &Path, ext: &str) -> bool {
 
 /// Finds the game's executables. `game` may be the install folder or the game's .exe itself.
 pub fn scan(game: &Path) -> Result<Scan> {
+    if fs::symlink_metadata(game).is_ok_and(|m| m.file_type().is_symlink()) && game.is_file() {
+        bail!("{} is a link; choose the game's real executable or its folder", game.display());
+    }
     let (root, only) = if game.is_file() {
         let parent = game.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         (parent.to_path_buf(), Some(game.to_path_buf()))
@@ -428,6 +433,17 @@ fn download_dxvk(r: &mut Reporter, lo: f32, hi: f32) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Reads at most 256 MB, so a crafted archive or file can't exhaust memory.
+fn read_capped(r: impl Read) -> Result<Vec<u8>> {
+    const CAP: u64 = 256 << 20;
+    let mut data = Vec::new();
+    r.take(CAP + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > CAP {
+        bail!("a file in the DXVK release is larger than 256 MB; not using it");
+    }
+    Ok(data)
+}
+
 /// Reads the DLLs for `arch` from a DXVK release, keyed by lower-case file name.
 fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -> Result<BTreeMap<String, Vec<u8>>> {
     let sub = match arch {
@@ -442,13 +458,13 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
             let dir = dir.with_context(|| format!("{} has no {sub}/d3d9.dll; expected an extracted DXVK release", p.display()))?;
             for e in fs::read_dir(&dir)?.flatten() {
                 let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.ends_with(".dll") {
-                    out.insert(name, fs::read(e.path())?);
+                if GENERATED_BESIDE_EXE.contains(&name.as_str()) && name.ends_with(".dll") {
+                    out.insert(name, read_capped(fs::File::open(e.path())?)?);
                 }
             }
             return Ok(out);
         }
-        DxvkSource::Local(p) => fs::read(p).with_context(|| format!("reading {}", p.display()))?,
+        DxvkSource::Local(p) => read_capped(fs::File::open(p).with_context(|| format!("reading {}", p.display()))?)?,
     };
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(&archive[..]));
     for entry in tar.entries().context("reading the DXVK archive")? {
@@ -456,10 +472,9 @@ fn dxvk_dlls(src: &DxvkSource, arch: Arch, r: &mut Reporter, lo: f32, hi: f32) -
         let path = entry.path()?.to_path_buf();
         let parent = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str());
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
-        if parent == Some(sub) && name.ends_with(".dll") {
-            let mut data = Vec::new();
-            entry.read_to_end(&mut data)?;
-            out.insert(name, data);
+        // Only the DLLs Bifrost installs are kept, so the total stays bounded too.
+        if parent == Some(sub) && name.ends_with(".dll") && GENERATED_BESIDE_EXE.contains(&name.as_str()) {
+            out.insert(name, read_capped(&mut entry)?);
         }
     }
     if out.is_empty() {
@@ -561,18 +576,42 @@ impl Reporter<'_> {
 
 const REPORT: &str = "bifrost_modernize.txt";
 
-fn copy_tree(src: &Path, dst: &Path, total: u64, done: &mut u64, r: &mut Reporter, lo: f32, hi: f32) -> Result<()> {
+/// Copies `src` into `dst`, skipping links (collected in `links`) so nothing outside the game is copied.
+#[allow(clippy::too_many_arguments)]
+fn copy_tree(src: &Path, dst: &Path, total: u64, done: &mut u64, r: &mut Reporter, lo: f32, hi: f32, links: &mut Vec<PathBuf>) -> Result<()> {
     fs::create_dir_all(dst)?;
     for e in fs::read_dir(src)?.flatten() {
         let (s, d) = (e.path(), dst.join(e.file_name()));
-        if e.file_type()?.is_dir() {
-            copy_tree(&s, &d, total, done, r, lo, hi)?;
+        let t = e.file_type()?;
+        if t.is_symlink() || is_reparse_point(&s) {
+            links.push(s);
+        } else if t.is_dir() {
+            copy_tree(&s, &d, total, done, r, lo, hi, links)?;
         } else {
             *done += fs::copy(&s, &d).with_context(|| format!("copying {}", s.display()))?;
             r.at(lo + (hi - lo) * (*done as f32 / total.max(1) as f32), "Copying the game");
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(p: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    fs::symlink_metadata(p).is_ok_and(|m| m.file_attributes() & 0x400 != 0) // FILE_ATTRIBUTE_REPARSE_POINT (junctions)
+}
+#[cfg(not(windows))]
+fn is_reparse_point(_: &Path) -> bool {
+    false
+}
+
+/// Whether `rel` (or any folder on the way to it) under `base` is a link that a write could be redirected through.
+fn through_link(base: &Path, rel: &Path) -> bool {
+    let mut p = base.to_path_buf();
+    rel.components().any(|c| {
+        p.push(c);
+        fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) || is_reparse_point(&p)
+    })
 }
 
 fn tree_size(p: &Path) -> u64 {
@@ -614,7 +653,8 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     let exe_rel = match &opts.exe {
         Some(e) => {
             let e = e.strip_prefix(&sc.root).unwrap_or(e).to_path_buf();
-            if !e.components().all(|c| matches!(c, Component::Normal(_))) || !sc.root.join(&e).is_file() {
+            let inside = fs::canonicalize(sc.root.join(&e)).ok().zip(fs::canonicalize(&sc.root).ok()).is_some_and(|(f, r)| f.starts_with(r));
+            if !e.components().all(|c| matches!(c, Component::Normal(_))) || !sc.root.join(&e).is_file() || !inside || through_link(&sc.root, &e) {
                 bail!("{} is not in {}", e.display(), sc.root.display());
             }
             e
@@ -675,15 +715,25 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         out.clone()
     } else {
         let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let stage = out.with_file_name(format!(".{name}.bifrost-staging"));
-        if stage.exists() {
-            fs::remove_dir_all(&stage)?;
+        let parent = out.parent().context("the output folder needs a parent folder")?;
+        fs::create_dir_all(parent)?;
+        // Re-check now the parent exists and resolves, so `..` or links in the path can't place staging inside the game.
+        let real = fs::canonicalize(parent)?;
+        if real.starts_with(&root) || root.starts_with(real.join(&name)) {
+            bail!("the output folder must be outside the game folder (and not contain it)");
         }
+        // A fresh, exclusively created folder, so only a folder this run made is ever removed.
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let stage = out.with_file_name(format!(".{name}.bifrost-staging-{}-{nonce}", std::process::id()));
+        fs::create_dir(&stage).with_context(|| format!("creating {}", stage.display()))?;
         let total = tree_size(&root);
-        let mut done = 0;
-        if let Err(e) = copy_tree(&root, &stage, total, &mut done, &mut r, 0.2, 0.7) {
+        let (mut done, mut links) = (0, Vec::new());
+        if let Err(e) = copy_tree(&root, &stage, total, &mut done, &mut r, 0.2, 0.7, &mut links) {
             let _ = fs::remove_dir_all(&stage);
             return Err(e);
+        }
+        if !links.is_empty() {
+            warnings.push(format!("Skipped {} link(s) in the game folder (links aren't copied)", links.len()));
         }
         changes.push(format!("Copied the game ({:.1} MB); the original install is unchanged", total as f64 / 1e6));
         stage
@@ -692,10 +742,16 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     let previous_exe = if rerun { previous_exe(&out) } else { None };
     let job = Job { opts, root: &root, target: &target, exe_rel: &exe_rel, exe_data: &exe_data, info: &info, rerun };
     if rerun {
+        let report_rel = PathBuf::from(REPORT);
+        if let Some(p) = job.touched(previous_exe.as_deref()).iter().chain([&report_rel]).find(|p| through_link(&out, p)) {
+            bail!("{} in the output is (or is inside) a link; not updating it", p.display());
+        }
         // Back up every file a re-run may touch so a failure leaves the previous output as it was.
         let backup: Vec<(PathBuf, Option<Vec<u8>>)> =
-            job.touched(previous_exe.as_deref()).into_iter().map(|p| (p.clone(), fs::read(out.join(&p)).ok())).collect();
-        if let Err(e) = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r) {
+            job.touched(previous_exe.as_deref()).into_iter().chain([report_rel]).map(|p| (p.clone(), fs::read(out.join(&p)).ok())).collect();
+        let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
+        let res = res.and_then(|()| Ok(fs::write(out.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings))?));
+        if let Err(e) = res {
             for (p, data) in backup {
                 let _ = match data {
                     Some(d) => fs::write(out.join(&p), d),
@@ -707,6 +763,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     } else {
         let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
         let res = res.and_then(|()| {
+            fs::write(target.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings))?;
             if out.exists() {
                 fs::remove_dir(&out)?; // empty, checked above
             }
@@ -744,22 +801,10 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         }
     }
 
-    let mut report = format!("Bifrost Modernizer\n\n{EXE_LINE}{} ({})\n\nAPIs used:\n", exe_rel.display(), info.arch.label());
-    for (api, files) in &apis.apis {
-        let names: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
-        report += &format!("  {} ({})\n", api.label(), names.join(", "));
+    if opts.apply_compat {
+        // Best effort: the report written above stays a valid re-run marker if this fails.
+        let _ = fs::write(out.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings));
     }
-    report += "\nChanges:\n";
-    for c in &changes {
-        report += &format!("  - {c}\n");
-    }
-    if !warnings.is_empty() {
-        report += "\nWarnings:\n";
-        for w in &warnings {
-            report += &format!("  - {w}\n");
-        }
-    }
-    fs::write(out.join(REPORT), report)?;
     for c in &changes {
         r.log(format!("done: {c}"));
     }
@@ -768,6 +813,25 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     }
     r.at(1.0, "Done");
     Ok(ModernizeOutput { exe: out.join(&exe_rel), out, changes, warnings })
+}
+
+fn report(exe_rel: &Path, info: &PeInfo, apis: &ApiReport, changes: &[String], warnings: &[String]) -> String {
+    let mut report = format!("Bifrost Modernizer\n\n{EXE_LINE}{} ({})\n\nAPIs used:\n", exe_rel.display(), info.arch.label());
+    for (api, files) in &apis.apis {
+        let names: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
+        report += &format!("  {} ({})\n", api.label(), names.join(", "));
+    }
+    report += "\nChanges:\n";
+    for c in changes {
+        report += &format!("  - {c}\n");
+    }
+    if !warnings.is_empty() {
+        report += "\nWarnings:\n";
+        for w in warnings {
+            report += &format!("  - {w}\n");
+        }
+    }
+    report
 }
 
 const EXE_LINE: &str = "Game executable: ";
