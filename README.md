@@ -111,7 +111,7 @@ First choose the task: **Recomp** or **Modernize**.
 **Modernize**
 1. Choose the game's install folder or its `.exe`. The app shows the detected game executable (you can pick another) and the APIs it uses.
 2. Choose the options: DXVK, anisotropic filtering, frame-rate cap, Large Address Aware and the Windows compatibility settings.
-3. Choose an empty output folder and press **Begin Modernization**.
+3. Choose an empty output folder (or the previous output of the same game, which is updated in place so saves and edited settings are kept) and press **Begin Modernization**.
 
 ### Command line
 
