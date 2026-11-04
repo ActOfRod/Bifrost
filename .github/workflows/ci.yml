@@ -14,8 +14,12 @@ jobs:
       - name: Install toolchains
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang gcc-aarch64-linux-gnu qemu-user mingw-w64
+          sudo apt-get install -y clang gcc-aarch64-linux-gnu qemu-user mingw-w64 \
+            glslang-tools libvulkan-dev mesa-vulkan-drivers vulkan-validationlayers vulkan-tools \
+            spirv-tools xvfb imagemagick
           pip install unicorn==2.1.4 capstone==5.0.7
+      - name: Build FSR Vulkan layer
+        run: scripts/build_fsr_layer.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build
@@ -25,6 +29,8 @@ jobs:
         run: tests/e2e/run.sh
       - name: Modernizer end-to-end
         run: tests/e2e/modernize.sh
+      - name: FSR Vulkan layer end-to-end
+        run: tests/e2e/fsr_layer.sh
   windows:
     runs-on: windows-latest
     steps:
