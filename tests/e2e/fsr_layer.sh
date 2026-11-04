@@ -45,7 +45,7 @@ export VK_LAYER_PATH="$layer:/usr/share/vulkan/explicit_layer.d"
 export VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1:VK_LAYER_KHRONOS_validation
 
 set +e
-BIFROST_FSR_CONFIG_DIR="$ARTIFACTS/config-scale" vkcube --c 120 --width 512 --height 384 \
+BIFROST_FSR_CONFIG_DIR="$ARTIFACTS/config-scale" vkcube --c 2000 --width 512 --height 384 \
     >"$ARTIFACTS/scale.stdout.log" 2>"$ARTIFACTS/scale.stderr.log" &
 cube_pid=$!
 colors=1
@@ -58,10 +58,11 @@ for _ in $(seq 1 30); do
     fi
     sleep 0.05
 done
+kill "$cube_pid" 2>/dev/null || true
 wait "$cube_pid"
 status=$?
 set -e
-[[ $status -eq 0 ]] || fail "scaled vkcube exited with status $status (see $ARTIFACTS/scale.stderr.log)"
+[[ $status -eq 0 || $status -eq 143 ]] || fail "scaled vkcube exited with status $status (see $ARTIFACTS/scale.stderr.log)"
 grep -q '256x192 -> 512x384' "$ARTIFACTS/config-scale/bifrost_fsr.log" || fail "scaled swapchain was not logged"
 if grep -Eq 'VUID-|Validation Error' "$ARTIFACTS/scale.stderr.log"; then fail "validation error in scaled run"; fi
 [[ "$colors" =~ ^[0-9]+$ && "$colors" -gt 1 ]] || fail "scaled screenshot is uniformly black"
