@@ -985,7 +985,9 @@ const GENERATED_BESIDE_EXE: &[&str] = &[
 fn previous_exe(out: &Path) -> Option<PathBuf> {
     let report = fs::read_to_string(out.join(REPORT)).ok()?;
     let line = report.lines().find_map(|l| l.strip_prefix(EXE_LINE))?;
-    let p = PathBuf::from(line.rsplit_once(" (").map_or(line, |(p, _)| p));
+    let p = [Arch::X86, Arch::X64]
+        .into_iter()
+        .find_map(|arch| line.strip_suffix(&format!(" ({})", arch.label())).map(PathBuf::from))?;
     p.components().all(|c| matches!(c, Component::Normal(_))).then_some(p)
 }
 
@@ -1151,14 +1153,14 @@ impl Job<'_> {
         }
         if !layers.is_empty() {
             let apply = format!(
-                "@echo off\r\nrem Written by the Bifrost Modernizer: Windows compatibility settings for the game (current user).\r\n\
+                "@echo off\r\nsetlocal DisableDelayedExpansion\r\nrem Written by the Bifrost Modernizer: Windows compatibility settings for the game (current user).\r\n\
                  reg add \"{COMPAT_KEY}\" /v \"%~dp0{exe_win}\" /t REG_SZ /d \"~ {}\" /f\r\n",
                 layers.join(" ")
             );
             fs::write(self.target.join("bifrost_compat.bat"), apply)?;
             changes.push(format!("Wrote bifrost_compat.bat ({})", layers.join(", ")));
         }
-        let undo = format!("@echo off\r\nreg delete \"{COMPAT_KEY}\" /v \"%~dp0{exe_win}\" /f\r\n");
+        let undo = format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\nreg delete \"{COMPAT_KEY}\" /v \"%~dp0{exe_win}\" /f\r\n");
         fs::write(self.target.join("bifrost_compat_undo.bat"), undo)?;
         Ok(())
     }
