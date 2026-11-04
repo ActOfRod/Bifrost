@@ -11,10 +11,15 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <windows.h>
 #include <psapi.h>
 #else
 #include <dlfcn.h>
+#include <pthread.h>
 #include <unistd.h>
 #endif
 
@@ -300,7 +305,29 @@ static InstanceState *instances;
 static DeviceState *devices;
 static Swapchain *swapchains;
 static PFN_vkGetInstanceProcAddr global_next_gipa;
+static int config_loaded;
 
+#ifdef _WIN32
+static SRWLOCK state_mutex = SRWLOCK_INIT;
+#else
+static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+static void state_lock(void) {
+#ifdef _WIN32
+    AcquireSRWLockExclusive(&state_mutex);
+#else
+    pthread_mutex_lock(&state_mutex);
+#endif
+}
+static void state_unlock(void) {
+#ifdef _WIN32
+    ReleaseSRWLockExclusive(&state_mutex);
+#else
+    pthread_mutex_unlock(&state_mutex);
+#endif
+}
+
+/* The caller holds state_lock; returned entries remain valid only until it unlocks. */
 static void *dispatch_key(void *object) { return object ? *(void **)object : NULL; }
 static InstanceState *find_instance(VkInstance i) {
     void *key = dispatch_key(i);
@@ -345,14 +372,20 @@ static void update_caps(VkSurfaceCapabilitiesKHR *caps) {
 }
 
 static VkResult VKAPI_CALL layerGetCaps(VkPhysicalDevice p, VkSurfaceKHR s, VkSurfaceCapabilitiesKHR *c) {
+    state_lock();
     InstanceState *i = find_instance((VkInstance)p);
-    if (!i || !i->GetCaps) return VK_ERROR_INITIALIZATION_FAILED;
-    VkResult r = i->GetCaps(p,s,c); if (r == VK_SUCCESS) update_caps(c); return r;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps=i?i->GetCaps:NULL;
+    state_unlock();
+    if (!get_caps) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = get_caps(p,s,c); if (r == VK_SUCCESS) update_caps(c); return r;
 }
 static VkResult VKAPI_CALL layerGetCaps2(VkPhysicalDevice p, const VkPhysicalDeviceSurfaceInfo2KHR *info, VkSurfaceCapabilities2KHR *c) {
+    state_lock();
     InstanceState *i = find_instance((VkInstance)p);
-    if (!i || !i->GetCaps2) return VK_ERROR_INITIALIZATION_FAILED;
-    VkResult r = i->GetCaps2(p,info,c); if (r == VK_SUCCESS) update_caps(&c->surfaceCapabilities); return r;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR get_caps=i?i->GetCaps2:NULL;
+    state_unlock();
+    if (!get_caps) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = get_caps(p,info,c); if (r == VK_SUCCESS) update_caps(&c->surfaceCapabilities); return r;
 }
 
 static uint32_t memory_type(DeviceState *d, uint32_t bits) {
@@ -511,7 +544,9 @@ static int setup_swapchain(Swapchain *s) {
     VkDescriptorSetAllocateInfo dai={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; dai.descriptorPool=s->descriptor_pool; dai.descriptorSetCount=n*2; dai.pSetLayouts=layouts;
     if (d->AllocateDescriptorSets(d->handle,&dai,sets)!=VK_SUCCESS) { free(layouts);free(sets);free(real_images);return 0; }
     uint32_t family=UINT32_MAX;
+    state_lock();
     for (QueueEntry *q=d->queues;q;q=q->next) if (q->family<d->family_count && (d->families[q->family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) { family=q->family; break; }
+    state_unlock();
     if (family==UINT32_MAX) {
         for (uint32_t i=0;i<d->family_count;i++) if (d->families[i].queueFlags&VK_QUEUE_GRAPHICS_BIT) { family=i; break; }
     }
@@ -594,7 +629,9 @@ static VkResult VKAPI_CALL layerCreateInstance(const VkInstanceCreateInfo *ci, c
     if (!link_info || !link_info->u.pLayerInfo) return VK_ERROR_INITIALIZATION_FAILED;
     VkLayerInstanceLink *link=link_info->u.pLayerInfo;
     PFN_vkGetInstanceProcAddr next=link->pfnNextGetInstanceProcAddr;
+    state_lock();
     global_next_gipa=next;
+    state_unlock();
     link_info->u.pLayerInfo=link->pNext;
     PFN_vkCreateInstance create=(PFN_vkCreateInstance)next(VK_NULL_HANDLE,"vkCreateInstance");
     if (!create) return VK_ERROR_INITIALIZATION_FAILED;
@@ -609,23 +646,36 @@ static VkResult VKAPI_CALL layerCreateInstance(const VkInstanceCreateInfo *ci, c
     ILOAD(GetQueueFamilies,GetPhysicalDeviceQueueFamilyProperties);
     ILOAD(GetMemoryProperties,GetPhysicalDeviceMemoryProperties);
 #undef ILOAD
+    state_lock();
     s->next=instances; instances=s;
-    load_config();
+    if(!config_loaded){load_config();config_loaded=1;
 #ifdef _WIN32
-    install_fake_mode_hooks();
+        install_fake_mode_hooks();
 #endif
+    }
     log_message("VK_LAYER_BIFROST_fsr1 active (scale=%s)",config.scale>1.0f?"numeric":"auto");
+    state_unlock();
     return VK_SUCCESS;
 }
 
 static void VKAPI_CALL layerDestroyInstance(VkInstance inst,const VkAllocationCallbacks *a) {
+    state_lock();
     InstanceState **p=&instances;
     while (*p && (*p)->handle!=inst) p=&(*p)->next;
-    if (*p) { InstanceState *s=*p;*p=s->next;if(s->DestroyInstance)s->DestroyInstance(inst,a);free(s);return; }
+    InstanceState *s=*p;
+    if(s)*p=s->next;
+    state_unlock();
+    if (s) { if(s->DestroyInstance)s->DestroyInstance(inst,a);free(s); }
 }
 
 static VkResult VKAPI_CALL layerCreateDevice(VkPhysicalDevice phys,const VkDeviceCreateInfo *ci,const VkAllocationCallbacks *a,VkDevice *out) {
+    state_lock();
     InstanceState *is=find_instance((VkInstance)phys);
+    PFN_vkGetInstanceProcAddr instance_gipa=is?is->next_gipa:NULL;
+    VkInstance instance=is?is->handle:VK_NULL_HANDLE;
+    PFN_vkGetPhysicalDeviceMemoryProperties get_memory=is?is->GetMemoryProperties:NULL;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties get_families=is?is->GetQueueFamilies:NULL;
+    state_unlock();
     if (!is) return VK_ERROR_INITIALIZATION_FAILED;
     VkLayerDeviceCreateInfo *link_info=NULL; PFN_vkSetDeviceLoaderData set_data=NULL;
     for (VkBaseInStructure *p=(VkBaseInStructure *)ci->pNext;p;p=(VkBaseInStructure *)p->pNext) {
@@ -638,13 +688,13 @@ static VkResult VKAPI_CALL layerCreateDevice(VkPhysicalDevice phys,const VkDevic
     VkLayerDeviceLink *link=link_info->u.pLayerInfo;
     PFN_vkGetDeviceProcAddr next_gdpa=link->pfnNextGetDeviceProcAddr;
     link_info->u.pLayerInfo=link->pNext;
-    PFN_vkCreateDevice create=(PFN_vkCreateDevice)is->next_gipa(is->handle,"vkCreateDevice");
+    PFN_vkCreateDevice create=(PFN_vkCreateDevice)instance_gipa(instance,"vkCreateDevice");
     if (!create) return VK_ERROR_INITIALIZATION_FAILED;
     VkResult r=create(phys,ci,a,out);if(r!=VK_SUCCESS)return r;
     DeviceState *d=calloc(1,sizeof(*d));if(!d)return VK_ERROR_OUT_OF_HOST_MEMORY;
     d->handle=*out;d->key=dispatch_key(*out);d->physical=phys;d->next_gdpa=next_gdpa;d->set_loader_data=set_data;
-    PFN_vkGetPhysicalDeviceMemoryProperties mp=is->GetMemoryProperties;if(mp)mp(phys,&d->memory);
-    if(is->GetQueueFamilies){is->GetQueueFamilies(phys,&d->family_count,NULL);d->families=calloc(d->family_count,sizeof(*d->families));if(d->families)is->GetQueueFamilies(phys,&d->family_count,d->families);}
+    if(get_memory)get_memory(phys,&d->memory);
+    if(get_families){get_families(phys,&d->family_count,NULL);d->families=calloc(d->family_count,sizeof(*d->families));if(d->families)get_families(phys,&d->family_count,d->families);}
 #define DLOAD(name) d->name=(PFN_vk##name)next_gdpa(*out,"vk" #name)
     DLOAD(DestroyDevice);DLOAD(GetDeviceQueue);DLOAD(GetDeviceQueue2);DLOAD(QueueSubmit);
     DLOAD(DeviceWaitIdle);DLOAD(QueueWaitIdle);
@@ -667,28 +717,52 @@ static VkResult VKAPI_CALL layerCreateDevice(VkPhysicalDevice phys,const VkDevic
     DLOAD(WaitForFences);DLOAD(ResetFences);DLOAD(CreateSemaphore);DLOAD(DestroySemaphore);
     d->ReleaseImages=(PFN_vkReleaseSwapchainImagesEXT)next_gdpa(*out,"vkReleaseSwapchainImagesEXT");
 #undef DLOAD
+    state_lock();
     d->next=devices;devices=d;
+    state_unlock();
     return VK_SUCCESS;
 }
 
 static void VKAPI_CALL layerGetDeviceQueue(VkDevice dev,uint32_t family,uint32_t index,VkQueue *queue) {
-    DeviceState *d=find_device(dev);if(!d||!d->GetDeviceQueue)return;
-    d->GetDeviceQueue(dev,family,index,queue);
-    if(*queue){QueueEntry *q=calloc(1,sizeof(*q));if(q){q->queue=*queue;q->family=family;q->next=d->queues;d->queues=q;}}
+    state_lock();
+    DeviceState *d=find_device(dev);
+    PFN_vkGetDeviceQueue get_queue=d?d->GetDeviceQueue:NULL;
+    state_unlock();
+    if(!get_queue)return;
+    get_queue(dev,family,index,queue);
+    if(*queue){
+        QueueEntry *q=calloc(1,sizeof(*q));
+        if(q){q->queue=*queue;q->family=family;state_lock();d=find_device(dev);if(d){q->next=d->queues;d->queues=q;q=NULL;}state_unlock();free(q);}
+    }
 }
 static void VKAPI_CALL layerGetDeviceQueue2(VkDevice dev,const VkDeviceQueueInfo2 *info,VkQueue *queue) {
-    DeviceState *d=find_device(dev);if(!d||!d->GetDeviceQueue2)return;
-    d->GetDeviceQueue2(dev,info,queue);
-    if(*queue){QueueEntry *q=calloc(1,sizeof(*q));if(q){q->queue=*queue;q->family=info->queueFamilyIndex;q->next=d->queues;d->queues=q;}}
+    state_lock();
+    DeviceState *d=find_device(dev);
+    PFN_vkGetDeviceQueue2 get_queue=d?d->GetDeviceQueue2:NULL;
+    state_unlock();
+    if(!get_queue)return;
+    get_queue(dev,info,queue);
+    if(*queue){
+        QueueEntry *q=calloc(1,sizeof(*q));
+        if(q){q->queue=*queue;q->family=info->queueFamilyIndex;state_lock();d=find_device(dev);if(d){q->next=d->queues;d->queues=q;q=NULL;}state_unlock();free(q);}
+    }
 }
 
 static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCreateInfoKHR *ci,const VkAllocationCallbacks *a,VkSwapchainKHR *out) {
-    DeviceState *d=find_device(dev);if(!d||!d->CreateSwapchain)return VK_ERROR_INITIALIZATION_FAILED;
-    InstanceState *is=find_instance((VkInstance)d->physical);
+    state_lock();
+    DeviceState *d=find_device(dev);
+    VkPhysicalDevice physical=d?d->physical:VK_NULL_HANDLE;
+    PFN_vkCreateSwapchainKHR create_swapchain=d?d->CreateSwapchain:NULL;
+    PFN_vkDestroySwapchainKHR destroy_swapchain=d?d->DestroySwapchain:NULL;
+    PFN_vkGetSwapchainImagesKHR get_images=d?d->GetSwapchainImages:NULL;
+    InstanceState *is=find_instance((VkInstance)physical);
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps=is?is->GetCaps:NULL;
+    state_unlock();
+    if(!d||!create_swapchain)return VK_ERROR_INITIALIZATION_FAILED;
     VkSurfaceCapabilitiesKHR caps={0};
-    if(!is||!is->GetCaps||is->GetCaps(d->physical,ci->surface,&caps)!=VK_SUCCESS||!scaling_enabled()) {
+    if(!get_caps||get_caps(physical,ci->surface,&caps)!=VK_SUCCESS||!scaling_enabled()) {
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
-        return d->CreateSwapchain(dev,ci,a,out);
+        return create_swapchain(dev,ci,a,out);
     }
     VkExtent2D real_extent=caps.currentExtent;
     if(real_extent.width==UINT32_MAX) real_extent=ci->imageExtent;
@@ -697,55 +771,74 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
        (ci->imageExtent.width==real_extent.width&&ci->imageExtent.height==real_extent.height)||
        !(caps.supportedUsageFlags&VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
-        return d->CreateSwapchain(dev,ci,a,out);
+        return create_swapchain(dev,ci,a,out);
     }
     VkSwapchainCreateInfoKHR real_ci=*ci;real_ci.imageExtent=real_extent;
     real_ci.imageUsage|=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    Swapchain *old=find_swapchain(ci->oldSwapchain);if(old)real_ci.oldSwapchain=old->real;
-    VkResult r=d->CreateSwapchain(dev,&real_ci,a,out);if(r!=VK_SUCCESS)return r;
-    Swapchain *s=calloc(1,sizeof(*s));if(!s){d->DestroySwapchain(dev,*out,a);return VK_ERROR_OUT_OF_HOST_MEMORY;}
+    state_lock();
+    Swapchain *old=find_swapchain(ci->oldSwapchain);
+    if(old)real_ci.oldSwapchain=old->real;
+    state_unlock();
+    VkResult r=create_swapchain(dev,&real_ci,a,out);if(r!=VK_SUCCESS)return r;
+    Swapchain *s=calloc(1,sizeof(*s));if(!s){destroy_swapchain(dev,*out,a);return VK_ERROR_OUT_OF_HOST_MEMORY;}
     s->app=s->real=*out;s->device=d;s->format=ci->imageFormat;s->app_extent=ci->imageExtent;s->output_extent=real_extent;
     s->app_usage=ci->imageUsage;s->scaled=1;
-    uint32_t n=0;r=d->GetSwapchainImages(dev,s->real,&n,NULL);
-    if(r!=VK_SUCCESS||!n){d->DestroySwapchain(dev,*out,a);free(s);return r==VK_SUCCESS?VK_ERROR_INITIALIZATION_FAILED:r;}
+    uint32_t n=0;r=get_images(dev,s->real,&n,NULL);
+    if(r!=VK_SUCCESS||!n){destroy_swapchain(dev,*out,a);free(s);return r==VK_SUCCESS?VK_ERROR_INITIALIZATION_FAILED:r;}
     s->count=n;
-    if(!setup_swapchain(s)){destroy_swapchain_resources(s);d->DestroySwapchain(dev,*out,a);free(s);return VK_ERROR_INITIALIZATION_FAILED;}
+    if(!setup_swapchain(s)){destroy_swapchain_resources(s);destroy_swapchain(dev,*out,a);free(s);return VK_ERROR_INITIALIZATION_FAILED;}
+    state_lock();
     s->next=swapchains;swapchains=s;
+    state_unlock();
     log_message("upscaling engaged: %ux%u -> %ux%u",s->app_extent.width,s->app_extent.height,s->output_extent.width,s->output_extent.height);
     return VK_SUCCESS;
 }
 
 static void VKAPI_CALL layerDestroySwapchain(VkDevice dev,VkSwapchainKHR h,const VkAllocationCallbacks *a) {
+    state_lock();
     DeviceState *d=find_device(dev);Swapchain **p=&swapchains;
     while(*p&&(*p)->app!=h)p=&(*p)->next;
-    if(*p){Swapchain *s=*p;*p=s->next;if(s->scaled)destroy_swapchain_resources(s);if(d&&d->DestroySwapchain)d->DestroySwapchain(dev,s->real,a);free(s);return;}
-    if(d&&d->DestroySwapchain)d->DestroySwapchain(dev,h,a);
+    Swapchain *s=*p;
+    if(s)*p=s->next;
+    PFN_vkDestroySwapchainKHR destroy=d?d->DestroySwapchain:NULL;
+    state_unlock();
+    if(s){if(s->scaled)destroy_swapchain_resources(s);if(destroy)destroy(dev,s->real,a);free(s);return;}
+    if(destroy)destroy(dev,h,a);
 }
 static VkResult VKAPI_CALL layerGetSwapchainImages(VkDevice dev,VkSwapchainKHR h,uint32_t *count,VkImage *images) {
+    state_lock();
     Swapchain *s=find_swapchain(h);DeviceState *d=find_device(dev);
-    if(!s||!s->scaled)return d&&d->GetSwapchainImages?d->GetSwapchainImages(dev,h,count,images):VK_ERROR_INITIALIZATION_FAILED;
-    if(!images){*count=s->count;return VK_SUCCESS;}
+    PFN_vkGetSwapchainImagesKHR get_images=d?d->GetSwapchainImages:NULL;
+    if(!s||!s->scaled){state_unlock();return get_images?get_images(dev,h,count,images):VK_ERROR_INITIALIZATION_FAILED;}
+    if(!images){*count=s->count;state_unlock();return VK_SUCCESS;}
     uint32_t n=*count<s->count?*count:s->count;
     for(uint32_t i=0;i<n;i++)images[i]=s->frames[i].app;
-    *count=n;return n<s->count?VK_INCOMPLETE:VK_SUCCESS;
+    *count=n;state_unlock();return n<s->count?VK_INCOMPLETE:VK_SUCCESS;
 }
 static VkResult VKAPI_CALL layerAcquire(VkDevice dev,VkSwapchainKHR h,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t *index) {
+    state_lock();
     DeviceState *d=find_device(dev);Swapchain *s=find_swapchain(h);
-    return d&&d->Acquire?d->Acquire(dev,s?s->real:h,timeout,sem,fence,index):VK_ERROR_INITIALIZATION_FAILED;
+    PFN_vkAcquireNextImageKHR acquire=d?d->Acquire:NULL;VkSwapchainKHR real=s?s->real:h;
+    state_unlock();
+    return acquire?acquire(dev,real,timeout,sem,fence,index):VK_ERROR_INITIALIZATION_FAILED;
 }
 static VkResult VKAPI_CALL layerAcquire2(VkDevice dev,const VkAcquireNextImageInfoKHR *info,uint32_t *index) {
-    DeviceState *d=find_device(dev);if(!d||!d->Acquire2)return VK_ERROR_INITIALIZATION_FAILED;
-    Swapchain *s=find_swapchain(info->swapchain);VkAcquireNextImageInfoKHR copy=*info;if(s)copy.swapchain=s->real;
-    return d->Acquire2(dev,&copy,index);
+    state_lock();
+    DeviceState *d=find_device(dev);Swapchain *s=find_swapchain(info->swapchain);
+    PFN_vkAcquireNextImage2KHR acquire=d?d->Acquire2:NULL;VkAcquireNextImageInfoKHR copy=*info;if(s)copy.swapchain=s->real;
+    state_unlock();
+    return acquire?acquire(dev,&copy,index):VK_ERROR_INITIALIZATION_FAILED;
 }
 static VkResult VKAPI_CALL layerReleaseImages(VkDevice dev,const VkReleaseSwapchainImagesInfoEXT *info) {
-    DeviceState *d=find_device(dev);if(!d||!d->ReleaseImages)return VK_ERROR_EXTENSION_NOT_PRESENT;
-    Swapchain *s=find_swapchain(info->swapchain);VkReleaseSwapchainImagesInfoEXT copy=*info;if(s)copy.swapchain=s->real;
-    return d->ReleaseImages(dev,&copy);
+    state_lock();
+    DeviceState *d=find_device(dev);Swapchain *s=find_swapchain(info->swapchain);
+    PFN_vkReleaseSwapchainImagesEXT release=d?d->ReleaseImages:NULL;VkReleaseSwapchainImagesInfoEXT copy=*info;if(s)copy.swapchain=s->real;
+    state_unlock();
+    return release?release(dev,&copy):VK_ERROR_EXTENSION_NOT_PRESENT;
 }
 
 static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
-                                  uint32_t wait_count,const VkSemaphore *waits,VkSemaphore next_wait) {
+                                  uint32_t wait_count,const VkSemaphore *waits) {
     DeviceState *d=s->device;Frame *f=&s->frames[index];
     if(d->WaitForFences(d->handle,1,&f->fence,VK_TRUE,UINT64_MAX)!=VK_SUCCESS)return VK_ERROR_DEVICE_LOST;
     if(d->ResetFences(d->handle,1,&f->fence)!=VK_SUCCESS)return VK_ERROR_DEVICE_LOST;
@@ -809,18 +902,19 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     si.pWaitDstStageMask=wait_count?&stage:NULL;si.commandBufferCount=1;si.pCommandBuffers=&f->command;
     si.signalSemaphoreCount=1;si.pSignalSemaphores=&f->done;
     r=d->QueueSubmit(queue,1,&si,f->fence);if(r==VK_SUCCESS)f->real_initialized=1;
-    (void)next_wait;
     return r;
 }
 
 static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *info) {
     if(!info)return VK_ERROR_INITIALIZATION_FAILED;
-    DeviceState *d=find_device(queue);if(!d||!d->QueuePresent)return VK_ERROR_INITIALIZATION_FAILED;
-    uint32_t family=UINT32_MAX;
-    for(QueueEntry *q=d->queues;q;q=q->next)if(q->queue==queue){family=q->family;break;}
     Swapchain **mapped=calloc(info->swapchainCount,sizeof(*mapped));
     VkSwapchainKHR *handles=calloc(info->swapchainCount,sizeof(*handles));
     if(!mapped||!handles){free(mapped);free(handles);return VK_ERROR_OUT_OF_HOST_MEMORY;}
+    state_lock();
+    DeviceState *d=find_device(queue);
+    if(!d||!d->QueuePresent){state_unlock();free(mapped);free(handles);return VK_ERROR_INITIALIZATION_FAILED;}
+    uint32_t family=UINT32_MAX;
+    for(QueueEntry *q=d->queues;q;q=q->next)if(q->queue==queue){family=q->family;break;}
     int scaled=0,graphics=family<d->family_count&&(d->families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT);
     for(uint32_t i=0;i<info->swapchainCount;i++){
         mapped[i]=find_swapchain(info->pSwapchains[i]);handles[i]=mapped[i]?mapped[i]->real:info->pSwapchains[i];
@@ -829,14 +923,18 @@ static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *in
     if(!scaled||!graphics){
         if(scaled)log_message("present queue lacks graphics capability; passing through");
         VkPresentInfoKHR pass=*info;pass.pSwapchains=handles;
-        VkResult result=d->QueuePresent(queue,&pass);free(mapped);free(handles);return result;
+        if(!scaled)state_unlock();
+        VkResult result=d->QueuePresent(queue,&pass);
+        if(scaled)state_unlock();
+        free(mapped);free(handles);return result;
     }
+    /* Hold the global lock through submit/present so destroy cannot free a mapped swapchain. */
     VkSemaphore previous=VK_NULL_HANDLE;int first=1;VkResult result=VK_SUCCESS;
     for(uint32_t i=0;i<info->swapchainCount;i++)if(mapped[i]&&mapped[i]->scaled){
         uint32_t index=info->pImageIndices[i];if(index>=mapped[i]->count){result=VK_ERROR_OUT_OF_DATE_KHR;break;}
         uint32_t wc=first?info->waitSemaphoreCount:(previous?1:0);
         const VkSemaphore *ws=first?info->pWaitSemaphores:(previous?&previous:NULL);
-        result=record_and_submit(mapped[i],index,queue,wc,ws,VK_NULL_HANDLE);
+        result=record_and_submit(mapped[i],index,queue,wc,ws);
         if(result!=VK_SUCCESS)break;
         previous=mapped[i]->frames[index].done;first=0;
     }
@@ -845,13 +943,20 @@ static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *in
         if(!first){pass.waitSemaphoreCount=1;pass.pWaitSemaphores=&previous;}
         result=d->QueuePresent(queue,&pass);
     }
+    state_unlock();
     free(mapped);free(handles);return result;
 }
 
 static void VKAPI_CALL layerDestroyDevice(VkDevice dev,const VkAllocationCallbacks *a) {
+    state_lock();
     DeviceState **p=&devices;while(*p&&(*p)->handle!=dev)p=&(*p)->next;
-    if(*p){DeviceState *d=*p;*p=d->next;if(d->DeviceWaitIdle)d->DeviceWaitIdle(dev);
-        while(d->queues){QueueEntry *q=d->queues;d->queues=q->next;free(q);}
+    DeviceState *d=*p;
+    QueueEntry *queues=d?d->queues:NULL;
+    if(d)*p=d->next;
+    if(d)d->queues=NULL;
+    state_unlock();
+    if(d){if(d->DeviceWaitIdle)d->DeviceWaitIdle(dev);
+        while(queues){QueueEntry *q=queues;queues=q->next;free(q);}
         free(d->families);if(d->DestroyDevice)d->DestroyDevice(dev,a);free(d);return;}
 }
 
@@ -867,10 +972,17 @@ static PFN_vkVoidFunction VKAPI_CALL layerGetInstanceProcAddr(VkInstance inst,co
         INSTANCE_FN(CreateDevice,layerCreateDevice);
         INSTANCE_FN(GetPhysicalDeviceSurfaceCapabilitiesKHR,layerGetCaps);
         INSTANCE_FN(GetPhysicalDeviceSurfaceCapabilities2KHR,layerGetCaps2);
-        InstanceState *s=find_instance(inst);if(s)return s->next_gipa(inst,name);
+        state_lock();
+        InstanceState *s=find_instance(inst);
+        PFN_vkGetInstanceProcAddr next=s?s->next_gipa:NULL;
+        state_unlock();
+        if(next)return next(inst,name);
     }
 #undef INSTANCE_FN
-    return global_next_gipa ? global_next_gipa(inst,name) : NULL;
+    state_lock();
+    PFN_vkGetInstanceProcAddr next=global_next_gipa;
+    state_unlock();
+    return next ? next(inst,name) : NULL;
 }
 static PFN_vkVoidFunction VKAPI_CALL layerGetDeviceProcAddr(VkDevice dev,const char *name) {
     if(!name)return NULL;
@@ -881,7 +993,11 @@ static PFN_vkVoidFunction VKAPI_CALL layerGetDeviceProcAddr(VkDevice dev,const c
     DEVICE_FN(GetSwapchainImagesKHR,layerGetSwapchainImages);DEVICE_FN(AcquireNextImageKHR,layerAcquire);
     DEVICE_FN(AcquireNextImage2KHR,layerAcquire2);DEVICE_FN(QueuePresentKHR,layerPresent);
     DEVICE_FN(ReleaseSwapchainImagesEXT,layerReleaseImages);
-    DeviceState *d=find_device(dev);if(d)return d->next_gdpa(dev,name);
+    state_lock();
+    DeviceState *d=find_device(dev);
+    PFN_vkGetDeviceProcAddr next=d?d->next_gdpa:NULL;
+    state_unlock();
+    if(next)return next(dev,name);
 #undef DEVICE_FN
     return NULL;
 }
