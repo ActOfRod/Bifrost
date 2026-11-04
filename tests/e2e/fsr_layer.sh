@@ -10,7 +10,11 @@ command -v Xvfb >/dev/null || fail "Xvfb is required"
 command -v import >/dev/null || fail "ImageMagick import is required"
 command -v convert >/dev/null || fail "ImageMagick convert is required"
 command -v vkcube >/dev/null || fail "vkcube is required"
-[[ -f /usr/share/vulkan/icd.d/lvp_icd.x86_64.json ]] || fail "lavapipe ICD manifest is missing"
+lavapipe_icd=
+for candidate in /usr/share/vulkan/icd.d/lvp_icd.x86_64.json /usr/share/vulkan/icd.d/lvp_icd.json; do
+    if [[ -f "$candidate" ]]; then lavapipe_icd=$candidate; break; fi
+done
+[[ -n "$lavapipe_icd" ]] || fail "lavapipe ICD manifest is missing"
 [[ -f /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json ]] || fail "vulkan-validationlayers is required"
 
 scripts/build_fsr_layer.sh
@@ -36,7 +40,7 @@ rm -f "$ready"
 mkdir -p "$ARTIFACTS/config-scale" "$ARTIFACTS/config-auto"
 printf '[fsr]\nsharpness=0.2\nscale=2.0\nfake_mode_switch=false\nlog=true\n' >"$ARTIFACTS/config-scale/bifrost_fsr.ini"
 printf '[fsr]\nsharpness=0.2\nscale=auto\nfake_mode_switch=false\nlog=true\n' >"$ARTIFACTS/config-auto/bifrost_fsr.ini"
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+export VK_ICD_FILENAMES="$lavapipe_icd"
 export VK_LAYER_PATH="$layer:/usr/share/vulkan/explicit_layer.d"
 export VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1:VK_LAYER_KHRONOS_validation
 
