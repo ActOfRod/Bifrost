@@ -375,21 +375,58 @@ static void update_caps(VkSurfaceCapabilitiesKHR *caps) {
     caps->maxImageExtent.height = caps->maxImageExtent.height > r.height ? caps->maxImageExtent.height : r.height;
 }
 
+static int can_substitute(PFN_vkGetPhysicalDeviceQueueFamilyProperties get_families,
+                          PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support,
+                          VkPhysicalDevice physical, VkSurfaceKHR surface,
+                          const VkSurfaceCapabilitiesKHR *caps) {
+    if (!caps || !scaling_enabled() || caps->currentExtent.width == UINT32_MAX ||
+        !(caps->supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
+        !get_families || !get_support) return 0;
+    uint32_t count=0;
+    get_families(physical,&count,NULL);
+    if(!count)return 0;
+    VkQueueFamilyProperties *families=calloc(count,sizeof(*families));
+    if(!families)return 0;
+    uint32_t available=count;
+    get_families(physical,&available,families);
+    if(available>count)available=count;
+    int supported=0;
+    for(uint32_t family=0;family<available;family++) {
+        if(!(families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT))continue;
+        VkBool32 can_present=VK_FALSE;
+        if(get_support(physical,family,surface,&can_present)==VK_SUCCESS && can_present) {
+            supported=1;
+            break;
+        }
+    }
+    free(families);
+    return supported;
+}
+
 static VkResult VKAPI_CALL layerGetCaps(VkPhysicalDevice p, VkSurfaceKHR s, VkSurfaceCapabilitiesKHR *c) {
     state_lock();
     InstanceState *i = find_instance((VkInstance)p);
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps=i?i->GetCaps:NULL;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties get_families=i?i->GetQueueFamilies:NULL;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support=i?i->GetSurfaceSupport:NULL;
     state_unlock();
     if (!get_caps) return VK_ERROR_INITIALIZATION_FAILED;
-    VkResult r = get_caps(p,s,c); if (r == VK_SUCCESS) update_caps(c); return r;
+    VkResult r = get_caps(p,s,c);
+    if (r == VK_SUCCESS && can_substitute(get_families,get_support,p,s,c)) update_caps(c);
+    return r;
 }
 static VkResult VKAPI_CALL layerGetCaps2(VkPhysicalDevice p, const VkPhysicalDeviceSurfaceInfo2KHR *info, VkSurfaceCapabilities2KHR *c) {
     state_lock();
     InstanceState *i = find_instance((VkInstance)p);
     PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR get_caps=i?i->GetCaps2:NULL;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties get_families=i?i->GetQueueFamilies:NULL;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support=i?i->GetSurfaceSupport:NULL;
     state_unlock();
     if (!get_caps) return VK_ERROR_INITIALIZATION_FAILED;
-    VkResult r = get_caps(p,info,c); if (r == VK_SUCCESS) update_caps(&c->surfaceCapabilities); return r;
+    VkResult r = get_caps(p,info,c);
+    if (r == VK_SUCCESS && can_substitute(get_families,get_support,p,info->surface,&c->surfaceCapabilities))
+        update_caps(&c->surfaceCapabilities);
+    return r;
 }
 
 static uint32_t memory_type(DeviceState *d, uint32_t bits) {
@@ -788,23 +825,27 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
     PFN_vkGetSwapchainImagesKHR get_images=d?d->GetSwapchainImages:NULL;
     InstanceState *is=find_instance((VkInstance)physical);
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps=is?is->GetCaps:NULL;
+    PFN_vkGetPhysicalDeviceQueueFamilyProperties get_families=is?is->GetQueueFamilies:NULL;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support=is?is->GetSurfaceSupport:NULL;
     state_unlock();
     if(!d||!create_swapchain)return VK_ERROR_INITIALIZATION_FAILED;
     VkSurfaceCapabilitiesKHR caps={0};
-    if(!get_caps||get_caps(physical,ci->surface,&caps)!=VK_SUCCESS||!scaling_enabled()) {
+    if(!get_caps||get_caps(physical,ci->surface,&caps)!=VK_SUCCESS) {
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
         return create_swapchain(dev,ci,a,out);
     }
-    if(caps.currentExtent.width==UINT32_MAX) {
+    if(scaling_enabled()&&caps.currentExtent.width==UINT32_MAX) {
         log_message("surface has no fixed extent (e.g. Wayland); FSR needs a fixed-size window; passing through");
+        return create_swapchain(dev,ci,a,out);
+    }
+    if(!can_substitute(get_families,get_support,physical,ci->surface,&caps)) {
+        log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
         return create_swapchain(dev,ci,a,out);
     }
     VkExtent2D real_extent=caps.currentExtent;
     VkExtent2D expected=render_extent(real_extent);
     if(ci->imageExtent.width!=expected.width||ci->imageExtent.height!=expected.height||
-       (ci->imageExtent.width==real_extent.width&&ci->imageExtent.height==real_extent.height)||
-       !(caps.supportedUsageFlags&VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+       (ci->imageExtent.width==real_extent.width&&ci->imageExtent.height==real_extent.height)) {
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
         return create_swapchain(dev,ci,a,out);
     }
