@@ -637,8 +637,15 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     }
     // A previous output of this game is updated in place: only the executable and the files Bifrost writes are
     // touched, so saves and edited settings survive. A new output is built in a staging folder and moved into place.
-    let rerun = out.join(REPORT).is_file() && out.join(&exe_rel).is_file();
+    let rerun = out.join(REPORT).is_file() && fs::read(out.join(&exe_rel)).is_ok_and(|d| same_exe(&exe_data, &info, &d));
     if out.is_file() || !rerun && fs::read_dir(&out).is_ok_and(|mut d| d.next().is_some()) {
+        if out.join(REPORT).is_file() {
+            bail!(
+                "{} is a Modernizer output of a different game or version (its {} doesn't match); choose a new output folder",
+                out.display(),
+                exe_rel.display()
+            );
+        }
         bail!("{} is not empty; choose an empty folder or a previous Modernizer output of this game", out.display());
     }
 
@@ -656,6 +663,11 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         Some(src) if !wanted.is_empty() => Some(dxvk_dlls(src, info.arch, &mut r, 0.02, 0.2)?),
         _ => None,
     };
+    if let Some(d) = &dlls {
+        if let Some(missing) = wanted.iter().find(|n| !d.contains_key(**n)) {
+            bail!("the DXVK release has no {missing}");
+        }
+    }
 
     let target = if rerun {
         r.log("Updating the previous Modernizer output in place (saves and edited settings are kept)");
@@ -677,12 +689,23 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         stage
     };
 
-    let previous_exe = if rerun { previous_exe(&out) } else { None };
+    let previous_exe = if rerun { previous_exe(&out).filter(|p| root.join(p).is_file()) } else { None };
     let job = Job { opts, root: &root, target: &target, exe_rel: &exe_rel, exe_data: &exe_data, info: &info, rerun };
-    let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
     if rerun {
-        res?;
+        // Back up every file a re-run may touch so a failure leaves the previous output as it was.
+        let backup: Vec<(PathBuf, Option<Vec<u8>>)> =
+            job.touched(previous_exe.as_deref()).into_iter().map(|p| (p.clone(), fs::read(out.join(&p)).ok())).collect();
+        if let Err(e) = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r) {
+            for (p, data) in backup {
+                let _ = match data {
+                    Some(d) => fs::write(out.join(&p), d),
+                    None => fs::remove_file(out.join(&p)),
+                };
+            }
+            return Err(e);
+        }
     } else {
+        let res = job.apply(&apis, &wanted, dlls.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
         let res = res.and_then(|()| {
             if out.exists() {
                 fs::remove_dir(&out)?; // empty, checked above
@@ -760,6 +783,13 @@ fn previous_exe(out: &Path) -> Option<PathBuf> {
     p.components().all(|c| matches!(c, Component::Normal(_))).then_some(p)
 }
 
+/// Whether `copy` is `orig`, allowing only the header fields the Modernizer patches to differ (so a folder is only
+/// treated as an earlier output when it holds this game's own executable).
+fn same_exe(orig: &[u8], info: &PeInfo, copy: &[u8]) -> bool {
+    let patched = |i: usize| (info.characteristics_off..info.characteristics_off + 2).contains(&i) || (info.checksum_off..info.checksum_off + 4).contains(&i);
+    orig.len() == copy.len() && orig.iter().zip(copy).enumerate().all(|(i, (a, b))| a == b || patched(i))
+}
+
 /// Characters that would let a file name escape a quoted argument in a .bat file.
 fn batch_safe(s: &str) -> bool {
     !s.chars().any(|c| c.is_control() || "\"%^&|<>!".contains(c))
@@ -776,6 +806,18 @@ struct Job<'a> {
 }
 
 impl Job<'_> {
+    /// Every output file (relative) a re-run may write or remove.
+    fn touched(&self, previous_exe: Option<&Path>) -> BTreeSet<PathBuf> {
+        let exes: Vec<&Path> = [Some(self.exe_rel), previous_exe].into_iter().flatten().collect();
+        let mut t: BTreeSet<PathBuf> = exes.iter().map(|e| e.to_path_buf()).collect();
+        for e in exes {
+            let d = e.parent().map(Path::to_path_buf).unwrap_or_default();
+            t.extend(GENERATED_BESIDE_EXE.iter().map(|n| d.join(n)));
+        }
+        t.extend(["bifrost_compat.bat", "bifrost_compat_undo.bat"].map(PathBuf::from));
+        t
+    }
+
     /// Puts a file Bifrost may have generated before back to the game's own version, or removes it.
     fn reset(&self, rel: &Path) -> Result<()> {
         let (src, dst) = (self.root.join(rel), self.target.join(rel));
@@ -803,17 +845,10 @@ impl Job<'_> {
         let exe_dir = exe_out.parent().map(Path::to_path_buf).unwrap_or_else(|| self.target.to_path_buf());
 
         if self.rerun {
-            let dirs: BTreeSet<PathBuf> =
-                [Some(exe_rel), previous_exe].into_iter().flatten().map(|e| e.parent().map(Path::to_path_buf).unwrap_or_default()).collect();
-            for d in dirs {
-                for name in GENERATED_BESIDE_EXE {
-                    self.reset(&d.join(name))?;
-                }
+            // Back to the game's own files (this also un-patches a previously selected executable).
+            for p in self.touched(previous_exe) {
+                self.reset(&p)?;
             }
-            for name in ["bifrost_compat.bat", "bifrost_compat_undo.bat"] {
-                self.reset(Path::new(name))?;
-            }
-            fs::write(&exe_out, self.exe_data)?;
         }
 
         if opts.large_address_aware {

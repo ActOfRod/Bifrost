@@ -73,6 +73,9 @@ grep -q volume=10 "$W/o32/System/Engine.dll.ini" || fail "edited settings lost o
 mkdir -p "$W/forged" && touch "$W/forged/bifrost_modernize.txt" && echo keep > "$W/forged/notes.txt"
 if $BF modernize "$W/g32" -o "$W/forged" >/dev/null 2>&1; then fail "folder with only a report accepted"; fi
 grep -q keep "$W/forged/notes.txt" || fail "forged output touched"
+mkdir -p "$W/forged/System" && cp "$W/g64/Game64.exe" "$W/forged/System/Game.exe"
+if $BF modernize "$W/g32" -o "$W/forged" >/dev/null 2>&1; then fail "folder with a different exe accepted"; fi
+cmp -s "$W/g64/Game64.exe" "$W/forged/System/Game.exe" || fail "unrelated exe overwritten"
 ls -a "$W" | grep -q bifrost- && fail "staging folder left behind"
 if $BF modernize "$W/g32" -o "$W/o32" --dxvk "$W/missing.tar.gz" >/dev/null 2>&1; then fail "missing DXVK accepted"; fi
 [ -f "$W/o32/Saves/slot1.sav" ] && [ -f "$W/o32/System/Game.exe" ] || fail "failed re-run damaged the previous output"
