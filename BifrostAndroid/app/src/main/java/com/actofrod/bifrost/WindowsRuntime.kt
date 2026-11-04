@@ -11,6 +11,8 @@ import com.winlator.xenvironment.RootFS
 import com.winlator.xenvironment.RootFSInstaller
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,7 +46,8 @@ object WindowsRuntime {
             if (contentLength <= 0L) throw IOException("Could not read Windows runtime system files")
             val requiredSpace = contentLength + STORAGE_RESERVE_BYTES
             val storageDirectory = rootDir.parentFile ?: rootDir
-            if (storageDirectory.usableSpace < requiredSpace) {
+            val availableAfterCleanup = storageDirectory.usableSpace + reclaimableBytes(rootDir)
+            if (availableAfterCleanup < requiredSpace) {
                 throw IOException(
                     "Not enough free storage to install Windows runtime; " +
                         "requires ${requiredSpace / (1024 * 1024)} MiB including reserve",
@@ -120,5 +123,38 @@ object WindowsRuntime {
                 FileUtils.delete(file)
             }
         }
+    }
+}
+
+internal fun reclaimableBytes(rootDir: File): Long {
+    if (!Files.isDirectory(rootDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return 0L
+    val children = rootDir.listFiles() ?: throw IOException("Could not read existing Windows runtime files")
+    return children.fold(0L) { total, child ->
+        val path = child.toPath()
+        when {
+            Files.isSymbolicLink(path) -> total
+            Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) && child.name == "home" -> total
+            Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) && child.name == "opt" -> {
+                val optChildren = child.listFiles()
+                    ?: throw IOException("Could not read existing Windows runtime files")
+                total + optChildren
+                    .filterNot { it.name == "installed-wine" }
+                    .fold(0L) { optTotal, optChild -> optTotal + regularFileBytes(optChild) }
+            }
+            else -> total + regularFileBytes(child)
+        }
+    }
+}
+
+private fun regularFileBytes(file: File): Long {
+    val path = file.toPath()
+    return when {
+        Files.isSymbolicLink(path) -> 0L
+        Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) -> Files.size(path)
+        Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) -> {
+            val children = file.listFiles() ?: throw IOException("Could not read existing Windows runtime files")
+            children.fold(0L) { total, child -> total + regularFileBytes(child) }
+        }
+        else -> 0L
     }
 }
