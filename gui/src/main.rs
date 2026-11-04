@@ -139,16 +139,19 @@ impl WindowsPackage {
         };
         if !self.out_edited {
             let name = p.file_name().map(|name| name.to_string_lossy().into_owned()).filter(|name| !name.is_empty()).unwrap_or_else(|| "game".into());
-            let game_root = std::fs::canonicalize(&p).ok();
-            let proposed_out_dir = std::env::current_dir()
-                .and_then(std::fs::canonicalize)
+            let current_dir = std::env::current_dir().ok();
+            let proposed_out_dir = current_dir
+                .as_ref()
                 .map(|cwd| cwd.join("bifrost-out"))
-                .unwrap_or_else(|_| PathBuf::from("bifrost-out"));
-            let out_dir = match game_root {
-                Some(game_root) if proposed_out_dir.starts_with(&game_root) => {
-                    game_root.parent().map(|parent| parent.to_path_buf()).unwrap_or(proposed_out_dir)
-                }
-                _ => proposed_out_dir,
+                .unwrap_or_else(|| PathBuf::from("bifrost-out"));
+            let out_is_inside_game = match (std::fs::canonicalize(&p), current_dir.as_ref().and_then(|cwd| std::fs::canonicalize(cwd).ok())) {
+                (Ok(game_root), Some(cwd)) => cwd.join("bifrost-out").starts_with(game_root),
+                _ => false,
+            };
+            let out_dir = if out_is_inside_game {
+                p.parent().map(PathBuf::from).unwrap_or(proposed_out_dir)
+            } else {
+                proposed_out_dir
             };
             self.out = out_dir.join(format!("{name}.bifrost")).display().to_string();
         }
