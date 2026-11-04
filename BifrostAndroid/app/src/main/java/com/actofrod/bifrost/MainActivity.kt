@@ -532,7 +532,7 @@ private fun LauncherScreen(activity: MainActivity) {
                     Tab.values().forEach { item ->
                         val selected = activity.tab == item
                         Text(
-                            item.name.lowercase().replaceFirstChar { it.uppercase() },
+                            if (item.name == "PC") "PC" else item.name.lowercase().replaceFirstChar { it.uppercase() },
                             Modifier.padding(horizontal = 6.dp).clip(RoundedCornerShape(14.dp))
                                 .background(if (selected) Color(0xFF203A44) else Color.Transparent)
                         .clickable { activity.tab = item }
