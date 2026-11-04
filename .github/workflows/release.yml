@@ -60,8 +60,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
       - name: Install zstd
         run: |
           if ! command -v zstd >/dev/null 2>&1; then
@@ -76,10 +74,24 @@ jobs:
           java-version: "17"
       - name: Install Android SDK components
         run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            for candidate in "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager; do
+              if [[ -x "$candidate" ]]; then
+                SDKMANAGER="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
           set +o pipefail
-          yes | sdkmanager --licenses
+          yes | "$SDKMANAGER" --licenses
           set -o pipefail
-          sdkmanager --install "platforms;android-35" "ndk;24.0.8215888" "cmake;3.22.1"
+          "$SDKMANAGER" --install "platforms;android-35" "ndk;24.0.8215888" "cmake;3.22.1"
       - name: Configure Android release signing
         env:
           BIFROST_ANDROID_KEYSTORE_B64: ${{ secrets.BIFROST_ANDROID_KEYSTORE_B64 }}
