@@ -190,8 +190,10 @@ static void patch_iat(HMODULE module, const char *name, void *replacement, void 
             if (strcmp((const char *)entry->Name, name) != 0) continue;
             DWORD old_protect;
             if (VirtualProtect(&iat->u1.Function, sizeof(void *), PAGE_READWRITE, &old_protect)) {
-                if (original && !*original) *original = (void *)(uintptr_t)iat->u1.Function;
-                iat->u1.Function = (ULONG_PTR)replacement;
+                if ((void *)(uintptr_t)iat->u1.Function != replacement) {
+                    if (original && !*original) *original = (void *)(uintptr_t)iat->u1.Function;
+                    iat->u1.Function = (ULONG_PTR)replacement;
+                }
                 VirtualProtect(&iat->u1.Function, sizeof(void *), old_protect, &old_protect);
             }
         }
@@ -201,12 +203,13 @@ static void install_fake_mode_hooks(void) {
     if (!config.fake_mode_switch) return;
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     if (!user32) return;
+    /* These are USER32 exports; patching DXVK module IAT slots does not alter them. */
     FARPROC proc = GetProcAddress(user32, "ChangeDisplaySettingsExW");
-    memcpy(&real_change_w, &proc, sizeof(real_change_w));
+    if(proc&&!real_change_w)memcpy(&real_change_w, &proc, sizeof(real_change_w));
     proc = GetProcAddress(user32, "ChangeDisplaySettingsExA");
-    memcpy(&real_change_a, &proc, sizeof(real_change_a));
+    if(proc&&!real_change_a)memcpy(&real_change_a, &proc, sizeof(real_change_a));
     proc = GetProcAddress(user32, "EnumDisplaySettingsW");
-    memcpy(&real_enum_w, &proc, sizeof(real_enum_w));
+    if(proc&&!real_enum_w)memcpy(&real_enum_w, &proc, sizeof(real_enum_w));
     HMODULE modules[1024]; DWORD needed = 0;
     if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed)) return;
     DWORD count = needed / sizeof(HMODULE); if (count > 1024) count = 1024;
@@ -233,6 +236,7 @@ struct InstanceState {
     PFN_vkCreateDevice CreateDevice;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetCaps;
     PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR GetCaps2;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR GetSurfaceSupport;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetQueueFamilies;
     PFN_vkGetPhysicalDeviceMemoryProperties GetMemoryProperties;
     InstanceState *next;
@@ -394,6 +398,40 @@ static uint32_t memory_type(DeviceState *d, uint32_t bits) {
     for (uint32_t i = 0; i < d->memory.memoryTypeCount; ++i) if (bits & (1u << i)) return i;
     return UINT32_MAX;
 }
+
+static uint32_t choose_graphics_family(DeviceState *d, VkSurfaceKHR surface,
+                                       PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support) {
+    if (!get_support || !d->families || !d->family_count) return UINT32_MAX;
+    uint32_t *preferred=calloc(d->family_count,sizeof(*preferred));
+    uint8_t *seen=calloc(d->family_count,sizeof(*seen));
+    if(!preferred||!seen){free(preferred);free(seen);return UINT32_MAX;}
+    uint32_t count=0;
+    state_lock();
+    for(QueueEntry *q=d->queues;q;q=q->next) {
+        uint32_t family=q->family;
+        if(family<d->family_count && !seen[family] &&
+           (d->families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) {
+            preferred[count++]=family;
+            seen[family]=1;
+        }
+    }
+    state_unlock();
+    for(uint32_t i=0;i<count;i++) {
+        VkBool32 supported=VK_FALSE;
+        if(get_support(d->physical,preferred[i],surface,&supported)==VK_SUCCESS && supported) {
+            uint32_t family=preferred[i];free(preferred);free(seen);return family;
+        }
+    }
+    for(uint32_t family=0;family<d->family_count;family++) {
+        if(seen[family] || !(d->families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) continue;
+        VkBool32 supported=VK_FALSE;
+        if(get_support(d->physical,family,surface,&supported)==VK_SUCCESS && supported) {
+            free(preferred);free(seen);return family;
+        }
+    }
+    free(preferred);free(seen);
+    return UINT32_MAX;
+}
 static int make_image(DeviceState *d, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage,
                       VkImage *image, VkDeviceMemory *memory, VkImageView *view) {
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -509,8 +547,9 @@ static void destroy_swapchain_resources(Swapchain *s) {
     if (s->pool) d->DestroyCommandPool(d->handle,s->pool,NULL);
 }
 
-static int setup_swapchain(Swapchain *s) {
+static int setup_swapchain(Swapchain *s,uint32_t family) {
     DeviceState *d = s->device;
+    if(family>=d->family_count || !(d->families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) return 0;
     VkImage *real_images = calloc(s->count,sizeof(*real_images));
     if (!real_images) return 0;
     uint32_t n=s->count;
@@ -543,14 +582,6 @@ static int setup_swapchain(Swapchain *s) {
     for (uint32_t i=0;i<n*2;i++) layouts[i]=s->set_layout;
     VkDescriptorSetAllocateInfo dai={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO}; dai.descriptorPool=s->descriptor_pool; dai.descriptorSetCount=n*2; dai.pSetLayouts=layouts;
     if (d->AllocateDescriptorSets(d->handle,&dai,sets)!=VK_SUCCESS) { free(layouts);free(sets);free(real_images);return 0; }
-    uint32_t family=UINT32_MAX;
-    state_lock();
-    for (QueueEntry *q=d->queues;q;q=q->next) if (q->family<d->family_count && (d->families[q->family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) { family=q->family; break; }
-    state_unlock();
-    if (family==UINT32_MAX) {
-        for (uint32_t i=0;i<d->family_count;i++) if (d->families[i].queueFlags&VK_QUEUE_GRAPHICS_BIT) { family=i; break; }
-    }
-    if (family==UINT32_MAX) { free(layouts);free(sets);free(real_images);return 0; }
     s->pool_family=family;
     VkCommandPoolCreateInfo cpi={VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO}; cpi.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; cpi.queueFamilyIndex=family;
     if (d->CreateCommandPool(d->handle,&cpi,NULL,&s->pool)!=VK_SUCCESS) { free(layouts);free(sets);free(real_images);return 0; }
@@ -643,16 +674,16 @@ static VkResult VKAPI_CALL layerCreateInstance(const VkInstanceCreateInfo *ci, c
     ILOAD(DestroyInstance,DestroyInstance); ILOAD(CreateDevice,CreateDevice);
     ILOAD(GetCaps,GetPhysicalDeviceSurfaceCapabilitiesKHR);
     ILOAD(GetCaps2,GetPhysicalDeviceSurfaceCapabilities2KHR);
+    ILOAD(GetSurfaceSupport,GetPhysicalDeviceSurfaceSupportKHR);
     ILOAD(GetQueueFamilies,GetPhysicalDeviceQueueFamilyProperties);
     ILOAD(GetMemoryProperties,GetPhysicalDeviceMemoryProperties);
 #undef ILOAD
     state_lock();
     s->next=instances; instances=s;
-    if(!config_loaded){load_config();config_loaded=1;
+    if(!config_loaded){load_config();config_loaded=1;}
 #ifdef _WIN32
-        install_fake_mode_hooks();
+    install_fake_mode_hooks();
 #endif
-    }
     log_message("VK_LAYER_BIFROST_fsr1 active (scale=%s)",config.scale>1.0f?"numeric":"auto");
     state_unlock();
     return VK_SUCCESS;
@@ -757,6 +788,7 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
     PFN_vkGetSwapchainImagesKHR get_images=d?d->GetSwapchainImages:NULL;
     InstanceState *is=find_instance((VkInstance)physical);
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps=is?is->GetCaps:NULL;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support=is?is->GetSurfaceSupport:NULL;
     state_unlock();
     if(!d||!create_swapchain)return VK_ERROR_INITIALIZATION_FAILED;
     VkSurfaceCapabilitiesKHR caps={0};
@@ -764,13 +796,21 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
         return create_swapchain(dev,ci,a,out);
     }
+    if(caps.currentExtent.width==UINT32_MAX) {
+        log_message("surface has no fixed extent (e.g. Wayland); FSR needs a fixed-size window; passing through");
+        return create_swapchain(dev,ci,a,out);
+    }
     VkExtent2D real_extent=caps.currentExtent;
-    if(real_extent.width==UINT32_MAX) real_extent=ci->imageExtent;
     VkExtent2D expected=render_extent(real_extent);
     if(ci->imageExtent.width!=expected.width||ci->imageExtent.height!=expected.height||
        (ci->imageExtent.width==real_extent.width&&ci->imageExtent.height==real_extent.height)||
        !(caps.supportedUsageFlags&VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
+        return create_swapchain(dev,ci,a,out);
+    }
+    uint32_t family=choose_graphics_family(d,ci->surface,get_support);
+    if(family==UINT32_MAX) {
+        log_message("graphics queue family cannot present to this surface; passing through");
         return create_swapchain(dev,ci,a,out);
     }
     VkSwapchainCreateInfoKHR real_ci=*ci;real_ci.imageExtent=real_extent;
@@ -786,11 +826,12 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
     uint32_t n=0;r=get_images(dev,s->real,&n,NULL);
     if(r!=VK_SUCCESS||!n){destroy_swapchain(dev,*out,a);free(s);return r==VK_SUCCESS?VK_ERROR_INITIALIZATION_FAILED:r;}
     s->count=n;
-    if(!setup_swapchain(s)){destroy_swapchain_resources(s);destroy_swapchain(dev,*out,a);free(s);return VK_ERROR_INITIALIZATION_FAILED;}
+    if(!setup_swapchain(s,family)){destroy_swapchain_resources(s);destroy_swapchain(dev,*out,a);free(s);return VK_ERROR_INITIALIZATION_FAILED;}
     state_lock();
     s->next=swapchains;swapchains=s;
+    VkExtent2D app_extent=s->app_extent, output_extent=s->output_extent;
     state_unlock();
-    log_message("upscaling engaged: %ux%u -> %ux%u",s->app_extent.width,s->app_extent.height,s->output_extent.width,s->output_extent.height);
+    log_message("upscaling engaged: %ux%u -> %ux%u",app_extent.width,app_extent.height,output_extent.width,output_extent.height);
     return VK_SUCCESS;
 }
 
@@ -813,7 +854,8 @@ static VkResult VKAPI_CALL layerGetSwapchainImages(VkDevice dev,VkSwapchainKHR h
     if(!images){*count=s->count;state_unlock();return VK_SUCCESS;}
     uint32_t n=*count<s->count?*count:s->count;
     for(uint32_t i=0;i<n;i++)images[i]=s->frames[i].app;
-    *count=n;state_unlock();return n<s->count?VK_INCOMPLETE:VK_SUCCESS;
+    VkResult result=n<s->count?VK_INCOMPLETE:VK_SUCCESS;
+    *count=n;state_unlock();return result;
 }
 static VkResult VKAPI_CALL layerAcquire(VkDevice dev,VkSwapchainKHR h,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t *index) {
     state_lock();
@@ -846,6 +888,7 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     VkResult r=d->BeginCommandBuffer(f->command,&bi);if(r!=VK_SUCCESS)return r;
     VkImageMemoryBarrier app={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     app.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;app.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+    /* The app treats this as a swapchain image and must return it to PRESENT_SRC_KHR before vkQueuePresentKHR, so it is in that layout here. */
     app.oldLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;app.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     app.srcQueueFamilyIndex=app.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;app.image=f->app;
     app.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
@@ -913,6 +956,7 @@ static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *in
     state_lock();
     DeviceState *d=find_device(queue);
     if(!d||!d->QueuePresent){state_unlock();free(mapped);free(handles);return VK_ERROR_INITIALIZATION_FAILED;}
+    PFN_vkQueuePresentKHR queue_present=d->QueuePresent;
     uint32_t family=UINT32_MAX;
     for(QueueEntry *q=d->queues;q;q=q->next)if(q->queue==queue){family=q->family;break;}
     int scaled=0,graphics=family<d->family_count&&(d->families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT);
@@ -921,10 +965,10 @@ static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *in
         if(mapped[i]&&mapped[i]->scaled){scaled=1;if(mapped[i]->pool_family!=family)graphics=0;}
     }
     if(!scaled||!graphics){
-        if(scaled)log_message("present queue lacks graphics capability; passing through");
+        if(scaled)log_message("app presented on a different queue family than the FSR pass uses; the frame is not upscaled");
         VkPresentInfoKHR pass=*info;pass.pSwapchains=handles;
         if(!scaled)state_unlock();
-        VkResult result=d->QueuePresent(queue,&pass);
+        VkResult result=queue_present(queue,&pass);
         if(scaled)state_unlock();
         free(mapped);free(handles);return result;
     }
@@ -941,7 +985,7 @@ static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *in
     if(result==VK_SUCCESS){
         VkPresentInfoKHR pass=*info;pass.pSwapchains=handles;
         if(!first){pass.waitSemaphoreCount=1;pass.pWaitSemaphores=&previous;}
-        result=d->QueuePresent(queue,&pass);
+        result=queue_present(queue,&pass);
     }
     state_unlock();
     free(mapped);free(handles);return result;
