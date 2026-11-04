@@ -132,6 +132,7 @@ struct WindowsPackage {
 
 impl WindowsPackage {
     fn set_game(&mut self, p: PathBuf) {
+        let p = std::path::absolute(&p).unwrap_or(p);
         self.scan = Some(modernize::scan(&p).map_err(|e| format!("{e:#}")));
         self.exe = match &self.scan {
             Some(Ok(scan)) => scan.main.unwrap_or(0),
