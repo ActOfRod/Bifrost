@@ -689,7 +689,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         stage
     };
 
-    let previous_exe = if rerun { previous_exe(&out).filter(|p| root.join(p).is_file()) } else { None };
+    let previous_exe = if rerun { previous_exe(&out) } else { None };
     let job = Job { opts, root: &root, target: &target, exe_rel: &exe_rel, exe_data: &exe_data, info: &info, rerun };
     if rerun {
         // Back up every file a re-run may touch so a failure leaves the previous output as it was.
@@ -809,7 +809,8 @@ impl Job<'_> {
     /// Every output file (relative) a re-run may write or remove.
     fn touched(&self, previous_exe: Option<&Path>) -> BTreeSet<PathBuf> {
         let exes: Vec<&Path> = [Some(self.exe_rel), previous_exe].into_iter().flatten().collect();
-        let mut t: BTreeSet<PathBuf> = exes.iter().map(|e| e.to_path_buf()).collect();
+        // An executable is only reset when the game still has it; generated files beside it are always cleaned.
+        let mut t: BTreeSet<PathBuf> = exes.iter().filter(|e| self.root.join(e).is_file()).map(|e| e.to_path_buf()).collect();
         for e in exes {
             let d = e.parent().map(Path::to_path_buf).unwrap_or_default();
             t.extend(GENERATED_BESIDE_EXE.iter().map(|n| d.join(n)));
