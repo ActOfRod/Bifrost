@@ -6,6 +6,8 @@ plugins {
 }
 
 val releaseKeystore = System.getenv("BIFROST_ANDROID_KEYSTORE")
+val appVersionCode = System.getenv("BIFROST_VERSION_CODE")?.toInt() ?: 1
+val appVersionName = System.getenv("BIFROST_VERSION_NAME") ?: "0.1.0-dev"
 
 android {
     namespace = "com.actofrod.bifrost"
@@ -16,8 +18,8 @@ android {
         minSdk = 26
         // Stage 2 executes Wine/Box64 from app storage; target SDK 29+ blocks this with W^X.
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -51,12 +53,16 @@ android {
     buildFeatures {
         compose = true
     }
+
+    lint {
+        disable += "ExpiredTargetSdkVersion"
+    }
 }
 
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
-    implementation("androidx.activity:activity-compose:1.10.0")
-    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.compose.ui:ui")

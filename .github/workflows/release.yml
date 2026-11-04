@@ -74,10 +74,16 @@ jobs:
           fi
       - name: Build and package Android APK
         env:
+          BIFROST_VERSION_CODE: ${{ github.run_number }}
           BIFROST_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.BIFROST_ANDROID_KEYSTORE_PASSWORD }}
           BIFROST_ANDROID_KEY_ALIAS: ${{ secrets.BIFROST_ANDROID_KEY_ALIAS }}
           BIFROST_ANDROID_KEY_PASSWORD: ${{ secrets.BIFROST_ANDROID_KEY_PASSWORD }}
         run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            export BIFROST_VERSION_NAME="${GITHUB_REF_NAME#v}"
+          else
+            export BIFROST_VERSION_NAME="dev-${GITHUB_SHA:0:7}"
+          fi
           cd BifrostAndroid
           ./gradlew --no-daemon :app:assembleRelease
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then v="$GITHUB_REF_NAME"; else v="dev-${GITHUB_SHA:0:7}"; fi

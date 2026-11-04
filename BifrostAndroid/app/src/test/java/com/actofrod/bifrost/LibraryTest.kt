@@ -41,7 +41,7 @@ class LibraryTest {
                 zip.write(byteArrayOf(1, 2, 3))
                 zip.closeEntry()
             }
-            val imported = extractBifrostPackage(archive, File(temp, "files/games"), "test-id")
+            val imported = extractBifrostPackage(archive.inputStream(), File(temp, "files/games"), "test-id")
             assertTrue(File(temp, "files/games/test-id/game/Game.exe").isFile)
             assertEquals("test-id/game", imported.gameDir)
 

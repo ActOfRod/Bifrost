@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.util.UUID
 import java.util.zip.ZipInputStream
 import kotlinx.serialization.Serializable
@@ -110,7 +111,7 @@ private fun validateEntry(name: String, root: File): File {
 }
 
 fun extractBifrostPackage(
-    archive: File,
+    archive: InputStream,
     gamesDirectory: File,
     id: String = UUID.randomUUID().toString(),
     progress: (Long) -> Unit = {},
@@ -126,7 +127,7 @@ fun extractBifrostPackage(
         var manifest: BifrostManifest? = null
         val names = mutableSetOf<String>()
         var copied = 0L
-        ZipInputStream(archive.inputStream().buffered()).use { zip ->
+        ZipInputStream(archive.buffered()).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
                 val name = entry.name
@@ -194,4 +195,13 @@ fun extractBifrostPackage(
         coverFile?.delete()
         throw error
     }
+}
+
+fun extractBifrostPackage(
+    archive: File,
+    gamesDirectory: File,
+    id: String = UUID.randomUUID().toString(),
+    progress: (Long) -> Unit = {},
+): ImportedPackage = archive.inputStream().use { input ->
+    extractBifrostPackage(input, gamesDirectory, id, progress)
 }

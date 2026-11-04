@@ -41,7 +41,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -252,7 +251,7 @@ class MainActivity : ComponentActivity() {
     fun pickPackage() { showAddMenu = false; packagePicker.launch(arrayOf("*/*")) }
     fun showInstalledApps() { showAddMenu = false; installedApps = listInstalledApps() }
 
-    fun addInstalledApp(app: InstalledApp) {
+    internal fun addInstalledApp(app: InstalledApp) {
         val icon = runCatching { packageManager.getApplicationIcon(app.packageName) }.getOrNull()
         val entry = LibraryEntry(
             id = "native-${app.packageName}",
@@ -378,25 +377,19 @@ class MainActivity : ComponentActivity() {
     private fun importPackage(uri: Uri) {
         lifecycleScope.launch {
             importBytes = 0L
-            var source: File? = null
             try {
                 val displayName = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
                     ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
                     ?: uri.lastPathSegment?.substringAfterLast('/')
                 require(displayName?.endsWith(".bifrost", ignoreCase = true) == true) { "Choose a .bifrost package" }
-                val packageFile = withContext(Dispatchers.IO) {
-                    val file = File(cacheDir, "import-${UUID.randomUUID()}.bifrost")
-                    contentResolver.openInputStream(uri).use { input ->
-                        requireNotNull(input) { "Could not open selected package" }
-                        file.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    file
-                }
-                source = packageFile
                 val id = UUID.randomUUID().toString()
                 val imported = withContext(Dispatchers.IO) {
-                    extractBifrostPackage(packageFile, File(filesDir, "games"), id) { bytes ->
-                        runOnUiThread { importBytes = bytes }
+                    val input = contentResolver.openInputStream(uri)
+                        ?: throw java.io.IOException("Could not open selected package")
+                    input.use {
+                        extractBifrostPackage(it, File(filesDir, "games"), id) { bytes ->
+                            runOnUiThread { importBytes = bytes }
+                        }
                     }
                 }
                 val entry = LibraryEntry(
@@ -414,11 +407,9 @@ class MainActivity : ComponentActivity() {
                 page = Page.HOME
                 selected = null
                 message = "Imported ${entry.title}"
-                packageFile.delete()
             } catch (error: Exception) {
                 message = error.message ?: "Could not import package"
             } finally {
-                source?.delete()
                 importBytes = null
             }
         }
