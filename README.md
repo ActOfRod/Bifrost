@@ -9,7 +9,7 @@ Bifrost has four targets. Switch → Windows, Switch → Android and the Moderni
 | **Switch → Windows** | Recompiles a Switch title into a Windows `.exe` | `█████▌░░░░` 5.5 / 10 stages |
 | **Switch → Android** | Recompiles a Switch title into an arm64 APK with a Vulkan renderer | `█████░░░░░` 5.5 / 11 stages |
 | **Windows → Android** | Recompiles an x86/x64 Windows game into an arm64 APK | `░░░░░░░░░░` 0 / 8 stages |
-| **Modernizer** | Updates an old Windows game (XP / Windows 7 era) to run better on current Windows and hardware | `███░░░░░░░` 2 / 7 stages |
+| **Modernizer** | Updates an old Windows game (XP / Windows 7 era) to run better on current Windows and hardware | `███▌░░░░░░` 2.5 / 7 stages |
 
 The stage counts come from the checklists below: ✅ counts as 1, 🟡 (partly done) counts as ½ and ⬜ counts as 0. "Validated on a real title" is its own stage, and no target has reached it yet. All testing so far has used small test programs written for Bifrost.
 
@@ -71,8 +71,8 @@ The Modernizer takes an older Windows game (Windows XP / Windows 7 era) and rebu
 |---|---|
 | Intake: the game's install folder (`.exe`, DLLs, data files) and which graphics, audio and input APIs it imports | ✅ main `.exe` detected automatically (installers and uninstallers skipped); imports read from the `.exe` and the DLLs beside it |
 | Compatibility fixes: modern resolutions and widescreen, high-DPI, frame-rate caps, timing bugs on fast CPUs | 🟡 high-DPI override, fullscreen optimizations off, XP SP3 mode, frame-rate cap, Large Address Aware patch; no widescreen or timing fixes yet |
-| Graphics: older Direct3D versions translated to a modern API (Vulkan or D3D11/12) | 🟡 Direct3D 8, 9, 10 and 11 → Vulkan through DXVK 3.1.1, with forced anisotropic filtering; DirectDraw, OpenGL and Glide not yet |
-| Upscaling: spatial upscalers (FSR 1, NVIDIA Image Scaling) | ⬜ |
+| Graphics: older graphics APIs translated to a modern API (Vulkan or D3D11/12) | 🟡 Direct3D 8–11 → Vulkan through DXVK 3.1.1; 2D DirectDraw through cnc-ddraw 7.1.0.0 (Direct3D 7 or older is skipped); OpenGL and Glide not yet |
+| Upscaling: spatial upscalers (FSR 1, NVIDIA Image Scaling) | 🟡 FSR 1 through cnc-ddraw for DirectDraw games; Direct3D games and NIS not yet |
 | Upscaling: NVIDIA DLSS | ⬜ |
 | Input and audio: XInput controller support, a replacement for legacy DirectSound/EAX audio | ⬜ |
 | Validated on *The Hobbit* (2003) | ⬜ |
@@ -80,13 +80,15 @@ The Modernizer takes an older Windows game (Windows XP / Windows 7 era) and rebu
 The original install is never changed. The Modernizer copies the game to an output folder and changes only the copy:
 - **Large Address Aware:** sets the flag on a 32-bit `.exe` so it can use 4 GB of memory instead of 2 GB (the PE checksum is updated too).
 - **DXVK:** the matching 32- or 64-bit DLLs go next to the `.exe`, with DXVK's license. The release is downloaded once from GitHub, checked against its SHA-256 and cached; `--dxvk` uses a local copy instead.
+- **cnc-ddraw:** for 32-bit DirectDraw games, installs v7.1.0.0 (MIT). Its GitHub release is pinned to SHA-256 `0b13ab89a64c9918189b1dadd449ef6ed3cb3b7b19cabd96d8adbd95505bb908` and cached like DXVK; `--ddraw <zip|dir>` selects a local release and `--no-ddraw` leaves DirectDraw alone. Direct3D 7 or older is detected and skipped because cnc-ddraw cannot render it.
+- **FSR 1:** `--fsr` enables cnc-ddraw's AMD FidelityFX Super Resolution 1 shader for DirectDraw games. Direct3D-game support is planned.
 - **`dxvk.conf`:** anisotropic filtering and the frame-rate cap.
 - **`bifrost_compat.bat`:** writes the Windows compatibility settings for the copied `.exe` (`bifrost_compat_undo.bat` removes them). The app can also apply them directly on Windows.
 - **`bifrost_modernize.txt`:** a report of what was detected and changed.
 
-In the app, FSR 1 and DLSS are shown but can't be selected yet.
+FSR 1 is available for DirectDraw games in the app and command line; Direct3D support is planned. DLSS is not available yet.
 
-**About DLSS.** Copying NVIDIA's DLSS DLL (`nvngx_dlss.dll`) into the game folder does nothing on its own. The game has to call DLSS every frame and pass it a depth buffer, per-pixel motion vectors and camera jitter. A 2003 game doesn't produce motion vectors, so the Modernizer's graphics layer would have to generate them before DLSS can work. Spatial upscalers (FSR 1, NIS) only need the final image, so they will come first. The DLSS DLL comes from NVIDIA's DLSS SDK under NVIDIA's license, and DLSS needs an NVIDIA RTX GPU.
+**About DLSS.** Copying NVIDIA's DLSS DLL (`nvngx_dlss.dll`) into the game folder does nothing on its own. The game has to call DLSS every frame and pass it a depth buffer, per-pixel motion vectors and camera jitter. A 2003 game doesn't produce motion vectors, so the Modernizer's graphics layer would have to generate them before DLSS can work. Spatial upscalers (FSR 1, NIS) only need the final image; FSR 1 is supported for DirectDraw, while broader support is planned. The DLSS DLL comes from NVIDIA's DLSS SDK under NVIDIA's license, and DLSS needs an NVIDIA RTX GPU.
 
 ## Using Bifrost
 
@@ -110,7 +112,7 @@ First choose the task: **Recomp** or **Modernize**.
 
 **Modernize**
 1. Choose the game's install folder or its `.exe`. The app shows the detected game executable (you can pick another) and the APIs it uses.
-2. Choose the options: DXVK, anisotropic filtering, frame-rate cap, Large Address Aware and the Windows compatibility settings.
+2. Choose the options: DXVK or cnc-ddraw, FSR 1 for DirectDraw, anisotropic filtering, frame-rate cap, Large Address Aware and the Windows compatibility settings.
 3. Choose an empty output folder (or the previous output of the same game, which is updated in place so saves and edited settings are kept) and press **Begin Modernization**.
 
 ### Command line
@@ -125,7 +127,7 @@ bifrost modernize "C:\Games\The Hobbit" --scan
 bifrost modernize "C:\Games\The Hobbit" -o "C:\Games\The Hobbit (Modernized)" --max-fps 60
 ```
 
-- `modernize` options: `--exe`, `--no-dxvk`, `--dxvk <release.tar.gz|folder>`, `--anisotropy 0|2|4|8|16`, `--max-fps`, `--no-laa`, `--no-high-dpi`, `--keep-fullscreen-optimizations`, `--xp-mode`, `--apply-compat`.
+- `modernize` options: `--exe`, `--no-dxvk`, `--dxvk <release.tar.gz|folder>`, `--ddraw <zip|dir>`, `--no-ddraw`, `--fsr` (DirectDraw only), `--anisotropy 0|2|4|8|16`, `--max-fps`, `--no-laa`, `--no-high-dpi`, `--keep-fullscreen-optimizations`, `--xp-mode`, `--apply-compat`.
 - `--compile` takes `none`, `native`, `windows` (MinGW-w64) or `android` (NDK; produces a signed APK).
 - Titles that draw through NVN get the Vulkan renderer when `--android-deps` (or `BIFROST_ANDROID_DEPS`) points at the output of `scripts/build_android_deps.sh`. That output includes SDL3, shaderc, the Vulkan headers, VMA and volk.
 - `inspect`, `recompile` and `run` are older developer commands that still use the original interpreter path.

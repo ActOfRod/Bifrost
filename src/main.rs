@@ -92,6 +92,15 @@ enum Cmd {
         /// Apply the compatibility settings to this user's registry now (Windows only)
         #[arg(long)]
         apply_compat: bool,
+        /// Use this cnc-ddraw release (cnc-ddraw.zip or extracted folder) instead of downloading it
+        #[arg(long, conflicts_with = "no_ddraw")]
+        ddraw: Option<PathBuf>,
+        /// Leave DirectDraw alone (no cnc-ddraw)
+        #[arg(long)]
+        no_ddraw: bool,
+        /// Upscale to the display with AMD FSR 1 (DirectDraw games, through cnc-ddraw)
+        #[arg(long)]
+        fsr: bool,
     },
     /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
     #[command(hide = true)]
@@ -184,8 +193,11 @@ fn run() -> anyhow::Result<()> {
             keep_fullscreen_optimizations,
             xp_mode,
             apply_compat,
+            ddraw,
+            no_ddraw,
+            fsr,
         } => {
-            use bifrost::modernize::{Compat, DxvkSource, ModernizeOptions};
+            use bifrost::modernize::{Compat, DxvkSource, ModernizeOptions, Upscale};
             if scan {
                 return modernize_scan(&game);
             }
@@ -207,6 +219,12 @@ fn run() -> anyhow::Result<()> {
                     xp_mode,
                 },
                 apply_compat,
+                ddraw: match (no_ddraw, ddraw) {
+                    (true, _) => None,
+                    (false, Some(p)) => Some(DxvkSource::Local(p)),
+                    (false, None) => Some(DxvkSource::Download),
+                },
+                upscale: if fsr { Upscale::Fsr1 } else { Upscale::Off },
             };
             modernize(&opts)
         }
