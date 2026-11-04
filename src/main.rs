@@ -98,9 +98,12 @@ enum Cmd {
         /// Leave DirectDraw alone (no cnc-ddraw)
         #[arg(long)]
         no_ddraw: bool,
-        /// Upscale to the display with AMD FSR 1 (DirectDraw games, through cnc-ddraw)
+        /// Upscale DirectDraw games through cnc-ddraw or Direct3D 8–11 games through the Bifrost Vulkan layer
         #[arg(long)]
         fsr: bool,
+        /// Directory containing the x86/ and x64/ Bifrost FSR Vulkan layer builds
+        #[arg(long, value_name = "DIR")]
+        fsr_layer: Option<PathBuf>,
     },
     /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
     #[command(hide = true)]
@@ -196,6 +199,7 @@ fn run() -> anyhow::Result<()> {
             ddraw,
             no_ddraw,
             fsr,
+            fsr_layer,
         } => {
             use bifrost::modernize::{Compat, DxvkSource, ModernizeOptions, Upscale};
             if scan {
@@ -225,6 +229,7 @@ fn run() -> anyhow::Result<()> {
                     (false, None) => Some(DxvkSource::Download),
                 },
                 upscale: if fsr { Upscale::Fsr1 } else { Upscale::Off },
+                fsr_layer,
             };
             modernize(&opts)
         }

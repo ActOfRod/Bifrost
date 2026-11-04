@@ -71,6 +71,11 @@ with ZipFile(sys.argv[1], "w", ZIP_DEFLATED) as archive:
     archive.writestr("Shaders/interpolation/fsr.glsl", "fsr")
     archive.writestr("Shaders/interpolation/fsr.glsl.pass1", "pass1")
 PY
+mkdir -p "$W/fsr-layer/x86" "$W/fsr-layer/x64"
+printf 'x86-fsr-layer' > "$W/fsr-layer/x86/bifrost_fsr.dll"
+printf 'x64-fsr-layer' > "$W/fsr-layer/x64/bifrost_fsr.dll"
+printf '{"layer":"x86"}\n' > "$W/fsr-layer/x86/bifrost_fsr.json"
+printf '{"layer":"x64"}\n' > "$W/fsr-layer/x64/bifrost_fsr.json"
 before=$(cd "$W" && find g32 g64 gdd gd7 gown gtwo -type f -exec sha256sum {} + | sort)
 
 $BF modernize "$W/g32" --scan > "$W/scan.txt"
@@ -127,6 +132,7 @@ grep -q 'fullscreen=true' "$W/odd/ddraw.ini" || fail "FSR fullscreen setting"
 grep -q 'windowed=true' "$W/odd/ddraw.ini" || fail "FSR windowed setting"
 grep -q 'maxfps=60' "$W/odd/ddraw.ini" || fail "FSR frame-rate setting"
 grep -q 'FSR 1' "$W/odd/bifrost_modernize.txt" || fail "FSR report"
+[ ! -e "$W/odd/bifrost_fsr.dll" ] && [ ! -e "$W/odd/Play with FSR.bat" ] || fail "Vulkan FSR layer installed for DirectDraw"
 $BF modernize "$W/gdd" -o "$W/odd" --no-dxvk --ddraw "$W/cnc-ddraw.zip" > "$W/gdd-bicubic.txt" 2>&1 || fail "DirectDraw bicubic re-run"
 grep -q 'shader=Bicubic' "$W/odd/ddraw.ini" || fail "default DirectDraw shader setting"
 grep -q 'renderer=auto' "$W/odd/ddraw.ini" || fail "default DirectDraw renderer setting"
@@ -140,10 +146,41 @@ $BF modernize "$W/gown" -o "$W/ogown" --no-dxvk --ddraw "$W/cnc-ddraw.zip" > "$W
 cmp -s "$W/gown/ddraw.dll" "$W/ogown/ddraw.dll" || fail "game's own ddraw.dll changed"
 grep -q 'ships its own ddraw.dll' "$W/ogown/bifrost_modernize.txt" || fail "own DirectDraw wrapper warning"
 $BF modernize "$W/g32" -o "$W/ofsr8" --no-dxvk --fsr > "$W/g32-fsr.txt" 2>&1 || fail "FSR on Direct3D 8 game"
-grep -q 'FSR 1 is only available for DirectDraw' "$W/ofsr8/bifrost_modernize.txt" || fail "FSR-on-Direct3D warning"
+grep -q 'FSR 1 was requested, but neither the DirectDraw/cnc-ddraw nor Direct3D 8–11/DXVK path applies' "$W/ofsr8/bifrost_modernize.txt" || fail "FSR-on-Direct3D warning"
 if $BF modernize "$W/gdd" -o "$W/omissing" --no-dxvk --ddraw "$W/missing.zip" > "$W/gdd-missing.txt" 2>&1; then fail "missing cnc-ddraw accepted"; fi
 [ ! -e "$W/omissing" ] || fail "missing cnc-ddraw created output"
 echo "ok   DirectDraw game"
+
+$BF modernize "$W/g32" -o "$W/ofsr32" --fsr --fsr-layer "$W/fsr-layer" > "$W/fsr32.txt" 2>&1 || fail "32-bit Direct3D FSR run"
+cmp -s "$W/fsr-layer/x86/bifrost_fsr.dll" "$W/ofsr32/System/bifrost_fsr.dll" || fail "32-bit FSR layer architecture"
+cmp -s "$W/fsr-layer/x86/bifrost_fsr.json" "$W/ofsr32/System/bifrost_fsr.json" || fail "32-bit FSR layer manifest"
+for f in bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat"; do [ -f "$W/ofsr32/System/$f" ] || fail "missing Direct3D FSR file $f"; done
+grep -q 'AMD FSR 1 upscales Direct3D to the display: launch with "Play with FSR.bat"' "$W/ofsr32/bifrost_modernize.txt" || fail "Direct3D FSR report"
+python3 - "$W/ofsr32/System/Play with FSR.bat" <<'PY' || fail "FSR launcher contents or CRLF"
+import pathlib, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+expected = (
+    b'@echo off\r\nsetlocal DisableDelayedExpansion\r\n'
+    b'rem Written by the Bifrost Modernizer: starts the game with AMD FSR 1 upscaling.\r\n'
+    b'set "VK_LAYER_PATH=%~dp0"\r\nset "VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1"\r\n'
+    b'set "BIFROST_FSR_CONFIG_DIR=%~dp0"\r\ncd /d "%~dp0"\r\nstart "" "%~dp0Game.exe"\r\n'
+)
+sys.exit(0 if data == expected else 1)
+PY
+before_missing=$(cd "$W/ofsr32" && find . -type f -exec sha256sum {} + | sort)
+if $BF modernize "$W/g32" -o "$W/ofsr32" --fsr --fsr-layer "$W/missing-layer" > "$W/fsr-missing.txt" 2>&1; then fail "missing FSR layer accepted"; fi
+grep -q -- '--fsr-layer' "$W/fsr-missing.txt" || fail "missing layer error does not identify --fsr-layer"
+after_missing=$(cd "$W/ofsr32" && find . -type f -exec sha256sum {} + | sort)
+[ "$before_missing" = "$after_missing" ] || fail "missing FSR layer changed existing output"
+$BF modernize "$W/g32" -o "$W/ofsr32" > "$W/fsr32-off.txt" 2>&1 || fail "rerun without Direct3D FSR"
+for f in bifrost_fsr.dll bifrost_fsr.json bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat"; do
+    [ ! -e "$W/ofsr32/System/$f" ] || fail "stale Direct3D FSR file $f"
+done
+$BF modernize "$W/g64/Game64.exe" -o "$W/ofsr64" --fsr --fsr-layer "$W/fsr-layer" > "$W/fsr64.txt" 2>&1 || fail "64-bit Direct3D FSR run"
+cmp -s "$W/fsr-layer/x64/bifrost_fsr.dll" "$W/ofsr64/bifrost_fsr.dll" || fail "64-bit FSR layer architecture"
+cmp -s "$W/fsr-layer/x64/bifrost_fsr.json" "$W/ofsr64/bifrost_fsr.json" || fail "64-bit FSR layer manifest"
+for f in bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat"; do [ -f "$W/ofsr64/$f" ] || fail "missing 64-bit Direct3D FSR file $f"; done
+echo "ok   Direct3D FSR layer"
 
 mkdir -p "$W/o32/Saves" && echo slot1 > "$W/o32/Saves/slot1.sav"
 echo "volume=10" > "$W/o32/System/Engine.dll.ini"
