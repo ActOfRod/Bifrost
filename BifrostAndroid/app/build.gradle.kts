@@ -26,13 +26,6 @@ if (!winlatorStamp.isFile || winlatorStamp.readText().trim() != winlatorRevision
     throw GradleException("Prepared Winlator sources are missing or stale; run python3 scripts/prepare_winlator.py from BifrostAndroid")
 }
 
-val prepareWinlator by tasks.registering(org.gradle.api.tasks.Exec::class) {
-    inputs.dir(winlatorSource)
-    inputs.file(file("../scripts/prepare_winlator.py"))
-    outputs.dir(winlatorOutput)
-    commandLine("python3", file("../scripts/prepare_winlator.py").absolutePath)
-}
-
 android {
     namespace = "com.winlator"
     compileSdk = 35
@@ -101,15 +94,6 @@ android {
     lint {
         disable += "ExpiredTargetSdkVersion"
     }
-}
-
-tasks.matching {
-    it.name == "preBuild" ||
-        it.name.startsWith("preBuild") ||
-        it.name.startsWith("configureCMake") ||
-        it.name.startsWith("buildCMake")
-}.configureEach {
-    dependsOn(prepareWinlator)
 }
 
 dependencies {

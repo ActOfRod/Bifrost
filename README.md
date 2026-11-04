@@ -62,7 +62,7 @@ The launcher is a landscape Big Picture-style Android library for native apps an
 
 #### Android runtime and source checkout
 
-The Android app ID is `com.actofrod`, and its APK is arm64-v8a only and expected to be about 150+ MB. Winlator is included as an LGPL-2.1 submodule pinned at `2c33741d50c5daab0521a098be5c969f63b9e887`. Bifrost distributes modified Winlator build outputs: `scripts/prepare_winlator.py` rewrites the baked app-data path and provider/action identifiers, then repacks the `.tzst` runtime assets; the source submodule itself remains unmodified. The pinned source and preparation script are the corresponding source for those build outputs. Winlator includes Wine, Box64, Mesa Turnip/Zink/VirGL, DXVK/D8VK/VKD3D, cnc-ddraw, and Termux glibc patches.
+The Android app ID is `com.actofrod`, and its arm64-v8a-only APK is about 250 MB. Winlator is included as an LGPL-2.1 submodule pinned at `2c33741d50c5daab0521a098be5c969f63b9e887`. Bifrost distributes modified Winlator build outputs: `scripts/prepare_winlator.py` rewrites the baked app-data path and provider/action identifiers, then repacks the `.tzst` runtime assets; the source submodule itself remains unmodified. The pinned source and preparation script are the corresponding source for those build outputs. Winlator includes Wine, Box64, Mesa Turnip/Zink/VirGL, DXVK/D8VK/VKD3D, cnc-ddraw, and Termux glibc patches.
 
 Clone with submodules, or initialize them after cloning:
 
@@ -70,6 +70,12 @@ Clone with submodules, or initialize them after cloning:
 git clone --recursive https://github.com/ActOfRod/Bifrost.git
 # For an existing checkout:
 git submodule update --init --recursive
+```
+
+Building the APK requires the `zstd` CLI. Run the preparation script once before Gradle, and again after any Winlator submodule bump:
+
+```sh
+python3 BifrostAndroid/scripts/prepare_winlator.py
 ```
 
 ### Modernizer
