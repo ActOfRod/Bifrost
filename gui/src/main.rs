@@ -1,6 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 //! Bifrost desktop front end. Pick a task:
-//! - Recomp: input/output systems and content, then Begin Recomp.
+//! - Recomp: choose a Switch game to compile or a Windows game to package for Android.
 //! - Modernize: an older Windows game and the upgrades to apply, then Begin Modernization.
 use bifrost::modernize::{self, Api, Arch, ApiReport, Compat, DxvkSource, ModernizeOptions, Scan, Upscale};
 use bifrost::pipeline::{self, BuildOptions, Event, InputSystem, Target};
@@ -12,6 +12,12 @@ use std::sync::mpsc;
 enum Task {
     Recomp,
     Modernize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Switch,
+    Windows,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,6 +33,10 @@ impl Output {
             Output::Android => "Android (arm64 + x86_64 .apk)",
         }
     }
+}
+
+fn exe_label(exe: &modernize::ExeCandidate) -> String {
+    format!("{} — {}", exe.path.display(), exe.info.arch.label())
 }
 
 enum Status {
@@ -53,7 +63,6 @@ struct Modern {
     ddraw: bool,
     upscale: Upscale,
     out_dir: String,
-    pack_android: bool,
 }
 
 impl Default for Modern {
@@ -76,7 +85,6 @@ impl Default for Modern {
             ddraw: true,
             upscale: Upscale::Off,
             out_dir: out.display().to_string(),
-            pack_android: false,
         }
     }
 }
@@ -111,11 +119,39 @@ impl Modern {
     }
 }
 
+#[derive(Default)]
+struct WindowsPackage {
+    game: Option<PathBuf>,
+    scan: Option<Result<Scan, String>>,
+    exe: usize,
+    title: String,
+    cover: Option<PathBuf>,
+    out: String,
+    out_edited: bool,
+}
+
+impl WindowsPackage {
+    fn set_game(&mut self, p: PathBuf) {
+        self.scan = Some(modernize::scan(&p).map_err(|e| format!("{e:#}")));
+        self.exe = match &self.scan {
+            Some(Ok(scan)) => scan.main.unwrap_or(0),
+            _ => 0,
+        };
+        if !self.out_edited {
+            let name = p.file_name().map(|name| name.to_string_lossy().into_owned()).filter(|name| !name.is_empty()).unwrap_or_else(|| "game".into());
+            let out_dir = std::env::current_dir().map(|cwd| cwd.join("bifrost-out")).unwrap_or_else(|_| PathBuf::from("bifrost-out"));
+            self.out = out_dir.join(format!("{name}.bifrost")).display().to_string();
+        }
+        self.game = Some(p);
+    }
+}
+
 struct App {
     task: Task,
     modern: Modern,
-    system: InputSystem,
+    source: Source,
     output: Output,
+    windows_package: WindowsPackage,
     base: Vec<PathBuf>,
     updates: Vec<PathBuf>,
     patches: Vec<PathBuf>,
@@ -147,8 +183,9 @@ impl Default for App {
         App {
             task: Task::Recomp,
             modern: Modern::default(),
-            system: InputSystem::Switch,
+            source: Source::Switch,
             output: Output::Windows,
+            windows_package: WindowsPackage::default(),
             base: Vec::new(),
             updates: Vec::new(),
             patches: Vec::new(),
@@ -217,7 +254,7 @@ impl App {
 
     fn begin(&mut self, ctx: &egui::Context) {
         let opts = BuildOptions {
-            system: self.system,
+            system: InputSystem::Switch,
             inputs: self.base.clone(),
             updates: self.updates.clone(),
             patches: self.patches.clone(),
@@ -242,9 +279,27 @@ impl App {
         });
     }
 
+    fn begin_pack(&mut self, ctx: &egui::Context) {
+        let Some(game) = self.windows_package.game.clone() else { return };
+        let Some(Ok(scan)) = &self.windows_package.scan else { return };
+        let Some(exe) = scan.exes.get(self.windows_package.exe).map(|exe| exe.path.clone()) else { return };
+        let out = PathBuf::from(self.windows_package.out.trim());
+        let title = (!self.windows_package.title.trim().is_empty()).then(|| self.windows_package.title.trim().to_string());
+        let cover = self.windows_package.cover.clone();
+        let opts = bifrost::pack::PackOptions { game, exe: Some(exe), out, title, cover, replace: true };
+        self.spawn(ctx, move |sink| {
+            let package = bifrost::pack::run(&opts, sink)?;
+            let project = package.parent().map(PathBuf::from).unwrap_or_default();
+            let summary = format!(
+                "Android package ready: {}. Copy it to your phone and import it in Bifrost for Android.",
+                package.display()
+            );
+            Ok(Finished { artifact: Some(package), project, summary })
+        });
+    }
+
     fn begin_modernize(&mut self, ctx: &egui::Context) {
         let m = &self.modern;
-        let pack_android = m.pack_android;
         let opts = ModernizeOptions {
             game: m.game.clone().unwrap_or_default(),
             exe: m.exe().map(|e| e.path.clone()),
@@ -261,26 +316,11 @@ impl App {
         };
         self.spawn(ctx, move |sink| {
             let out = modernize::run(&opts, sink)?;
-            let package = if pack_android {
-                let mut package_name = out.out.as_os_str().to_os_string();
-                package_name.push(".bifrost");
-                let package = PathBuf::from(package_name);
-                bifrost::pack::run(&bifrost::pack::PackOptions {
-                    game: out.out.clone(),
-                    exe: Some(out.exe.strip_prefix(&out.out).unwrap_or(&out.exe).to_path_buf()),
-                    out: package.clone(),
-                    title: None,
-                    cover: None,
-                    replace: true,
-                }, sink)?;
-                Some(package)
-            } else { None };
             let summary = format!(
-                "{} changes, {} warnings. Run {}{}",
+                "{} changes, {} warnings. Run {}",
                 out.changes.len(),
                 out.warnings.len(),
-                out.exe.display(),
-                package.map_or_else(String::new, |path| format!(". Android package: {}", path.display()))
+                out.exe.display()
             );
             Ok(Finished { artifact: Some(out.exe), project: out.out, summary })
         });
@@ -310,17 +350,38 @@ impl App {
     fn recomp_form(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("systems").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
             ui.label("Input system");
-            egui::ComboBox::from_id_salt("input_system").selected_text("Nintendo Switch").width(260.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.system, InputSystem::Switch, "Nintendo Switch");
+            let source_label = match self.source {
+                Source::Switch => "Nintendo Switch",
+                Source::Windows => "Windows PC game",
+            };
+            egui::ComboBox::from_id_salt("input_system").selected_text(source_label).width(300.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.source, Source::Switch, "Nintendo Switch");
+                ui.selectable_value(&mut self.source, Source::Windows, "Windows PC game");
             });
             ui.end_row();
             ui.label("Output system");
-            egui::ComboBox::from_id_salt("output_system").selected_text(self.output.label()).width(260.0).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.output, Output::Windows, Output::Windows.label());
-                ui.selectable_value(&mut self.output, Output::Android, Output::Android.label());
-            });
+            if self.source == Source::Windows {
+                egui::ComboBox::from_id_salt("output_system")
+                    .selected_text("Android — Bifrost for Android package (.bifrost)")
+                    .width(380.0)
+                    .show_ui(ui, |ui| {
+                        let _ = ui.selectable_label(true, "Android — Bifrost for Android package (.bifrost)");
+                    });
+            } else {
+                egui::ComboBox::from_id_salt("output_system").selected_text(self.output.label()).width(260.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.output, Output::Windows, Output::Windows.label());
+                    ui.selectable_value(&mut self.output, Output::Android, Output::Android.label());
+                });
+            }
             ui.end_row();
         });
+        match self.source {
+            Source::Switch => self.switch_recomp_form(ui),
+            Source::Windows => self.windows_package_form(ui),
+        }
+    }
+
+    fn switch_recomp_form(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.strong("Base game");
         ui.label("Decrypted NSP/XCI/NCA, an exefs folder, or a folder with exefs/ and romfs/.");
@@ -378,6 +439,82 @@ impl App {
         });
     }
 
+    fn windows_package_form(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.label(
+            "Packages a Windows game so the Bifrost for Android launcher can play it. On the phone, open Bifrost → Add → Import package and pick the .bifrost file. The game runs through the launcher's built-in Windows runtime on Snapdragon phones. To add DXVK, FSR or other fixes, run Modernize first and choose the modernized folder here.",
+        );
+        ui.add_space(8.0);
+
+        let mut picked = None;
+        egui::Grid::new("windows_package").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Game folder");
+            ui.label(self.windows_package.game.as_ref().map_or("none selected".to_string(), |path| path.display().to_string()));
+            if ui.button("Browse…").clicked() {
+                picked = rfd::FileDialog::new().pick_folder();
+            }
+            ui.end_row();
+        });
+        if let Some(path) = picked {
+            self.windows_package.set_game(path);
+        }
+
+        if let Some(Err(error)) = &self.windows_package.scan {
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+        }
+        if let Some(Ok(scan)) = &self.windows_package.scan {
+            let choices: Vec<_> = scan.exes.iter().map(exe_label).collect();
+            let selected = choices.get(self.windows_package.exe).cloned().unwrap_or_else(|| choices[0].clone());
+            egui::Grid::new("windows_package_details").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label("Game .exe");
+                egui::ComboBox::from_id_salt("windows_package_exe").selected_text(selected).width(380.0).show_ui(ui, |ui| {
+                    for (index, label) in choices.iter().enumerate() {
+                        ui.selectable_value(&mut self.windows_package.exe, index, label);
+                    }
+                });
+                ui.label("");
+                ui.end_row();
+            });
+        }
+
+        egui::Grid::new("windows_package_metadata").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Title (optional)");
+            ui.add(egui::TextEdit::singleline(&mut self.windows_package.title).hint_text("defaults to the folder name").desired_width(380.0));
+            ui.label("");
+            ui.end_row();
+
+            ui.label("Cover image (optional)");
+            ui.label(self.windows_package.cover.as_ref().map_or("none selected".to_string(), |path| path.display().to_string()));
+            ui.horizontal(|ui| {
+                if ui.button("Choose…").clicked() {
+                    self.windows_package.cover = rfd::FileDialog::new().add_filter("Cover image", &["png", "jpg", "jpeg"]).pick_file();
+                }
+                if self.windows_package.cover.is_some() && ui.button("Clear").clicked() {
+                    self.windows_package.cover = None;
+                }
+            });
+            ui.end_row();
+
+            ui.label("Package file");
+            let response = ui.add(egui::TextEdit::singleline(&mut self.windows_package.out).desired_width(380.0));
+            if response.changed() {
+                self.windows_package.out_edited = true;
+            }
+            if ui.button("Save as…").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("Bifrost package", &["bifrost"]).save_file() {
+                    self.windows_package.out = path.display().to_string();
+                    self.windows_package.out_edited = true;
+                }
+            }
+            ui.end_row();
+            ui.label("");
+            ui.weak("An existing file is replaced.");
+            ui.label("");
+            ui.end_row();
+        });
+
+    }
+
     fn modern_form(&mut self, ui: &mut egui::Ui) {
         let m = &mut self.modern;
         ui.strong("Game");
@@ -414,10 +551,9 @@ impl App {
                 let before = m.exe;
                 egui::Grid::new("modern_scan").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                     ui.label("Game executable");
-                    let label = |e: &modernize::ExeCandidate| format!("{} — {}", e.path.display(), e.info.arch.label());
-                    egui::ComboBox::from_id_salt("modern_exe").selected_text(label(&scan.exes[m.exe])).width(380.0).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("modern_exe").selected_text(exe_label(&scan.exes[m.exe])).width(380.0).show_ui(ui, |ui| {
                         for (i, e) in scan.exes.iter().enumerate() {
-                            ui.selectable_value(&mut m.exe, i, label(e));
+                            ui.selectable_value(&mut m.exe, i, exe_label(e));
                         }
                     });
                     ui.end_row();
@@ -517,11 +653,9 @@ impl App {
                 }
             });
             ui.end_row();
-            ui.label("Android package");
-            ui.checkbox(&mut m.pack_android, "Create Android package (.bifrost)")
-                .on_hover_text("After modernization, package the output folder so it can be imported by Bifrost for Android.");
-            ui.end_row();
         });
+        ui.add_space(8.0);
+        ui.label("To play this game on Android, use Recomp → Windows PC game and choose the modernized folder.");
     }
 
     fn poll(&mut self) {
@@ -570,7 +704,7 @@ impl eframe::App for App {
                 });
             });
             ui.label(match self.task {
-                Task::Recomp => "Statically recompiles dumped console games into native programs. Content must already be decrypted.",
+                Task::Recomp => "Converts a game for another system: decrypted Switch games become Windows or Android apps; Windows PC games become packages for Bifrost for Android. Switch content must already be decrypted.",
                 Task::Modernize => "Updates an older Windows game (XP / Windows 7 era) to run better on current Windows. Writes a modernized copy; your install is never changed.",
             });
             ui.separator();
@@ -584,11 +718,18 @@ impl eframe::App for App {
             });
             ui.separator();
             let (ready, label, hint) = match self.task {
-                Task::Recomp => (
-                    !self.base.is_empty() && !self.out_dir.trim().is_empty(),
-                    "Begin Recomp",
-                    self.base.is_empty().then_some("Add the base game to begin."),
-                ),
+                Task::Recomp => match self.source {
+                    Source::Switch => (
+                        !self.base.is_empty() && !self.out_dir.trim().is_empty(),
+                        "Begin Recomp",
+                        self.base.is_empty().then_some("Add the base game to begin."),
+                    ),
+                    Source::Windows => (
+                        matches!(&self.windows_package.scan, Some(Ok(_))) && !self.windows_package.out.trim().is_empty(),
+                        "Create Android Package",
+                        self.windows_package.game.is_none().then_some("Choose the game folder to begin."),
+                    ),
+                },
                 Task::Modernize => (
                     matches!(self.modern.scan, Some(Ok(_))) && !self.modern.out_dir.trim().is_empty(),
                     "Begin Modernization",
@@ -598,7 +739,10 @@ impl eframe::App for App {
             let button = egui::Button::new(egui::RichText::new(label).size(18.0)).min_size(egui::vec2(200.0, 36.0));
             if ui.add_enabled(ready && !busy, button).clicked() {
                 match self.task {
-                    Task::Recomp => self.begin(ctx),
+                    Task::Recomp => match self.source {
+                        Source::Switch => self.begin(ctx),
+                        Source::Windows => self.begin_pack(ctx),
+                    },
                     Task::Modernize => self.begin_modernize(ctx),
                 }
             }
@@ -644,5 +788,14 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default().with_inner_size([780.0, 760.0]).with_title("Bifrost"),
         ..Default::default()
     };
-    eframe::run_native("Bifrost", options, Box::new(|_cc| Ok(Box::<App>::default())))
+    eframe::run_native(
+        "Bifrost",
+        options,
+        Box::new(|cc| {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().push("Hack".to_owned());
+            cc.egui_ctx.set_fonts(fonts);
+            Ok(Box::<App>::default())
+        }),
+    )
 }
