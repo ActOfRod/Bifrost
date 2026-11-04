@@ -53,6 +53,7 @@ struct Modern {
     ddraw: bool,
     upscale: Upscale,
     out_dir: String,
+    pack_android: bool,
 }
 
 impl Default for Modern {
@@ -75,6 +76,7 @@ impl Default for Modern {
             ddraw: true,
             upscale: Upscale::Off,
             out_dir: out.display().to_string(),
+            pack_android: false,
         }
     }
 }
@@ -242,6 +244,7 @@ impl App {
 
     fn begin_modernize(&mut self, ctx: &egui::Context) {
         let m = &self.modern;
+        let pack_android = m.pack_android;
         let opts = ModernizeOptions {
             game: m.game.clone().unwrap_or_default(),
             exe: m.exe().map(|e| e.path.clone()),
@@ -258,7 +261,27 @@ impl App {
         };
         self.spawn(ctx, move |sink| {
             let out = modernize::run(&opts, sink)?;
-            let summary = format!("{} changes, {} warnings. Run {}", out.changes.len(), out.warnings.len(), out.exe.display());
+            let package = if pack_android {
+                let mut package_name = out.out.as_os_str().to_os_string();
+                package_name.push(".bifrost");
+                let package = PathBuf::from(package_name);
+                bifrost::pack::run(&bifrost::pack::PackOptions {
+                    game: out.out.clone(),
+                    exe: Some(out.exe.strip_prefix(&out.out).unwrap_or(&out.exe).to_path_buf()),
+                    out: package.clone(),
+                    title: None,
+                    cover: None,
+                    replace: true,
+                }, sink)?;
+                Some(package)
+            } else { None };
+            let summary = format!(
+                "{} changes, {} warnings. Run {}{}",
+                out.changes.len(),
+                out.warnings.len(),
+                out.exe.display(),
+                package.map_or_else(String::new, |path| format!(". Android package: {}", path.display()))
+            );
             Ok(Finished { artifact: Some(out.exe), project: out.out, summary })
         });
     }
@@ -493,6 +516,10 @@ impl App {
                     }
                 }
             });
+            ui.end_row();
+            ui.label("Android package");
+            ui.checkbox(&mut m.pack_android, "Create Android package (.bifrost)")
+                .on_hover_text("After modernization, package the output folder so it can be imported by Bifrost for Android.");
             ui.end_row();
         });
     }

@@ -140,6 +140,26 @@ enum Cmd {
         #[arg(long)]
         boot: bool,
     },
+    /// Package a Windows game as a portable Android launcher import
+    Pack {
+        /// Game install folder, or the game's .exe
+        game: PathBuf,
+        /// Main executable relative to the game folder (detected when omitted)
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        /// Output package (defaults to <game folder name>.bifrost)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Display title (defaults to the game folder name)
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional PNG or JPEG cover image
+        #[arg(long)]
+        cover: Option<PathBuf>,
+        /// Replace an existing output package
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -242,6 +262,29 @@ fn run() -> anyhow::Result<()> {
             max_steps,
             boot,
         } => run_module(&file, entry.as_deref(), &args, max_steps, boot),
+        Cmd::Pack { game, exe, out, title, cover, force } => {
+            let default_name = if game.is_file() {
+                game.parent().and_then(std::path::Path::file_name).or_else(|| game.file_stem())
+            } else {
+                game.file_name()
+            }.unwrap_or_default().to_string_lossy();
+            let out = out.unwrap_or_else(|| PathBuf::from(format!("{default_name}.bifrost")));
+            let path = bifrost::pack::run(&bifrost::pack::PackOptions {
+                game,
+                exe,
+                out,
+                title,
+                cover,
+                replace: force,
+            }, &mut |event| {
+                match event {
+                    bifrost::pipeline::Event::Progress(_, step) => eprintln!("[bifrost] {step}"),
+                    bifrost::pipeline::Event::Log(line) => println!("{line}"),
+                }
+            })?;
+            println!("wrote {}", path.display());
+            Ok(())
+        }
     }
 }
 

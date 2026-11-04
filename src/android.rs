@@ -138,6 +138,7 @@ pub fn manifest(package: &str, label: &str) -> String {
     android:versionCode="1" android:versionName="1.0">
   <uses-sdk android:minSdkVersion="{MIN_SDK}" android:targetSdkVersion="34"/>
   <application android:label="{label}" android:hasCode="false" android:extractNativeLibs="true">
+    <meta-data android:name="com.actofrod.bifrost.PORT" android:value="switch"/>
     <activity android:name="android.app.NativeActivity" android:exported="true"
         android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode"
         android:screenOrientation="sensorLandscape" android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
@@ -559,6 +560,7 @@ pub fn renderer_manifest(package: &str, label: &str) -> String {
   <uses-permission android:name="android.permission.VIBRATE"/>
   <application android:label="{label}" android:hasCode="true" android:extractNativeLibs="true"
       android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" android:hardwareAccelerated="true">
+    <meta-data android:name="com.actofrod.bifrost.PORT" android:value="switch"/>
     <activity android:name="org.bifrost.BifrostActivity" android:exported="true" android:launchMode="singleInstance"
         android:screenOrientation="sensorLandscape"
         android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">

@@ -17,6 +17,7 @@ pub mod link;
 mod module;
 pub mod modernize;
 pub mod pipeline;
+pub mod pack;
 pub mod project;
 pub mod romfs;
 

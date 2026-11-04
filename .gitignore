@@ -1,4 +1,7 @@
 /target
+/BifrostAndroid/**/build/
+/BifrostAndroid/.gradle/
+/BifrostAndroid/local.properties
 **/*.rs.bk
 *.pdb
 guest_image.bin
