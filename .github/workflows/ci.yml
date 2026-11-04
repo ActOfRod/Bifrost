@@ -37,3 +37,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
+  android-launcher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Test and build Android launcher
+        run: |
+          cd BifrostAndroid
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug

@@ -1,14 +1,14 @@
 # Bifrost
 
-Bifrost is a universal recompilation tool. You give it a game for one platform, plus any updates, patches and DLC, and it rebuilds that game as a native program for another platform. It recompiles the code ahead of time instead of emulating it.
+Bifrost recompiles decrypted Nintendo Switch games for Windows and Android, modernizes older Windows games, and provides an Android library for native apps and Windows games (with PC runtime planned).
 
-Bifrost has four targets. Switch → Windows, Switch → Android and the Modernizer are in progress; Windows → Android is planned.
+Bifrost has four targets. Switch → Windows, Switch → Android, Windows → Android and the Modernizer are in progress.
 
 | Target | What it does | Progress |
 |---|---|---|
 | **Switch → Windows** | Recompiles a Switch title into a Windows `.exe` | `█████▌░░░░` 5.5 / 10 stages |
 | **Switch → Android** | Recompiles a Switch title into an arm64 APK with a Vulkan renderer | `█████░░░░░` 5.5 / 11 stages |
-| **Windows → Android** | Recompiles an x86/x64 Windows game into an arm64 APK | `░░░░░░░░░░` 0 / 8 stages |
+| **Windows → Android** | A launcher for native Android apps and Windows games imported as `.bifrost` packages | `██████░░░░` 4 / 7 stages |
 | **Modernizer** | Updates an old Windows game (XP / Windows 7 era) to run better on current Windows and hardware | `███▌░░░░░░` 2.5 / 7 stages |
 
 The stage counts come from the checklists below: ✅ counts as 1, 🟡 (partly done) counts as ½ and ⬜ counts as 0. "Validated on a real title" is its own stage, and no target has reached it yet. All testing so far has used small test programs written for Bifrost.
@@ -48,17 +48,16 @@ The stage counts come from the checklists below: ✅ counts as 1, 🟡 (partly d
 
 ### Windows → Android
 
-Planned. Nothing is built yet.
+The first stage is a landscape Big Picture-style Android launcher for native apps and Windows games packaged on a PC. The launcher installs or lists Android apps, auto-detects Bifrost ports, and imports `.bifrost` packages. Stage 2 will integrate Winlator's LGPL Wine/Box64/DXVK/Turnip runtime for PC games; the launcher does not recompile Windows games.
 
 | Stage | Status |
 |---|---|
-| PE (`.exe` / `.dll`) intake, including the game's own DLLs | ⬜ |
-| x86 / x64 → C lifting | ⬜ |
-| Win32 API layer (files, threads, windows, registry) | ⬜ |
-| Direct3D → Vulkan translation | ⬜ |
-| DirectInput / XInput → touch and gamepad | ⬜ |
-| DirectSound / XAudio → Android audio | ⬜ |
-| APK packaging (reuses the Switch → Android packager) | ⬜ |
+| Launcher app with Big Picture-style library | ✅ |
+| Native port library (install APK / installed apps / auto-detect Bifrost ports) | ✅ |
+| `.bifrost` packaging on PC (`bifrost pack`, GUI checkbox) | ✅ |
+| Import `.bifrost` into the launcher | ✅ |
+| Windows runtime (Wine + Box64 + DXVK + Turnip) | ⬜ |
+| Controller/touch input mapping for PC games | ⬜ |
 | Validated on a real title | ⬜ |
 
 ### Modernizer
@@ -91,11 +90,22 @@ FSR 1 is available for DirectDraw and DXVK-backed Direct3D 8–11 games in the a
 
 **About DLSS.** Copying NVIDIA's DLSS DLL (`nvngx_dlss.dll`) into the game folder does nothing on its own. The game has to call DLSS every frame and pass it a depth buffer, per-pixel motion vectors and camera jitter. A 2003 game doesn't produce motion vectors, so the Modernizer's graphics layer would have to generate them before DLSS can work. Spatial upscalers (FSR 1, NIS) only need the final image; FSR 1 is supported through cnc-ddraw for DirectDraw and the Bifrost Vulkan layer for DXVK games. The DLSS DLL comes from NVIDIA's DLSS SDK under NVIDIA's license, and DLSS needs an NVIDIA RTX GPU.
 
+## Releases
+
+A `vX.Y.Z` tag creates a GitHub Release containing `Bifrost-Windows-<v>.zip` and `Bifrost-Android-<v>.apk`. To sign Android releases with a stable key, generate one once:
+
+```sh
+keytool -genkeypair -v -keystore bifrost-release.jks -alias bifrost -keyalg RSA -keysize 4096 -validity 10000
+base64 -w0 bifrost-release.jks
+```
+
+Store the encoded output as `BIFROST_ANDROID_KEYSTORE_B64`, and the keystore password, alias, and key password as `BIFROST_ANDROID_KEYSTORE_PASSWORD`, `BIFROST_ANDROID_KEY_ALIAS`, and `BIFROST_ANDROID_KEY_PASSWORD`. Without these secrets, the APK uses a temporary key and installing a later update requires uninstalling the previous APK first.
+
 ## Using Bifrost
 
 ### Download
 
-Each GitHub Release (tags `v*`) has a Windows zip with `bifrost-gui.exe` (the desktop app) and `bifrost.exe` (the command line), built by `.github/workflows/release.yml`. Every pull request's **Release** run uploads the same zip as a workflow artifact. Recomp's compile step still needs a C toolchain (MinGW-w64 or clang, or the Android SDK/NDK) installed.
+Each GitHub Release (tags `v*`) has a Windows zip with `bifrost-gui.exe` and `bifrost.exe`, plus the Android launcher APK, built by `.github/workflows/release.yml`. Pull requests and manual runs upload both as workflow artifacts. Recomp's compile step still needs a C toolchain (MinGW-w64 or clang, or the Android SDK/NDK) installed.
 
 ### Desktop app
 
@@ -129,6 +139,7 @@ bifrost modernize "C:\Games\The Hobbit" -o "C:\Games\The Hobbit (Modernized)" --
 ```
 
 - `modernize` options: `--exe`, `--no-dxvk`, `--dxvk <release.tar.gz|folder>`, `--ddraw <zip|dir>`, `--no-ddraw`, `--fsr` (DirectDraw or DXVK-backed Direct3D 8–11), `--fsr-layer <dir>`, `--anisotropy 0|2|4|8|16`, `--max-fps`, `--no-laa`, `--no-high-dpi`, `--keep-fullscreen-optimizations`, `--xp-mode`, `--apply-compat`.
+- `bifrost pack <GAME> [--exe <path>] [-o|--out <file.bifrost>] [--title <text>] [--cover <image>]` writes a `.bifrost` package for the Android launcher.
 - `--compile` takes `none`, `native`, `windows` (MinGW-w64) or `android` (NDK; produces a signed APK).
 - Titles that draw through NVN get the Vulkan renderer when `--android-deps` (or `BIFROST_ANDROID_DEPS`) points at the output of `scripts/build_android_deps.sh`. That output includes SDL3, shaderc, the Vulkan headers, VMA and volk.
 - `inspect`, `recompile` and `run` are older developer commands that still use the original interpreter path.

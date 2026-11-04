@@ -42,7 +42,7 @@ jobs:
         shell: pwsh
         run: |
           $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
-          $d = "bifrost-$v-windows-x64"
+          $d = "Bifrost-Windows-$v"
           New-Item -ItemType Directory $d | Out-Null
           Copy-Item target/release/bifrost.exe, target/release/bifrost-gui.exe, README.md $d
           New-Item -ItemType Directory "$d/fsr-layer/x86", "$d/fsr-layer/x64" -Force | Out-Null
@@ -52,10 +52,56 @@ jobs:
           "PKG=$d" >> $env:GITHUB_ENV
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PKG }}
+          name: bifrost-windows
           path: ${{ env.PKG }}.zip
-      - if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          files: ${{ env.PKG }}.zip
+          distribution: temurin
+          java-version: "17"
+      - name: Configure Android release signing
+        env:
+          BIFROST_ANDROID_KEYSTORE_B64: ${{ secrets.BIFROST_ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [[ -n "$BIFROST_ANDROID_KEYSTORE_B64" ]]; then
+            printf '%s' "$BIFROST_ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/bifrost-release.jks"
+            echo "BIFROST_ANDROID_KEYSTORE=$RUNNER_TEMP/bifrost-release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::BIFROST_ANDROID_KEYSTORE_B64 is not configured; APK will be signed with a temporary debug key."
+          fi
+      - name: Build and package Android APK
+        env:
+          BIFROST_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.BIFROST_ANDROID_KEYSTORE_PASSWORD }}
+          BIFROST_ANDROID_KEY_ALIAS: ${{ secrets.BIFROST_ANDROID_KEY_ALIAS }}
+          BIFROST_ANDROID_KEY_PASSWORD: ${{ secrets.BIFROST_ANDROID_KEY_PASSWORD }}
+        run: |
+          cd BifrostAndroid
+          ./gradlew --no-daemon :app:assembleRelease
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then v="$GITHUB_REF_NAME"; else v="dev-${GITHUB_SHA:0:7}"; fi
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/Bifrost-Android-$v.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-android
+          path: Bifrost-Android-*.apk
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bifrost-windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: bifrost-android
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Bifrost-Windows-*.zip
+            dist/Bifrost-Android-*.apk
           generate_release_notes: true

@@ -743,12 +743,12 @@ fn copy_tree(src: &Path, dst: &Path, total: u64, done: &mut u64, r: &mut Reporte
 }
 
 #[cfg(windows)]
-fn is_reparse_point(p: &Path) -> bool {
+pub(crate) fn is_reparse_point(p: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     fs::symlink_metadata(p).is_ok_and(|m| m.file_attributes() & 0x400 != 0) // FILE_ATTRIBUTE_REPARSE_POINT (junctions)
 }
 #[cfg(not(windows))]
-fn is_reparse_point(_: &Path) -> bool {
+pub(crate) fn is_reparse_point(_: &Path) -> bool {
     false
 }
 
