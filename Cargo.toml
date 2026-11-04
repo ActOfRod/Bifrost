@@ -20,5 +20,8 @@ anyhow = "1.0"
 thiserror = "1.0"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 include_dir = "0.7"
+flate2 = "1"
+tar = "0.4"
+ureq = "2"
 
 [dev-dependencies]
