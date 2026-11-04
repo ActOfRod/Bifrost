@@ -570,6 +570,8 @@ pub struct ModernizeOptions {
     /// Where to get cnc-ddraw for DirectDraw games (`None` leaves DirectDraw alone).
     pub ddraw: Option<DxvkSource>,
     pub upscale: Upscale,
+    /// Directory containing the x86/ and x64/ Bifrost FSR Vulkan layer builds.
+    pub fsr_layer: Option<PathBuf>,
 }
 
 impl Default for ModernizeOptions {
@@ -586,6 +588,7 @@ impl Default for ModernizeOptions {
             apply_compat: false,
             ddraw: Some(DxvkSource::Download),
             upscale: Upscale::Off,
+            fsr_layer: None,
         }
     }
 }
@@ -618,6 +621,7 @@ pub const CNC_DDRAW_VERSION: &str = "7.1.0.0";
 const CNC_DDRAW_URL: &str = "https://github.com/FunkyFr3sh/cnc-ddraw/releases/download/v7.1.0.0/cnc-ddraw.zip";
 const CNC_DDRAW_SHA256: &str = "0b13ab89a64c9918189b1dadd449ef6ed3cb3b7b19cabd96d8adbd95505bb908";
 const CNC_DDRAW_LICENSE: &str = include_str!("../third_party/cnc-ddraw/LICENSE");
+const FSR_LICENSE: &str = include_str!("../third_party/fidelityfx-fsr/license.txt");
 /// Files taken from a cnc-ddraw release, relative to the game executable's folder.
 const CNC_DDRAW_FILES: &[&str] = &["ddraw.dll", "Shaders/interpolation/fsr.glsl", "Shaders/interpolation/fsr.glsl.pass1"];
 const FSR_SHADER: &str = r"Shaders\interpolation\fsr.glsl";
@@ -667,6 +671,53 @@ fn ddraw_ini(upscale: Upscale, max_fps: u32) -> String {
          vsync=false\r\nadjmouse=true\r\nnonexclusive=true\r\nrenderer={}\r\nshader={}\r\n",
         if fsr { "opengl" } else { "auto" },
         if fsr { FSR_SHADER } else { "Bicubic" },
+    )
+}
+
+fn fsr_layer_files(source: Option<&Path>, arch: Arch) -> Result<BTreeMap<String, Vec<u8>>> {
+    let root = if let Some(path) = source {
+        path.to_path_buf()
+    } else if let Some(path) = std::env::var_os("BIFROST_FSR_LAYER") {
+        PathBuf::from(path)
+    } else {
+        std::env::current_exe().context("finding the executable directory for the default FSR layer; use --fsr-layer")?
+            .parent().unwrap_or(Path::new(".")).join("fsr-layer")
+    };
+    let arch_dir = root.join(match arch { Arch::X86 => "x86", Arch::X64 => "x64" });
+    let mut files = BTreeMap::new();
+    for name in ["bifrost_fsr.dll", "bifrost_fsr.json"] {
+        let path = arch_dir.join(name);
+        let data = fs::read(&path).with_context(|| {
+            format!("reading {} from {}; provide a complete layer directory with --fsr-layer", path.display(), root.display())
+        })?;
+        files.insert(name.to_string(), data);
+    }
+    Ok(files)
+}
+
+fn fsr_ini() -> &'static str {
+    "; Written by the Bifrost Modernizer. Options for VK_LAYER_BIFROST_fsr1.\n\
+     [fsr]\n\
+     ; RCAS sharpness in stops (0 is sharpest; larger values reduce sharpening).\n\
+     sharpness=0.2\n\
+     ; Render scale: auto leaves the game resolution unchanged; numeric values are >= 1.0.\n\
+     scale=auto\n\
+     ; On Windows, emulate display mode switches so games render at the selected mode.\n\
+     fake_mode_switch=true\n\
+     ; Append layer activity to bifrost_fsr.log in this folder.\n\
+     log=false\n"
+}
+
+fn fsr_launcher(exe_name: &str) -> String {
+    format!(
+        "@echo off\r\n\
+         setlocal DisableDelayedExpansion\r\n\
+         rem Written by the Bifrost Modernizer: starts the game with AMD FSR 1 upscaling.\r\n\
+         set \"VK_LAYER_PATH=%~dp0\"\r\n\
+         set \"VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1\"\r\n\
+         set \"BIFROST_FSR_CONFIG_DIR=%~dp0\"\r\n\
+         cd /d \"%~dp0\"\r\n\
+         start \"\" \"%~dp0{exe_name}\"\r\n"
     )
 }
 
@@ -834,8 +885,19 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         }
         _ => None,
     };
-    if opts.upscale == Upscale::Fsr1 && ddraw_files.is_none() {
-        warnings.push("FSR 1 is only available for DirectDraw games (through cnc-ddraw) so far, so it was skipped".into());
+    let ddraw_fsr = opts.upscale == Upscale::Fsr1 && ddraw_files.is_some();
+    let d3d_fsr = opts.upscale == Upscale::Fsr1 && dlls.is_some() && ddraw_files.is_none();
+    let fsr_layer = if d3d_fsr {
+        let exe_name = exe_rel.file_name().unwrap_or_default().to_string_lossy();
+        if !batch_safe(&exe_name) {
+            bail!("the executable's name is not safe for Play with FSR.bat; rename it or choose another executable");
+        }
+        Some(fsr_layer_files(opts.fsr_layer.as_deref(), info.arch)?)
+    } else {
+        None
+    };
+    if opts.upscale == Upscale::Fsr1 && !ddraw_fsr && !d3d_fsr {
+        warnings.push("FSR 1 was requested, but neither the DirectDraw/cnc-ddraw nor Direct3D 8–11/DXVK path applies; it was skipped".into());
     }
 
     let target = if rerun {
@@ -878,7 +940,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         // Back up every file a re-run may touch so a failure leaves the previous output as it was.
         let backup: Vec<(PathBuf, Option<Vec<u8>>)> =
             job.touched(previous_exe.as_deref()).into_iter().chain([report_rel]).map(|p| (p.clone(), fs::read(out.join(&p)).ok())).collect();
-        let res = job.apply(&apis, &wanted, dlls.as_ref(), ddraw_files.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
+        let res = job.apply(&apis, &wanted, dlls.as_ref(), ddraw_files.as_ref(), fsr_layer.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
         let res = res.and_then(|()| Ok(fs::write(out.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings))?));
         if let Err(e) = res {
             for (p, data) in backup {
@@ -890,7 +952,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
             return Err(e);
         }
     } else {
-        let res = job.apply(&apis, &wanted, dlls.as_ref(), ddraw_files.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
+        let res = job.apply(&apis, &wanted, dlls.as_ref(), ddraw_files.as_ref(), fsr_layer.as_ref(), previous_exe.as_deref(), &mut changes, &mut warnings, &mut r);
         let res = res.and_then(|()| {
             fs::write(target.join(REPORT), report(&exe_rel, &info, &apis, &changes, &warnings))?;
             if out.exists() {
@@ -979,6 +1041,11 @@ const GENERATED_BESIDE_EXE: &[&str] = &[
     "CNC_DDRAW_LICENSE.txt",
     "Shaders/interpolation/fsr.glsl",
     "Shaders/interpolation/fsr.glsl.pass1",
+    "bifrost_fsr.dll",
+    "bifrost_fsr.json",
+    "bifrost_fsr.ini",
+    "FSR_LICENSE.txt",
+    "Play with FSR.bat",
 ];
 
 /// The executable named in a previous output's report, if it's a plain relative path.
@@ -1045,6 +1112,7 @@ impl Job<'_> {
         wanted: &BTreeSet<&str>,
         dlls: Option<&BTreeMap<String, Vec<u8>>>,
         ddraw: Option<&BTreeMap<String, Vec<u8>>>,
+        fsr_layer: Option<&BTreeMap<String, Vec<u8>>>,
         previous_exe: Option<&Path>,
         changes: &mut Vec<String>,
         warnings: &mut Vec<String>,
@@ -1118,6 +1186,18 @@ impl Job<'_> {
             }
         }
 
+        if let Some(files) = fsr_layer {
+            r.at(0.88, "Installing the Bifrost FSR Vulkan layer");
+            for name in ["bifrost_fsr.dll", "bifrost_fsr.json"] {
+                fs::write(exe_dir.join(name), files.get(name).with_context(|| format!("validated FSR layer file {name} is missing"))?)?;
+            }
+            fs::write(exe_dir.join("bifrost_fsr.ini"), fsr_ini())?;
+            fs::write(exe_dir.join("FSR_LICENSE.txt"), FSR_LICENSE)?;
+            let exe_name = exe_rel.file_name().unwrap_or_default().to_string_lossy();
+            fs::write(exe_dir.join("Play with FSR.bat"), fsr_launcher(&exe_name))?;
+            changes.push("AMD FSR 1 upscales Direct3D to the display: launch with \"Play with FSR.bat\"".into());
+        }
+
         let mut conf = Vec::new();
         if opts.anisotropy > 0 {
             conf.push(format!("d3d9.samplerAnisotropy = {}", opts.anisotropy));
@@ -1168,7 +1248,7 @@ impl Job<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ddraw_ini, uses_legacy_d3d, Upscale};
+    use super::{ddraw_ini, fsr_launcher, uses_legacy_d3d, Upscale};
 
     #[test]
     fn detects_direct3d7_interface_id_bytes() {
@@ -1184,5 +1264,17 @@ mod tests {
         let ini = ddraw_ini(Upscale::Fsr1, 60);
         assert!(ini.contains("maxfps=60"));
         assert!(ini.contains(r"shader=Shaders\interpolation\fsr.glsl"));
+    }
+
+    #[test]
+    fn fsr_launcher_sets_layer_environment_and_starts_exe_with_crlf() {
+        let bat = fsr_launcher("Game.exe");
+        assert!(bat.contains("setlocal DisableDelayedExpansion\r\n"));
+        assert!(bat.contains("set \"VK_LAYER_PATH=%~dp0\"\r\n"));
+        assert!(bat.contains("set \"VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1\"\r\n"));
+        assert!(bat.contains("set \"BIFROST_FSR_CONFIG_DIR=%~dp0\"\r\n"));
+        assert!(bat.contains("cd /d \"%~dp0\"\r\n"));
+        assert!(bat.ends_with("start \"\" \"%~dp0Game.exe\"\r\n"));
+        assert!(!bat.replace("\r\n", "").contains('\n'));
     }
 }

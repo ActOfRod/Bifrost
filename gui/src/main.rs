@@ -253,7 +253,8 @@ impl App {
             compat: m.compat.clone(),
             apply_compat: m.apply_compat,
             ddraw: m.ddraw.then_some(DxvkSource::Download),
-            upscale: if m.ddraw { m.upscale } else { Upscale::Off },
+            upscale: if m.ddraw || m.dxvk { m.upscale } else { Upscale::Off },
+            fsr_layer: None,
         };
         self.spawn(ctx, move |sink| {
             let out = modernize::run(&opts, sink)?;
@@ -458,9 +459,9 @@ impl App {
             ui.label("Upscaling");
             ui.horizontal(|ui| {
                 ui.radio_value(&mut m.upscale, Upscale::Off, "Off");
-                ui.add_enabled_ui(m.ddraw, |ui| {
+                ui.add_enabled_ui(m.ddraw || m.dxvk, |ui| {
                     ui.radio_value(&mut m.upscale, Upscale::Fsr1, "AMD FSR 1")
-                        .on_hover_text("Upscales to your display, borderless. DirectDraw games for now (through cnc-ddraw); Direct3D games are next.")
+                        .on_hover_text("Upscales DirectDraw through cnc-ddraw or Direct3D 8–11 through the Bifrost Vulkan layer. Direct3D requires the packaged fsr-layer.")
                 });
                 ui.add_enabled(false, egui::RadioButton::new(false, "NVIDIA DLSS"))
                     .on_disabled_hover_text("Coming later: DLSS needs depth, motion vectors and camera jitter, which older games don't provide.");

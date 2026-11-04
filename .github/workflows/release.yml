@@ -9,11 +9,32 @@ on:
 permissions:
   contents: write
 jobs:
+  fsr-layer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+      - name: Build Windows FSR layer binaries
+        run: scripts/build_fsr_layer.sh --windows-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsr-layer-binaries
+          path: |
+            target/fsr-layer/x86
+            target/fsr-layer/x64
   windows:
+    needs: fsr-layer
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: fsr-layer-binaries
+          path: fsr-layer
       - run: cargo build --release --workspace --locked
       - name: Smoke test
         run: target/release/bifrost.exe --help
@@ -24,6 +45,9 @@ jobs:
           $d = "bifrost-$v-windows-x64"
           New-Item -ItemType Directory $d | Out-Null
           Copy-Item target/release/bifrost.exe, target/release/bifrost-gui.exe, README.md $d
+          New-Item -ItemType Directory "$d/fsr-layer/x86", "$d/fsr-layer/x64" -Force | Out-Null
+          Copy-Item fsr-layer/x86/bifrost_fsr.dll, fsr-layer/x86/bifrost_fsr.json "$d/fsr-layer/x86"
+          Copy-Item fsr-layer/x64/bifrost_fsr.dll, fsr-layer/x64/bifrost_fsr.json "$d/fsr-layer/x64"
           Compress-Archive -Path $d -DestinationPath "$d.zip"
           "PKG=$d" >> $env:GITHUB_ENV
       - uses: actions/upload-artifact@v4
