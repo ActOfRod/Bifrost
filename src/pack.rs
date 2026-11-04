@@ -14,6 +14,7 @@ pub struct PackOptions {
     pub out: PathBuf,
     pub title: Option<String>,
     pub cover: Option<PathBuf>,
+    pub replace: bool,
 }
 
 fn absolute(p: &Path) -> Result<PathBuf> {
@@ -96,7 +97,11 @@ pub fn run(opts: &PackOptions, sink: &mut dyn FnMut(Event)) -> Result<PathBuf> {
     let scan = modernize::scan(&opts.game)?;
     let root = fs::canonicalize(&scan.root)?;
     let exe = match &opts.exe {
-        Some(exe) => exe.strip_prefix(&scan.root).unwrap_or(exe).to_path_buf(),
+        Some(exe) => exe
+            .strip_prefix(&scan.root)
+            .or_else(|_| exe.strip_prefix(&root))
+            .unwrap_or(exe)
+            .to_path_buf(),
         None => scan.exes[scan.main.context("no main executable found")?].path.clone(),
     };
     if !exe.components().all(|component| matches!(component, Component::Normal(_)))
@@ -112,7 +117,7 @@ pub fn run(opts: &PackOptions, sink: &mut dyn FnMut(Event)) -> Result<PathBuf> {
     if output.starts_with(&root) {
         bail!("the output package must be outside the game folder");
     }
-    if output.exists() {
+    if output.exists() && !opts.replace {
         bail!("{} already exists", output.display());
     }
     let partial = partial_path(&output)?;
@@ -241,7 +246,7 @@ mod tests {
         std::os::unix::fs::symlink(temp.join("outside"), game.join("linked")).unwrap();
         let output = temp.join("game.bifrost");
         let result = run(&PackOptions {
-            game: game.clone(), exe: None, out: output.clone(), title: Some("A \"Game\"".into()), cover: None,
+            game: game.clone(), exe: None, out: output.clone(), title: Some("A \"Game\"".into()), cover: None, replace: false,
         }, &mut |_| {}).unwrap();
         assert_eq!(result, output);
         let mut zip = ZipArchive::new(File::open(&output).unwrap()).unwrap();
@@ -262,9 +267,54 @@ mod tests {
         let temp = test_dir();
         fs::write(temp.join("game/Game.exe"), pe32()).unwrap();
         let result = run(&PackOptions {
-            game: temp.join("game"), exe: None, out: temp.join("game/out.bifrost"), title: None, cover: None,
+            game: temp.join("game"), exe: None, out: temp.join("game/out.bifrost"), title: None, cover: None, replace: false,
         }, &mut |_| {});
         assert!(result.is_err());
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn package_replacement_is_opt_in() {
+        let temp = test_dir();
+        let game = temp.join("game");
+        fs::write(game.join("Game.exe"), pe32()).unwrap();
+        let output = temp.join("game.bifrost");
+        let options = |replace, title: &str| PackOptions {
+            game: game.clone(),
+            exe: None,
+            out: output.clone(),
+            title: Some(title.into()),
+            cover: None,
+            replace,
+        };
+        run(&options(false, "Original"), &mut |_| {}).unwrap();
+        let original = fs::read(&output).unwrap();
+        assert!(run(&options(false, "Rejected"), &mut |_| {}).is_err());
+        assert_eq!(fs::read(&output).unwrap(), original);
+        run(&options(true, "Replacement"), &mut |_| {}).unwrap();
+        let mut zip = ZipArchive::new(File::open(&output).unwrap()).unwrap();
+        let mut manifest = String::new();
+        zip.by_name("bifrost.json").unwrap().read_to_string(&mut manifest).unwrap();
+        assert!(manifest.contains("\"title\":\"Replacement\""));
+        assert!(!output.with_file_name("game.bifrost.partial").exists());
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn package_accepts_exe_under_canonical_root() {
+        let temp = test_dir();
+        let game = temp.join("game");
+        fs::write(game.join("Game.exe"), pe32()).unwrap();
+        let canonical_exe = fs::canonicalize(&game).unwrap().join("Game.exe");
+        let result = run(&PackOptions {
+            game: game.join("../game"),
+            exe: Some(canonical_exe),
+            out: temp.join("canonical.bifrost"),
+            title: None,
+            cover: None,
+            replace: false,
+        }, &mut |_| {}).unwrap();
+        assert!(result.is_file());
         let _ = fs::remove_dir_all(temp);
     }
 }

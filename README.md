@@ -139,7 +139,7 @@ bifrost modernize "C:\Games\The Hobbit" -o "C:\Games\The Hobbit (Modernized)" --
 ```
 
 - `modernize` options: `--exe`, `--no-dxvk`, `--dxvk <release.tar.gz|folder>`, `--ddraw <zip|dir>`, `--no-ddraw`, `--fsr` (DirectDraw or DXVK-backed Direct3D 8–11), `--fsr-layer <dir>`, `--anisotropy 0|2|4|8|16`, `--max-fps`, `--no-laa`, `--no-high-dpi`, `--keep-fullscreen-optimizations`, `--xp-mode`, `--apply-compat`.
-- `bifrost pack <GAME> [--exe <path>] [-o|--out <file.bifrost>] [--title <text>] [--cover <image>]` writes a `.bifrost` package for the Android launcher.
+- `bifrost pack <GAME> [--exe <path>] [-o|--out <file.bifrost>] [--title <text>] [--cover <image>] [--force]` writes a `.bifrost` package for the Android launcher; `--force` replaces an existing package.
 - `--compile` takes `none`, `native`, `windows` (MinGW-w64) or `android` (NDK; produces a signed APK).
 - Titles that draw through NVN get the Vulkan renderer when `--android-deps` (or `BIFROST_ANDROID_DEPS`) points at the output of `scripts/build_android_deps.sh`. That output includes SDL3, shaderc, the Vulkan headers, VMA and volk.
 - `inspect`, `recompile` and `run` are older developer commands that still use the original interpreter path.

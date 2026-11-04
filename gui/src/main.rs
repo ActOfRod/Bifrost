@@ -271,6 +271,7 @@ impl App {
                     out: package.clone(),
                     title: None,
                     cover: None,
+                    replace: true,
                 }, sink)?;
                 Some(package)
             } else { None };

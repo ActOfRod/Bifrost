@@ -156,6 +156,9 @@ enum Cmd {
         /// Optional PNG or JPEG cover image
         #[arg(long)]
         cover: Option<PathBuf>,
+        /// Replace an existing output package
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -259,14 +262,21 @@ fn run() -> anyhow::Result<()> {
             max_steps,
             boot,
         } => run_module(&file, entry.as_deref(), &args, max_steps, boot),
-        Cmd::Pack { game, exe, out, title, cover } => {
+        Cmd::Pack { game, exe, out, title, cover, force } => {
             let default_name = if game.is_file() {
                 game.parent().and_then(std::path::Path::file_name).or_else(|| game.file_stem())
             } else {
                 game.file_name()
             }.unwrap_or_default().to_string_lossy();
             let out = out.unwrap_or_else(|| PathBuf::from(format!("{default_name}.bifrost")));
-            let path = bifrost::pack::run(&bifrost::pack::PackOptions { game, exe, out, title, cover }, &mut |event| {
+            let path = bifrost::pack::run(&bifrost::pack::PackOptions {
+                game,
+                exe,
+                out,
+                title,
+                cover,
+                replace: force,
+            }, &mut |event| {
                 match event {
                     bifrost::pipeline::Event::Progress(_, step) => eprintln!("[bifrost] {step}"),
                     bifrost::pipeline::Event::Log(line) => println!("{line}"),
