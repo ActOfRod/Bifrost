@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::pipeline::Event;
 
@@ -298,7 +298,8 @@ fn ext_is(p: &Path, ext: &str) -> bool {
 /// Finds the game's executables. `game` may be the install folder or the game's .exe itself.
 pub fn scan(game: &Path) -> Result<Scan> {
     let (root, only) = if game.is_file() {
-        (game.parent().map(Path::to_path_buf).unwrap_or_default(), Some(game.to_path_buf()))
+        let parent = game.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        (parent.to_path_buf(), Some(game.to_path_buf()))
     } else if game.is_dir() {
         (game.to_path_buf(), None)
     } else {
@@ -605,15 +606,13 @@ fn win_path(p: &Path) -> String {
 
 pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<ModernizeOutput> {
     let mut r = Reporter { sink };
-    let mut changes = Vec::new();
-    let mut warnings = Vec::new();
 
     r.at(0.0, "Scanning the game");
     let sc = scan(&opts.game)?;
     let exe_rel = match &opts.exe {
         Some(e) => {
             let e = e.strip_prefix(&sc.root).unwrap_or(e).to_path_buf();
-            if !sc.root.join(&e).is_file() {
+            if !e.components().all(|c| matches!(c, Component::Normal(_))) || !sc.root.join(&e).is_file() {
                 bail!("{} is not in {}", e.display(), sc.root.display());
             }
             e
@@ -634,18 +633,106 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     if out.starts_with(&root) || root.starts_with(&out) {
         bail!("the output folder must be outside the game folder (and not contain it)");
     }
-    fs::create_dir_all(&out)?;
-    if fs::read_dir(&out)?.next().is_some() {
-        if !out.join(REPORT).is_file() {
-            bail!("{} is not empty; choose an empty output folder", out.display());
-        }
-        fs::remove_dir_all(&out)?; // a previous Modernizer output
-        fs::create_dir_all(&out)?;
+    if out.is_file() || fs::read_dir(&out).is_ok_and(|mut d| d.next().is_some()) && !out.join(REPORT).is_file() {
+        bail!("{} is not empty; choose an empty output folder", out.display());
     }
+    // Everything is built in a staging folder beside the output and only swapped in once every step has succeeded.
+    let final_out = out;
+    let name = final_out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let out = final_out.with_file_name(format!(".{name}.bifrost-staging"));
+    if out.exists() {
+        fs::remove_dir_all(&out)?;
+    }
+    let result = build_copy(opts, &root, &out, &final_out, &exe_rel, &exe_data, &info, &apis, &mut r);
+    let finished = result.and_then(|(changes, warnings)| {
+        replace_output(&root, &out, &final_out)?;
+        Ok((changes, warnings))
+    });
+    let (changes, warnings) = match finished {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&out);
+            return Err(e);
+        }
+    };
+    for c in &changes {
+        r.log(format!("done: {c}"));
+    }
+    for w in &warnings {
+        r.log(format!("warning: {w}"));
+    }
+    r.at(1.0, "Done");
+    Ok(ModernizeOutput { exe: final_out.join(&exe_rel), out: final_out, changes, warnings })
+}
 
-    let total = tree_size(&root);
+const MANIFEST: &str = ".bifrost_manifest";
+
+/// Moves `stage` into place as `out`. Files the player added to a previous output (saves, settings) are carried
+/// over; the previous copy of the game and the files Bifrost generated last time are dropped.
+fn replace_output(root: &Path, stage: &Path, out: &Path) -> Result<()> {
+    if out.exists() {
+        let generated: BTreeSet<PathBuf> = fs::read_to_string(out.join(MANIFEST))
+            .unwrap_or_default()
+            .lines()
+            .map(PathBuf::from)
+            .collect();
+        let mut files = Vec::new();
+        walk(out, usize::MAX, &mut files);
+        for f in files {
+            let rel = f.strip_prefix(out).unwrap_or(&f).to_path_buf();
+            if rel.as_os_str() == REPORT || generated.contains(&rel) || root.join(&rel).exists() || stage.join(&rel).exists() {
+                continue;
+            }
+            if let Some(parent) = stage.join(&rel).parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&f, stage.join(&rel)).with_context(|| format!("keeping {}", f.display()))?;
+        }
+        let old = out.with_file_name(format!(".{}.bifrost-old", out.file_name().unwrap_or_default().to_string_lossy()));
+        if old.exists() {
+            fs::remove_dir_all(&old)?;
+        }
+        fs::rename(out, &old).with_context(|| format!("replacing {}", out.display()))?;
+        if let Err(e) = fs::rename(stage, out) {
+            let _ = fs::rename(&old, out);
+            return Err(e).with_context(|| format!("replacing {}", out.display()));
+        }
+        let _ = fs::remove_dir_all(&old);
+    } else {
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(stage, out).with_context(|| format!("creating {}", out.display()))?;
+    }
+    Ok(())
+}
+
+/// Characters that would let a file name escape a quoted argument in a .bat file.
+fn batch_safe(s: &str) -> bool {
+    !s.chars().any(|c| c.is_control() || "\"%^&|<>!".contains(c))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_copy(
+    opts: &ModernizeOptions,
+    root: &Path,
+    out: &Path,
+    final_out: &Path,
+    exe_rel: &Path,
+    exe_data: &[u8],
+    info: &PeInfo,
+    apis: &ApiReport,
+    r: &mut Reporter,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut changes = Vec::new();
+    let mut warnings = Vec::new();
+    let mut generated: Vec<PathBuf> = vec![PathBuf::from(MANIFEST)];
+    let out = out.to_path_buf();
+    let exe_rel = exe_rel.to_path_buf();
+
+    let total = tree_size(root);
     let mut done = 0;
-    copy_tree(&root, &out, total, &mut done, &mut r, 0.02, 0.6)?;
+    copy_tree(root, &out, total, &mut done, r, 0.02, 0.6)?;
     changes.push(format!("Copied the game ({:.1} MB); the original install is unchanged", total as f64 / 1e6));
     let exe_out = out.join(&exe_rel);
     let exe_dir = exe_out.parent().map(Path::to_path_buf).unwrap_or_else(|| out.clone());
@@ -655,7 +742,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         if info.arch != Arch::X86 {
             r.log("Large Address Aware: not needed for 64-bit executables");
         } else {
-            let mut d = exe_data.clone();
+            let mut d = exe_data.to_vec();
             if patch_large_address_aware(&mut d)? {
                 fs::write(&exe_out, &d)?;
                 changes.push(format!("Marked {} Large Address Aware (4 GB of memory instead of 2 GB)", exe_rel.display()));
@@ -684,7 +771,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
                 format!("The game draws with {}, which the Modernizer can't translate yet; DXVK was not installed", other.join(" / "))
             });
         } else {
-            let dlls = dxvk_dlls(src, info.arch, &mut r, 0.64, 0.85)?;
+            let dlls = dxvk_dlls(src, info.arch, r, 0.64, 0.85)?;
             r.at(0.86, "Installing DXVK");
             for name in &wanted {
                 let data = dlls.get(*name).with_context(|| format!("the DXVK release has no {name}"))?;
@@ -692,8 +779,10 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
                     warnings.push(format!("Replaced the game's own {name} (an existing wrapper) with DXVK's"));
                 }
                 fs::write(exe_dir.join(name), data)?;
+                generated.push(exe_rel.with_file_name(name));
             }
             fs::write(exe_dir.join("DXVK_LICENSE.txt"), DXVK_LICENSE)?;
+            generated.push(exe_rel.with_file_name("DXVK_LICENSE.txt"));
             let names: Vec<_> = wanted.iter().copied().collect();
             changes.push(format!("Installed DXVK {DXVK_VERSION} ({}): Direct3D now runs on Vulkan", names.join(", ")));
             dxvk_installed = true;
@@ -713,6 +802,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         if dxvk_installed {
             let text = format!("# Written by the Bifrost Modernizer. Options: https://github.com/doitsujin/dxvk/blob/master/dxvk.conf\n{}\n", conf.join("\n"));
             fs::write(exe_dir.join("dxvk.conf"), text)?;
+            generated.push(exe_rel.with_file_name("dxvk.conf"));
             if opts.anisotropy > 0 {
                 changes.push(format!("Forced {}x anisotropic filtering", opts.anisotropy));
             }
@@ -725,34 +815,47 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     }
 
     let layers = opts.compat.layers();
+    let key = r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+    let exe_win = win_path(&exe_rel);
     if !layers.is_empty() {
         r.at(0.92, "Windows compatibility settings");
-        let key = r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
-        let exe_win = win_path(&exe_rel);
-        let apply = format!(
-            "@echo off\r\nrem Written by the Bifrost Modernizer: Windows compatibility settings for {exe_win} (current user).\r\n\
-             reg add \"{key}\" /v \"%~dp0{exe_win}\" /t REG_SZ /d \"~ {}\" /f\r\n",
-            layers.join(" ")
-        );
+        if batch_safe(&exe_win) {
+            let apply = format!(
+                "@echo off\r\nrem Written by the Bifrost Modernizer: Windows compatibility settings for the game (current user).\r\n\
+                 reg add \"{key}\" /v \"%~dp0{exe_win}\" /t REG_SZ /d \"~ {}\" /f\r\n",
+                layers.join(" ")
+            );
+            fs::write(out.join("bifrost_compat.bat"), apply)?;
+            generated.push("bifrost_compat.bat".into());
+            changes.push(format!("Wrote bifrost_compat.bat ({})", layers.join(", ")));
+        } else {
+            warnings.push("The executable's path has characters that aren't safe in a .bat file, so bifrost_compat.bat was not written".into());
+        }
+    }
+    if batch_safe(&exe_win) {
         let undo = format!("@echo off\r\nreg delete \"{key}\" /v \"%~dp0{exe_win}\" /f\r\n");
-        fs::write(out.join("bifrost_compat.bat"), apply)?;
         fs::write(out.join("bifrost_compat_undo.bat"), undo)?;
-        changes.push(format!("Wrote bifrost_compat.bat ({})", layers.join(", ")));
-        if opts.apply_compat {
-            if cfg!(windows) {
-                let ok = std::process::Command::new("cmd")
-                    .arg("/C")
-                    .arg(out.join("bifrost_compat.bat"))
-                    .status()
-                    .is_ok_and(|s| s.success());
-                if ok {
-                    changes.push("Applied the compatibility settings for this user".into());
-                } else {
-                    warnings.push("Could not apply the compatibility settings; run bifrost_compat.bat".into());
-                }
+        generated.push("bifrost_compat_undo.bat".into());
+    }
+    if opts.apply_compat {
+        if cfg!(windows) {
+            // Called directly (no shell) with the executable's final location.
+            let value = final_out.join(&exe_rel).display().to_string();
+            let mut cmd = std::process::Command::new("reg");
+            if layers.is_empty() {
+                cmd.args(["delete", key, "/v", &value, "/f"]);
             } else {
-                warnings.push("Compatibility settings can only be applied on Windows; run bifrost_compat.bat there".into());
+                cmd.args(["add", key, "/v", &value, "/t", "REG_SZ", "/d", &format!("~ {}", layers.join(" ")), "/f"]);
             }
+            let ok = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+            match (layers.is_empty(), ok) {
+                (false, true) => changes.push("Applied the compatibility settings for this user".into()),
+                (false, false) => warnings.push("Could not apply the compatibility settings; run bifrost_compat.bat".into()),
+                (true, true) => changes.push("Cleared previously applied compatibility settings".into()),
+                (true, false) => {} // nothing was applied before
+            }
+        } else {
+            warnings.push("Compatibility settings can only be applied on Windows; run bifrost_compat.bat there".into());
         }
     }
 
@@ -772,12 +875,7 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
         }
     }
     fs::write(out.join(REPORT), report)?;
-    for c in &changes {
-        r.log(format!("done: {c}"));
-    }
-    for w in &warnings {
-        r.log(format!("warning: {w}"));
-    }
-    r.at(1.0, "Done");
-    Ok(ModernizeOutput { out, exe: exe_out, changes, warnings })
+    let manifest: Vec<String> = generated.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    fs::write(out.join(MANIFEST), manifest.join("\n") + "\n")?;
+    Ok((changes, warnings))
 }
