@@ -262,7 +262,7 @@ pub fn lift(module: &Module) -> Lifted {
     let mut queue = Vec::new();
     let mut queued = BTreeSet::new();
     let push = |queue: &mut Vec<u64>, queued: &mut BTreeSet<u64>, addr: u64| {
-        if addr % 4 == 0 && module.in_text(addr) && queued.insert(addr) {
+        if addr.is_multiple_of(4) && module.in_text(addr) && queued.insert(addr) {
             queue.push(addr);
         }
     };
@@ -836,7 +836,11 @@ fn decode_reg_offset(word: u32) -> Option<Op> {
     }
     let option = (word >> 13) & 0x7;
     let s = ((word >> 12) & 1) as u8;
-    let shift = if s == 1 { width.bytes().trailing_zeros() as u8 } else { 0 };
+    let shift = if s == 1 {
+        width.bytes().trailing_zeros() as u8
+    } else {
+        0
+    };
     let base = reg_sp((word >> 5) & 0x1F);
     let index = reg_zr((word >> 16) & 0x1F);
     let extend = extend_kind(option);
@@ -879,7 +883,7 @@ fn int_mem_op(size: u32, opc: u32) -> Option<(Width, bool, bool)> {
             }
         }
         2 => match size {
-            0 | 1 | 2 => Some((width, true, true)),
+            0..=2 => Some((width, true, true)),
             3 => None,
             _ => None,
         },
@@ -1024,46 +1028,115 @@ fn sext(value: u64, bits: u32) -> i64 {
 pub fn describe(op: &Op) -> String {
     match op {
         Op::Nop => "nop".into(),
-        Op::Alu { op, dst, lhs, rhs, set_flags, .. } => {
+        Op::Alu {
+            op,
+            dst,
+            lhs,
+            rhs,
+            set_flags,
+            ..
+        } => {
             format!("{op:?} {dst:?}, {lhs:?}, {rhs:?} flags={set_flags}")
         }
-        Op::MovWide { kind, dst, imm, shift, .. } => {
+        Op::MovWide {
+            kind,
+            dst,
+            imm,
+            shift,
+            ..
+        } => {
             format!("mov{kind:?} {dst:?}, #{imm:#x}, lsl #{shift}")
         }
         Op::SetImm { dst, value } => format!("adr {dst:?}, {value:#x}"),
         Op::B { target } => format!("b {target:#x}"),
         Op::Bl { target } => format!("bl {target:#x}"),
         Op::BCond { cond, target } => format!("b.{cond} {target:#x}"),
-        Op::Cbz { reg, is_zero, target, .. } => {
-            format!("{} {reg:?}, {target:#x}", if *is_zero { "cbz" } else { "cbnz" })
+        Op::Cbz {
+            reg,
+            is_zero,
+            target,
+            ..
+        } => {
+            format!(
+                "{} {reg:?}, {target:#x}",
+                if *is_zero { "cbz" } else { "cbnz" }
+            )
         }
-        Op::Tbz { reg, bit, is_zero, target } => {
-            format!("{} {reg:?}, #{bit}, {target:#x}", if *is_zero { "tbz" } else { "tbnz" })
+        Op::Tbz {
+            reg,
+            bit,
+            is_zero,
+            target,
+        } => {
+            format!(
+                "{} {reg:?}, #{bit}, {target:#x}",
+                if *is_zero { "tbz" } else { "tbnz" }
+            )
         }
         Op::Br { reg, link } => format!("{} {reg:?}", if *link { "blr" } else { "br" }),
         Op::Ret { reg } => format!("ret {reg:?}"),
         Op::Svc { imm } => format!("svc #{imm:#x}"),
         Op::Brk { imm } => format!("brk #{imm:#x}"),
-        Op::Load { dst, base, offset, width, .. } => {
+        Op::Load {
+            dst,
+            base,
+            offset,
+            width,
+            ..
+        } => {
             format!("ldr.{width:?} {dst:?}, [{base:?}, #{offset}]")
         }
-        Op::Store { src, base, offset, width, .. } => {
+        Op::Store {
+            src,
+            base,
+            offset,
+            width,
+            ..
+        } => {
             format!("str.{width:?} {src:?}, [{base:?}, #{offset}]")
         }
         Op::LoadLit { dst, addr, .. } => format!("ldr {dst:?}, [{addr:#x}]"),
-        Op::LoadPair { rt, rt2, base, offset, .. } => {
+        Op::LoadPair {
+            rt,
+            rt2,
+            base,
+            offset,
+            ..
+        } => {
             format!("ldp {rt:?}, {rt2:?}, [{base:?}, #{offset}]")
         }
-        Op::StorePair { rt, rt2, base, offset, .. } => {
+        Op::StorePair {
+            rt,
+            rt2,
+            base,
+            offset,
+            ..
+        } => {
             format!("stp {rt:?}, {rt2:?}, [{base:?}, #{offset}]")
         }
-        Op::Bitfield { dst, src, immr, imms, signed, .. } => {
+        Op::Bitfield {
+            dst,
+            src,
+            immr,
+            imms,
+            signed,
+            ..
+        } => {
             format!("bfm signed={signed} {dst:?}, {src:?}, #{immr}, #{imms}")
         }
-        Op::Madd { dst, n, m, sub, .. } => format!("m{} {dst:?}, {n:?}, {m:?}", if *sub { "sub" } else { "add" }),
-        Op::Csel { dst, cond, kind, .. } => format!("csel.{kind:?} {dst:?}, cond={cond}"),
-        Op::LoadIndexed { dst, base, index, .. } => format!("ldr {dst:?}, [{base:?}, {index:?}]"),
-        Op::StoreIndexed { src, base, index, .. } => format!("str {src:?}, [{base:?}, {index:?}]"),
+        Op::Madd { dst, n, m, sub, .. } => format!(
+            "m{} {dst:?}, {n:?}, {m:?}",
+            if *sub { "sub" } else { "add" }
+        ),
+        Op::Csel {
+            dst, cond, kind, ..
+        } => format!("csel.{kind:?} {dst:?}, cond={cond}"),
+        Op::LoadIndexed {
+            dst, base, index, ..
+        } => format!("ldr {dst:?}, [{base:?}, {index:?}]"),
+        Op::StoreIndexed {
+            src, base, index, ..
+        } => format!("str {src:?}, [{base:?}, {index:?}]"),
         Op::Unsupported => "unimplemented".into(),
     }
 }

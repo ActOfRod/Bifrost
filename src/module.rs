@@ -1,5 +1,5 @@
-/// A mapped Switch executable. Addresses are guest virtual addresses.
-/// `image[0]` corresponds to `image_base`.
+//! A mapped Switch executable. Addresses are guest virtual addresses.
+//! `image[0]` corresponds to `image_base`.
 
 pub const IMPORT_SENTINEL_BASE: u64 = 0xFFFF_FF00_0000_0000;
 pub const MAX_SEGMENT: u64 = 256 * 1024 * 1024;
@@ -130,11 +130,15 @@ impl Module {
     }
 
     pub fn exports(&self) -> impl Iterator<Item = &Symbol> {
-        self.symbols.iter().filter(|sym| sym.defined && !sym.name.is_empty())
+        self.symbols
+            .iter()
+            .filter(|sym| sym.defined && !sym.name.is_empty())
     }
 
     pub fn undefined(&self) -> impl Iterator<Item = &Symbol> {
-        self.symbols.iter().filter(|sym| !sym.defined && !sym.name.is_empty())
+        self.symbols
+            .iter()
+            .filter(|sym| !sym.defined && !sym.name.is_empty())
     }
 }
 
@@ -167,10 +171,9 @@ impl<'a> AddressSpace<'a> {
     pub fn load(&self, va: u64, len: usize) -> Option<u64> {
         let bytes = if let Some(slice) = self.module.read(va, len) {
             slice.to_vec()
-        } else if let Some(off) = self.stack_offset(va, len) {
-            self.stack[off..off + len].to_vec()
         } else {
-            return None;
+            let off = self.stack_offset(va, len)?;
+            self.stack[off..off + len].to_vec()
         };
         let mut tmp = [0u8; 8];
         tmp[..len].copy_from_slice(&bytes);

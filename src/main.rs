@@ -18,6 +18,46 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Recompile a title (NSP/XCI/plaintext NCA/ExeFS dir/loose NSO, NRO, ELF) plus updates and
+    /// patches into a native C project, optionally compiling it.
+    Build {
+        /// Base content
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        #[arg(short, long)]
+        out: PathBuf,
+        /// Update content, applied in order (its ExeFS replaces the base ExeFS)
+        #[arg(long)]
+        update: Vec<PathBuf>,
+        /// IPS/IPS32/pchtxt patch files or directories of them
+        #[arg(long)]
+        patch: Vec<PathBuf>,
+        /// Plaintext RomFS image or extracted romfs/ directory (overrides the one found in the content)
+        #[arg(long)]
+        romfs: Option<PathBuf>,
+        /// Dumped add-on content: NSP/NCA with plaintext data NCAs, a RomFS image, or an extracted RomFS folder
+        #[arg(long)]
+        dlc: Vec<PathBuf>,
+        /// Android SDK folder for --compile android (defaults to ANDROID_HOME)
+        #[arg(long)]
+        android_sdk: Option<PathBuf>,
+        /// Renderer dependencies (scripts/build_android_deps.sh output) for NVN titles; defaults to BIFROST_ANDROID_DEPS
+        #[arg(long)]
+        android_deps: Option<PathBuf>,
+        /// File with extra code entry points (one hex address per line, e.g. bifrost_missing.txt)
+        #[arg(long)]
+        extra_entries: Vec<PathBuf>,
+        /// Compile after generation: none, native, windows (MinGW-w64) or android (NDK, produces an APK)
+        #[arg(long, alias = "target", default_value = "none")]
+        compile: String,
+    },
+    /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
+    #[command(hide = true)]
+    LiftWords {
+        #[arg(long, default_value = "0x10080000")]
+        pc: String,
+        words: Vec<String>,
+    },
     /// Show the format, imports, and how much of the code lifts
     Inspect {
         file: PathBuf,
@@ -60,6 +100,34 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<()> {
     match Cli::parse().cmd {
+        Cmd::LiftWords { pc, words } => lift_words(&pc, &words),
+        Cmd::Build {
+            inputs,
+            out,
+            update,
+            patch,
+            romfs,
+            dlc,
+            android_sdk,
+            android_deps,
+            extra_entries,
+            compile,
+        } => {
+            let opts = bifrost::pipeline::BuildOptions {
+                inputs,
+                updates: update,
+                patches: patch,
+                dlc,
+                romfs,
+                extra_entries,
+                out,
+                target: compile.parse()?,
+                android_sdk,
+                android_deps,
+                ..Default::default()
+            };
+            build(&opts)
+        }
         Cmd::Inspect { file, disasm } => inspect(&file, disasm),
         Cmd::Recompile { file, out } => recompile(&file, &out),
         Cmd::Run {
@@ -109,11 +177,7 @@ fn recompile(file: &std::path::Path, out: &std::path::Path) -> anyhow::Result<()
     let module = bifrost::load_path(file).with_context(|| format!("loading {}", file.display()))?;
     let lifted = bifrost::lift(&module);
     let report = bifrost::emit(&module, &lifted, out)?;
-    println!(
-        "wrote {} files to {}",
-        report.files.len(),
-        out.display()
-    );
+    println!("wrote {} files to {}", report.files.len(), out.display());
     println!(
         "lifted {} instructions, {} unsupported, {} imports",
         report.lifted, report.unsupported, report.imports
@@ -162,6 +226,51 @@ fn run_module(
 }
 
 fn parse_hex(text: &str) -> anyhow::Result<u64> {
-    let text = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")).unwrap_or(text);
+    let text = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
     u64::from_str_radix(text, 16).with_context(|| format!("expected hex, found {text}"))
+}
+
+fn lift_words(pc: &str, words: &[String]) -> anyhow::Result<()> {
+    use bifrost::lift::decode::{decode, Op};
+    let pc = parse_hex(pc)?;
+    for w in words {
+        let word = u32::from_str_radix(w.trim_start_matches("0x"), 16)?;
+        let text = match decode(word, pc) {
+            Op::C(s) => format!("C\t{s}"),
+            other => format!("X\t{other:?}"),
+        };
+        println!("{word:08x}\t{text}");
+    }
+    Ok(())
+}
+
+fn build(opts: &bifrost::pipeline::BuildOptions) -> anyhow::Result<()> {
+    use bifrost::pipeline::Event;
+    let mut last = String::new();
+    let result = bifrost::pipeline::run(opts, &mut |ev| match ev {
+        Event::Progress(_, step)
+            if step != last
+                && !step.contains("compiled")
+                && !step.starts_with("Copying")
+                && !step.starts_with("Packing") =>
+        {
+            eprintln!("[bifrost] {step}");
+            last = step;
+        }
+        Event::Progress(..) => {}
+        Event::Log(line) => println!("{line}"),
+    })?;
+    let r = &result.report;
+    println!(
+        "{}: {} functions, {} instructions ({} unsupported), {} jump tables, {} imports resolved, {} unresolved, {} C units",
+        result.title, r.functions, r.instructions, r.unsupported, r.jump_tables, r.resolved_imports, r.imports, r.units
+    );
+    println!("wrote {}", result.project.display());
+    if let Some(a) = &result.artifact {
+        println!("built {}", a.display());
+    }
+    Ok(())
 }

@@ -3,14 +3,21 @@
 //! request keys for NSP, XCI, or NCA containers.
 
 mod analysis;
+pub mod android;
+pub mod codegen;
 mod disasm;
 mod emit;
 mod error;
 mod format;
 mod hos;
+pub mod intake;
 mod interp;
-mod lift;
+pub mod lift;
+pub mod link;
 mod module;
+pub mod pipeline;
+pub mod project;
+pub mod romfs;
 
 pub use disasm::disassemble;
 pub use emit::{emit, report_text, EmitReport};
