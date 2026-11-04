@@ -2,14 +2,14 @@
 
 Bifrost is a universal recompilation tool. You give it a game for one platform, plus any updates, patches and DLC, and it rebuilds that game as a native program for another platform. It recompiles the code ahead of time instead of emulating it.
 
-Bifrost has four targets. Switch → Windows and Switch → Android are in progress; Windows → Android and the Modernizer are planned.
+Bifrost has four targets. Switch → Windows, Switch → Android and the Modernizer are in progress; Windows → Android is planned.
 
 | Target | What it does | Progress |
 |---|---|---|
 | **Switch → Windows** | Recompiles a Switch title into a Windows `.exe` | `█████▌░░░░` 5.5 / 10 stages |
 | **Switch → Android** | Recompiles a Switch title into an arm64 APK with a Vulkan renderer | `█████░░░░░` 5.5 / 11 stages |
 | **Windows → Android** | Recompiles an x86/x64 Windows game into an arm64 APK | `░░░░░░░░░░` 0 / 8 stages |
-| **Modernizer** | Updates an old Windows game (XP / Windows 7 era) to run better on current Windows and hardware | `░░░░░░░░░░` 0 / 7 stages |
+| **Modernizer** | Updates an old Windows game (XP / Windows 7 era) to run better on current Windows and hardware | `███░░░░░░░` 2 / 7 stages |
 
 The stage counts come from the checklists below: ✅ counts as 1, 🟡 (partly done) counts as ½ and ⬜ counts as 0. "Validated on a real title" is its own stage, and no target has reached it yet. All testing so far has used small test programs written for Bifrost.
 
@@ -63,23 +63,36 @@ Planned. Nothing is built yet.
 
 ### Modernizer
 
-Planned. Nothing is built yet.
+First version built: pick **Modernize** in the desktop app, or run `bifrost modernize`. It has only been tested on small test games built with MinGW, not on a real title yet.
 
 The Modernizer takes an older Windows game (Windows XP / Windows 7 era) and rebuilds or wraps its files so that it runs properly on current Windows. It can also add newer technology the game never shipped with, such as upscaling. The reference title is ***The Hobbit* (2003)**.
 
 | Stage | Status |
 |---|---|
-| Intake: the game's install folder (`.exe`, DLLs, data files) and which graphics, audio and input APIs it imports | ⬜ |
-| Compatibility fixes: modern resolutions and widescreen, high-DPI, frame-rate caps, timing bugs on fast CPUs | ⬜ |
-| Graphics: older Direct3D versions translated to a modern API (Vulkan or D3D11/12) | ⬜ |
+| Intake: the game's install folder (`.exe`, DLLs, data files) and which graphics, audio and input APIs it imports | ✅ main `.exe` detected automatically (installers and uninstallers skipped); imports read from the `.exe` and the DLLs beside it |
+| Compatibility fixes: modern resolutions and widescreen, high-DPI, frame-rate caps, timing bugs on fast CPUs | 🟡 high-DPI override, fullscreen optimizations off, XP SP3 mode, frame-rate cap, Large Address Aware patch; no widescreen or timing fixes yet |
+| Graphics: older Direct3D versions translated to a modern API (Vulkan or D3D11/12) | 🟡 Direct3D 8, 9, 10 and 11 → Vulkan through DXVK 3.1.1, with forced anisotropic filtering; DirectDraw, OpenGL and Glide not yet |
 | Upscaling: spatial upscalers (FSR 1, NVIDIA Image Scaling) | ⬜ |
 | Upscaling: NVIDIA DLSS | ⬜ |
 | Input and audio: XInput controller support, a replacement for legacy DirectSound/EAX audio | ⬜ |
 | Validated on *The Hobbit* (2003) | ⬜ |
 
+The original install is never changed. The Modernizer copies the game to an output folder and changes only the copy:
+- **Large Address Aware:** sets the flag on a 32-bit `.exe` so it can use 4 GB of memory instead of 2 GB (the PE checksum is updated too).
+- **DXVK:** the matching 32- or 64-bit DLLs go next to the `.exe`, with DXVK's license. The release is downloaded once from GitHub, checked against its SHA-256 and cached; `--dxvk` uses a local copy instead.
+- **`dxvk.conf`:** anisotropic filtering and the frame-rate cap.
+- **`bifrost_compat.bat`:** writes the Windows compatibility settings for the copied `.exe` (`bifrost_compat_undo.bat` removes them). The app can also apply them directly on Windows.
+- **`bifrost_modernize.txt`:** a report of what was detected and changed.
+
+In the app, FSR 1 and DLSS are shown but can't be selected yet.
+
 **About DLSS.** Copying NVIDIA's DLSS DLL (`nvngx_dlss.dll`) into the game folder does nothing on its own. The game has to call DLSS every frame and pass it a depth buffer, per-pixel motion vectors and camera jitter. A 2003 game doesn't produce motion vectors, so the Modernizer's graphics layer would have to generate them before DLSS can work. Spatial upscalers (FSR 1, NIS) only need the final image, so they will come first. The DLSS DLL comes from NVIDIA's DLSS SDK under NVIDIA's license, and DLSS needs an NVIDIA RTX GPU.
 
 ## Using Bifrost
+
+### Download
+
+Each GitHub Release (tags `v*`) has a Windows zip with `bifrost-gui.exe` (the desktop app) and `bifrost.exe` (the command line), built by `.github/workflows/release.yml`. Every pull request's **Release** run uploads the same zip as a workflow artifact. Recomp's compile step still needs a C toolchain (MinGW-w64 or clang, or the Android SDK/NDK) installed.
 
 ### Desktop app
 
@@ -87,10 +100,18 @@ The Modernizer takes an older Windows game (Windows XP / Windows 7 era) and rebu
 cargo run --release -p bifrost-gui
 ```
 
+First choose the task: **Recomp** or **Modernize**.
+
+**Recomp**
 1. Pick the input system (Switch for now) and the output system (Windows or Android).
 2. Choose the base game. You can also add updates, patches and a RomFS.
 3. Turn on the DLC toggle to attach dumped DLC.
 4. Press **Begin Recomp**. A progress bar and a log follow the build from intake through linking, lifting, code generation and compiling or packaging.
+
+**Modernize**
+1. Choose the game's install folder or its `.exe`. The app shows the detected game executable (you can pick another) and the APIs it uses.
+2. Choose the options: DXVK, anisotropic filtering, frame-rate cap, Large Address Aware and the Windows compatibility settings.
+3. Choose an empty output folder (or the previous output of the same game, which is updated in place so saves and edited settings are kept) and press **Begin Modernization**.
 
 ### Command line
 
@@ -99,6 +120,12 @@ bifrost build game.nsp --update update.nsp --patch mods/ --dlc dlc/ -o out --com
 bifrost build game.nsp --romfs romfs/ -o out --compile android --android-sdk ~/android-sdk --android-deps ~/.bifrost/android-deps/out
 ```
 
+```
+bifrost modernize "C:\Games\The Hobbit" --scan
+bifrost modernize "C:\Games\The Hobbit" -o "C:\Games\The Hobbit (Modernized)" --max-fps 60
+```
+
+- `modernize` options: `--exe`, `--no-dxvk`, `--dxvk <release.tar.gz|folder>`, `--anisotropy 0|2|4|8|16`, `--max-fps`, `--no-laa`, `--no-high-dpi`, `--keep-fullscreen-optimizations`, `--xp-mode`, `--apply-compat`.
 - `--compile` takes `none`, `native`, `windows` (MinGW-w64) or `android` (NDK; produces a signed APK).
 - Titles that draw through NVN get the Vulkan renderer when `--android-deps` (or `BIFROST_ANDROID_DEPS`) points at the output of `scripts/build_android_deps.sh`. That output includes SDL3, shaderc, the Vulkan headers, VMA and volk.
 - `inspect`, `recompile` and `run` are older developer commands that still use the original interpreter path.
@@ -142,12 +169,14 @@ If the program reaches code that static discovery missed, it writes the address 
 - A full program check (`tests/e2e/run.sh`) compiles a freestanding AArch64 guest. It covers recursion, switch tables, FP, auto-vectorized SIMD, indirect calls and atomics.
   - The guest is run through Bifrost four ways: as a loose ELF, an ExeFS PFS0, an NSP, and a Windows build under Wine.
   - Output and exit code must match `qemu-aarch64` exactly.
+- The Modernizer check (`tests/e2e/modernize.sh`) builds a 32-bit Direct3D 8 game (drawing from an engine DLL) and a 64-bit Direct3D 11 game with MinGW and modernizes both. It checks the LAA flag and checksum, the DXVK DLLs, `dxvk.conf`, the compatibility script, and that the originals are untouched.
 - No commercial title has been run yet.
 
 ```
 cargo test && cargo clippy --workspace --all-targets
 python3 tests/diff/diff.py --count 2000 dpimm dpreg ldst fp simd   # needs unicorn, capstone, clang
 tests/e2e/run.sh   # needs aarch64-linux-gnu-gcc, qemu-aarch64; optional mingw-w64 + wine
+tests/e2e/modernize.sh   # needs mingw-w64; downloads DXVK once
 ```
 
 ## References

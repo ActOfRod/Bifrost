@@ -51,6 +51,48 @@ enum Cmd {
         #[arg(long, alias = "target", default_value = "none")]
         compile: String,
     },
+    /// Modernize an older Windows game: writes an updated copy (DXVK, Large Address Aware, compatibility settings) and
+    /// leaves the original install untouched.
+    Modernize {
+        /// Game install folder, or the game's .exe
+        game: PathBuf,
+        /// Output folder for the modernized copy (must be empty or a previous Modernizer output)
+        #[arg(short, long, required_unless_present = "scan")]
+        out: Option<PathBuf>,
+        /// Only report the detected executable and APIs; write nothing
+        #[arg(long)]
+        scan: bool,
+        /// Main executable, relative to the game folder (detected when omitted)
+        #[arg(long)]
+        exe: Option<PathBuf>,
+        /// Use this DXVK release (.tar.gz or extracted folder) instead of downloading DXVK
+        #[arg(long, conflicts_with = "no_dxvk")]
+        dxvk: Option<PathBuf>,
+        /// Leave Direct3D alone (no DXVK)
+        #[arg(long)]
+        no_dxvk: bool,
+        /// Forced anisotropic filtering: 0 (game default), 2, 4, 8 or 16. Needs DXVK
+        #[arg(long, default_value_t = 16, value_parser = parse_anisotropy)]
+        anisotropy: u32,
+        /// Frame-rate cap (0 = none). Needs DXVK
+        #[arg(long, default_value_t = 0)]
+        max_fps: u32,
+        /// Don't apply the Large Address Aware patch
+        #[arg(long)]
+        no_laa: bool,
+        /// Don't override high-DPI scaling
+        #[arg(long)]
+        no_high_dpi: bool,
+        /// Keep Windows fullscreen optimizations
+        #[arg(long)]
+        keep_fullscreen_optimizations: bool,
+        /// Run in Windows XP SP3 compatibility mode
+        #[arg(long)]
+        xp_mode: bool,
+        /// Apply the compatibility settings to this user's registry now (Windows only)
+        #[arg(long)]
+        apply_compat: bool,
+    },
     /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
     #[command(hide = true)]
     LiftWords {
@@ -127,6 +169,46 @@ fn run() -> anyhow::Result<()> {
                 ..Default::default()
             };
             build(&opts)
+        }
+        Cmd::Modernize {
+            game,
+            out,
+            scan,
+            exe,
+            dxvk,
+            no_dxvk,
+            anisotropy,
+            max_fps,
+            no_laa,
+            no_high_dpi,
+            keep_fullscreen_optimizations,
+            xp_mode,
+            apply_compat,
+        } => {
+            use bifrost::modernize::{Compat, DxvkSource, ModernizeOptions};
+            if scan {
+                return modernize_scan(&game);
+            }
+            let opts = ModernizeOptions {
+                game,
+                exe,
+                out: out.expect("clap requires --out"),
+                dxvk: match (no_dxvk, dxvk) {
+                    (true, _) => None,
+                    (false, Some(p)) => Some(DxvkSource::Local(p)),
+                    (false, None) => Some(DxvkSource::Download),
+                },
+                anisotropy,
+                max_fps,
+                large_address_aware: !no_laa,
+                compat: Compat {
+                    high_dpi: !no_high_dpi,
+                    disable_fullscreen_optimizations: !keep_fullscreen_optimizations,
+                    xp_mode,
+                },
+                apply_compat,
+            };
+            modernize(&opts)
         }
         Cmd::Inspect { file, disasm } => inspect(&file, disasm),
         Cmd::Recompile { file, out } => recompile(&file, &out),
@@ -273,4 +355,45 @@ fn build(opts: &bifrost::pipeline::BuildOptions) -> anyhow::Result<()> {
         println!("built {}", a.display());
     }
     Ok(())
+}
+
+fn modernize_scan(game: &std::path::Path) -> anyhow::Result<()> {
+    use bifrost::modernize::{detect_apis, scan};
+    let sc = scan(game)?;
+    for (i, e) in sc.exes.iter().enumerate() {
+        let mark = if Some(i) == sc.main { "*" } else { " " };
+        let laa = if e.info.large_address_aware { ", large address aware" } else { "" };
+        println!("{mark} {} ({}{laa})", e.path.display(), e.info.arch.label());
+    }
+    let main = &sc.exes[sc.main.unwrap()];
+    let apis = detect_apis(&sc.root, &main.path);
+    println!("APIs used by {}:", main.path.display());
+    for (api, files) in &apis.apis {
+        let names: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
+        println!("  {} ({})", api.label(), names.join(", "));
+    }
+    Ok(())
+}
+
+fn modernize(opts: &bifrost::modernize::ModernizeOptions) -> anyhow::Result<()> {
+    use bifrost::pipeline::Event;
+    let mut last = String::new();
+    let result = bifrost::modernize::run(opts, &mut |ev| match ev {
+        Event::Progress(_, step) if step != last => {
+            eprintln!("[bifrost] {step}");
+            last = step;
+        }
+        Event::Progress(..) => {}
+        Event::Log(line) => println!("{line}"),
+    })?;
+    println!("wrote {}", result.out.display());
+    println!("run {}", result.exe.display());
+    Ok(())
+}
+
+fn parse_anisotropy(s: &str) -> Result<u32, String> {
+    match s.parse() {
+        Ok(n @ (0 | 2 | 4 | 8 | 16)) => Ok(n),
+        _ => Err("expected 0, 2, 4, 8 or 16".into()),
+    }
 }

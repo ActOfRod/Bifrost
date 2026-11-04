@@ -15,6 +15,7 @@ mod interp;
 pub mod lift;
 pub mod link;
 mod module;
+pub mod modernize;
 pub mod pipeline;
 pub mod project;
 pub mod romfs;

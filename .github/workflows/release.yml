@@ -1,0 +1,37 @@
+name: Release
+# Builds the Windows executables (bifrost.exe CLI + bifrost-gui.exe desktop app). Pushing a v* tag publishes them as a
+# GitHub Release; pull requests and manual runs upload them as a workflow artifact.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --workspace --locked
+      - name: Smoke test
+        run: target/release/bifrost.exe --help
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $d = "bifrost-$v-windows-x64"
+          New-Item -ItemType Directory $d | Out-Null
+          Copy-Item target/release/bifrost.exe, target/release/bifrost-gui.exe, README.md $d
+          Compress-Archive -Path $d -DestinationPath "$d.zip"
+          "PKG=$d" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: ${{ env.PKG }}.zip
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PKG }}.zip
+          generate_release_notes: true
