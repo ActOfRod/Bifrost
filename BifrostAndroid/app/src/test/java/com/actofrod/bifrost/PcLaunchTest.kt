@@ -1,6 +1,7 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -40,6 +41,18 @@ class PcLaunchTest {
             assertEquals(gameDirectory.canonicalFile, resolveGameDirectory(filesDirectory, gameDirectory.absolutePath))
         } finally {
             filesDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun resolvesOnlyPrimaryExternalStorageDocumentIds() {
+        val root = Files.createTempDirectory("bifrost-primary-storage").toFile()
+        try {
+            assertEquals(File(root, "Android/data/game").canonicalFile, resolvePrimaryStoragePath("primary:Android/data/game", root))
+            assertEquals(null, resolvePrimaryStoragePath("0123-4567:game", root))
+            assertEquals(null, resolvePrimaryStoragePath("primary:../../outside", root))
+        } finally {
+            root.deleteRecursively()
         }
     }
 }

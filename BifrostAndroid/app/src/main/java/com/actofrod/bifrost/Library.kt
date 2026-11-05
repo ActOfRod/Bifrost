@@ -12,8 +12,8 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-private const val DEFAULT_MIN_FREE_BYTES = 512L * 1024 * 1024
-private const val STORAGE_CHECK_INTERVAL_BYTES = 64L * 1024 * 1024
+internal const val DEFAULT_MIN_FREE_BYTES = 512L * 1024 * 1024
+internal const val STORAGE_CHECK_INTERVAL_BYTES = 64L * 1024 * 1024
 
 @Serializable
 enum class Kind { NATIVE, PC }
@@ -32,6 +32,7 @@ data class LibraryEntry(
     val addedAt: Long,
     val lastPlayed: Long? = null,
     val containerId: Int? = null,
+    val controlsProfileId: Int? = null,
 )
 
 @Serializable
@@ -102,6 +103,10 @@ internal fun isSafeRelativePath(name: String): Boolean =
         !name.split('/').any { it == ".." || it == "." || it.isEmpty() } &&
         !name.substringBefore('/').contains(':')
 
+internal fun requireFreeStorage(availableBytes: Long, minFreeBytes: Long) {
+    if (availableBytes < minFreeBytes) throw IOException("Not enough free storage to import this game")
+}
+
 private fun validateEntry(name: String, root: File): File {
     val normalized = name.removeSuffix("/")
     if (!isSafeRelativePath(normalized)) throw IOException("Unsafe archive path: $name")
@@ -135,9 +140,7 @@ fun extractBifrostPackage(
         var copied = 0L
         var bytesSinceSpaceCheck = 0L
         fun checkFreeSpace() {
-            if (freeSpace() < minFreeBytes) {
-                throw IOException("Not enough free storage to import this game")
-            }
+            requireFreeStorage(freeSpace(), minFreeBytes)
             bytesSinceSpaceCheck = 0L
         }
         fun accountCopied(count: Int) {
