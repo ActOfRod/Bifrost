@@ -243,7 +243,7 @@ private fun GameHubScreen(activity: MainActivity) {
     Row(Modifier.fillMaxSize().background(HubBackground)) {
         HubRail(activity, systems, Modifier.fillMaxHeight().width(82.dp))
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = if (compactLayout) 112.dp else 140.dp),
+            columns = GridCells.Adaptive(minSize = 128.dp),
             state = gridState,
             modifier = Modifier.weight(1f).fillMaxHeight().padding(
                 end = 20.dp,
@@ -397,18 +397,17 @@ private fun HubRail(activity: MainActivity, systems: List<LauncherSystem>, modif
     Column(
         modifier.clip(RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp))
             .background(Color(0xCC101623))
-            .padding(vertical = 8.dp),
+            .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Column(
-            Modifier.fillMaxWidth().height(58.dp),
+            Modifier.fillMaxWidth().height(36.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            Text("✦", color = HubAccent, fontSize = 26.sp, fontWeight = FontWeight.Black)
-            Text("BIFROST", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+            Text("✦", color = HubAccent, fontSize = 18.sp, fontWeight = FontWeight.Black)
+            Text("BIFROST", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         }
-        Spacer(Modifier.height(4.dp))
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             items(railItems, key = { it.id }) { item ->
                 val selected = item.id == activity.selectedRail
@@ -470,11 +469,11 @@ private fun RailItemSlot(
     onClick: () -> Unit,
 ) {
     val scale by animateFloatAsState(if (selected) 1.08f else 1f, spring(), label = "rail-scale")
-    Box(Modifier.fillMaxWidth().height(64.dp)) {
+    Box(Modifier.fillMaxWidth().height(56.dp)) {
         if (selected) {
             Box(
                 Modifier.align(Alignment.CenterStart).padding(start = 4.dp)
-                    .width(4.dp).height(34.dp).clip(CircleShape).background(HubAccent),
+                    .width(4.dp).height(30.dp).clip(CircleShape).background(HubAccent),
             )
         }
         Column(
@@ -483,7 +482,7 @@ private fun RailItemSlot(
             verticalArrangement = Arrangement.Center,
         ) {
             Box(
-                Modifier.size(36.dp).graphicsLayer { scaleX = scale; scaleY = scale }
+                Modifier.size(32.dp).graphicsLayer { scaleX = scale; scaleY = scale }
                     .clip(RoundedCornerShape(10.dp))
                     .background(if (selected) HubAccent.copy(alpha = 0.16f) else Color.Transparent),
                 contentAlignment = Alignment.Center,
@@ -494,7 +493,7 @@ private fun RailItemSlot(
                     Text(
                         if (icon.isEmpty()) label.take(1).uppercase() else icon,
                         color = accent?.let(::Color) ?: if (selected) HubAccent else HubMuted,
-                        fontSize = 20.sp,
+                        fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -503,7 +502,7 @@ private fun RailItemSlot(
                 label,
                 Modifier.padding(horizontal = 1.dp),
                 color = if (selected) Color.White else HubMuted,
-                fontSize = 11.sp,
+                fontSize = 10.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -756,7 +755,7 @@ private fun CoverTile(
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .focusable(),
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(0.72f)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f)) {
             HubArtwork(entry.cover, Modifier.fillMaxSize(), ContentScale.Crop, entry.title)
             Box(
                 Modifier.align(Alignment.BottomStart).fillMaxWidth()
@@ -767,7 +766,7 @@ private fun CoverTile(
                     entry.title,
                     color = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
