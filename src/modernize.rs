@@ -187,6 +187,7 @@ pub enum Api {
     Direct3D9,
     Direct3D10,
     Direct3D11,
+    Direct3D12,
     Dxgi,
     OpenGl,
     Glide,
@@ -204,6 +205,7 @@ impl Api {
             "d3d9.dll" => Api::Direct3D9,
             "d3d10.dll" | "d3d10_1.dll" | "d3d10core.dll" => Api::Direct3D10,
             "d3d11.dll" => Api::Direct3D11,
+            "d3d12.dll" => Api::Direct3D12,
             "dxgi.dll" => Api::Dxgi,
             "opengl32.dll" => Api::OpenGl,
             "glide.dll" | "glide2x.dll" | "glide3x.dll" => Api::Glide,
@@ -223,6 +225,7 @@ impl Api {
             Api::Direct3D9 => "Direct3D 9",
             Api::Direct3D10 => "Direct3D 10",
             Api::Direct3D11 => "Direct3D 11",
+            Api::Direct3D12 => "Direct3D 12",
             Api::Dxgi => "DXGI",
             Api::OpenGl => "OpenGL",
             Api::Glide => "3dfx Glide",
@@ -1358,7 +1361,12 @@ impl Job<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ddraw_ini, fsr_ini, play_ini, uses_legacy_d3d, DsoalMode, ModernizeOptions, Upscale};
+    use super::{ddraw_ini, fsr_ini, play_ini, uses_legacy_d3d, Api, DsoalMode, ModernizeOptions, Upscale};
+
+    #[test]
+    fn detects_direct3d12_api_label() {
+        assert_eq!(Api::from_dll("d3d12.dll").unwrap().label(), "Direct3D 12");
+    }
 
     #[test]
     fn detects_direct3d7_interface_id_bytes() {

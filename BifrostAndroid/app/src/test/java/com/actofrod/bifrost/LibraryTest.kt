@@ -2,6 +2,7 @@ package com.actofrod.bifrost
 
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
@@ -56,6 +57,34 @@ class LibraryTest {
         } finally {
             temp.deleteRecursively()
         }
+    }
+
+    @Test
+    fun decodesLibraryEntriesWithoutControlsProfileId() {
+        val temp = Files.createTempDirectory("bifrost-old-library").toFile()
+        try {
+            val library = File(temp, "library.json")
+            library.writeText("""{"entries":[{"id":"old","kind":"PC","title":"Old game","addedAt":1}]}""")
+            val entry = LibraryStore(library).read().entries.single()
+            assertEquals("Old game", entry.title)
+            assertEquals(null, entry.controlsProfileId)
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun resolvesStaleEntryFromCurrentLibrarySnapshot() {
+        val current = LibraryEntry(
+            id = "game",
+            kind = Kind.PC,
+            title = "Game",
+            addedAt = 1,
+            controlsProfileId = 7,
+        )
+        val stale = current.copy(controlsProfileId = null)
+
+        assertEquals(current, LibrarySnapshot(entries = listOf(current)).currentEntry(stale))
     }
 
     @Test

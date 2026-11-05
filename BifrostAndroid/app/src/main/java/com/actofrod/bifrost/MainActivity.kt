@@ -1,6 +1,7 @@
 package com.actofrod.bifrost
 
 import android.app.PendingIntent
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -13,6 +14,8 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
@@ -22,11 +25,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,16 +42,19 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -54,6 +62,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -79,11 +89,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.winlator.XServerDisplayActivity
 import com.winlator.container.Container
 import com.winlator.container.ContainerManager
 import com.winlator.container.DXWrappers
+import com.winlator.inputcontrols.ControlsProfile
+import com.winlator.inputcontrols.InputControlsManager
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -114,11 +127,22 @@ internal enum class Page { HOME, DETAIL }
 internal enum class Tab { ALL, NATIVE, PC }
 
 internal data class InstalledApp(val packageName: String, val label: String, val isBifrostPort: Boolean)
+internal data class FolderSelection(val uri: Uri, val inPlaceRoot: File?, val folderName: String)
+internal data class FolderCandidate(
+    val id: String,
+    val gameDir: String,
+    val root: File,
+    val scan: PeScanResult,
+    val copied: Boolean,
+    val defaultTitle: String,
+)
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: LibraryStore
     private lateinit var apkPicker: ActivityResultLauncher<Array<String>>
     private lateinit var packagePicker: ActivityResultLauncher<Array<String>>
+    private lateinit var folderPicker: ActivityResultLauncher<Uri?>
+    private lateinit var storagePermissionRequest: ActivityResultLauncher<Array<String>>
     private lateinit var unknownAppsSettings: ActivityResultLauncher<Intent>
     internal var snapshot by mutableStateOf(LibrarySnapshot())
     internal var page by mutableStateOf(Page.HOME)
@@ -129,6 +153,13 @@ class MainActivity : ComponentActivity() {
     internal var confirmRemove by mutableStateOf<LibraryEntry?>(null)
     internal var message by mutableStateOf<String?>(null)
     internal var importBytes by mutableStateOf<Long?>(null)
+    internal var importTitle by mutableStateOf("Importing game")
+    internal var folderChoice by mutableStateOf<FolderSelection?>(null)
+    internal var folderCandidate by mutableStateOf<FolderCandidate?>(null)
+    internal var folderTitle by mutableStateOf("")
+    internal var folderExeIndex by mutableStateOf(0)
+    internal var folderCopyChoice by mutableStateOf(false)
+    internal var folderAddInProgress by mutableStateOf(false)
     internal var showRuntimeInstallDialog by mutableStateOf(false)
     internal var runtimeInstallProgress by mutableStateOf<Int?>(null)
     internal var runtimeInstallError by mutableStateOf<String?>(null)
@@ -159,6 +190,12 @@ class MainActivity : ComponentActivity() {
         packagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) importPackage(uri)
         }
+        folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) onGameFolderPicked(uri)
+        }
+        storagePermissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            folderPicker.launch(null)
+        }
         unknownAppsSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             installPendingApk()
         }
@@ -188,7 +225,9 @@ class MainActivity : ComponentActivity() {
 
     private fun cleanupOrphanedLibraryFiles(snapshotLoaded: Boolean) {
         val gameDirectory = File(filesDir, "games")
-        val gameIds = snapshot.entries.filter { it.kind == Kind.PC }.map { it.id }.toSet()
+        val gameIds = snapshot.entries.filter {
+            it.kind == Kind.PC && it.gameDir?.let { path -> !File(path).isAbsolute } == true
+        }.map { it.id }.toSet()
         gameDirectory.listFiles()?.filter {
             it.isDirectory && (it.name.endsWith(".partial") || (snapshotLoaded && it.name !in gameIds))
         }?.forEach { it.deleteRecursively() }
@@ -313,7 +352,152 @@ class MainActivity : ComponentActivity() {
     fun openAddMenu() { showAddMenu = true }
     fun pickApk() { showAddMenu = false; apkPicker.launch(arrayOf("application/vnd.android.package-archive")) }
     fun pickPackage() { showAddMenu = false; packagePicker.launch(arrayOf("*/*")) }
+    fun pickGameFolder() {
+        showAddMenu = false
+        if (Build.VERSION.SDK_INT >= 23 &&
+            (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
+        ) {
+            storagePermissionRequest.launch(arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            ))
+        } else {
+            folderPicker.launch(null)
+        }
+    }
     fun showInstalledApps() { showAddMenu = false; installedApps = listInstalledApps() }
+
+    @Suppress("DEPRECATION")
+    private fun onGameFolderPicked(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+        val root = runCatching {
+            resolvePrimaryStoragePath(
+                DocumentsContract.getTreeDocumentId(uri),
+                Environment.getExternalStorageDirectory(),
+            )
+        }.getOrNull()?.takeIf {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+                it.isDirectory && it.canRead()
+        }
+        folderCopyChoice = root == null
+        val folderName = root?.name
+            ?: runCatching { DocumentFile.fromTreeUri(this, uri)?.name }.getOrNull().orEmpty()
+        folderChoice = FolderSelection(uri, root, folderName.ifBlank { "Windows game" })
+    }
+
+    internal fun playFromSelectedFolder() {
+        val selection = folderChoice ?: return
+        val root = selection.inPlaceRoot ?: return
+        folderChoice = null
+        lifecycleScope.launch {
+            try {
+                if (':' in root.absolutePath) throw IllegalArgumentException(
+                    "This folder path contains ':', which Winlator cannot map as a game drive. Choose a folder without ':' in its path.",
+                )
+                val scan = withContext(Dispatchers.IO) { PeScan.scan(root) }
+                val id = UUID.randomUUID().toString()
+                folderTitle = selection.folderName
+                folderExeIndex = scan.mainIndex
+                folderCandidate = FolderCandidate(
+                    id,
+                    root.canonicalPath,
+                    root,
+                    scan,
+                    copied = false,
+                    defaultTitle = selection.folderName,
+                )
+            } catch (error: Exception) {
+                message = error.message ?: "Could not scan the selected game folder"
+            }
+        }
+    }
+
+    internal fun copySelectedFolder() {
+        val selection = folderChoice ?: return
+        folderChoice = null
+        lifecycleScope.launch {
+            importTitle = "Copying game folder"
+            importBytes = 0L
+            var copiedFolder: File? = null
+            val id = UUID.randomUUID().toString()
+            try {
+                val directory = withContext(Dispatchers.IO) {
+                    copyGameFolder(this@MainActivity, selection.uri, File(filesDir, "games"), id) { bytes ->
+                        runOnUiThread { importBytes = bytes }
+                    }
+                }
+                copiedFolder = directory
+                val scan = withContext(Dispatchers.IO) { PeScan.scan(directory) }
+                folderTitle = selection.folderName
+                folderExeIndex = scan.mainIndex
+                folderCandidate = FolderCandidate(
+                    id,
+                    id,
+                    directory,
+                    scan,
+                    copied = true,
+                    defaultTitle = selection.folderName,
+                )
+            } catch (error: Exception) {
+                copiedFolder?.deleteRecursively()
+                message = error.message ?: "Could not copy the selected game folder"
+            } finally {
+                importBytes = null
+            }
+        }
+    }
+
+    internal fun addSelectedFolder() {
+        val candidate = folderCandidate ?: return
+        if (folderAddInProgress) return
+        if (':' in candidate.root.absolutePath) {
+            message = "This folder path contains ':', which Winlator cannot map as a game drive. Choose a folder without ':' in its path."
+            return
+        }
+        val exe = candidate.scan.executables.getOrNull(folderExeIndex) ?: return
+        val title = folderTitle.trim().ifEmpty { candidate.defaultTitle }
+        folderAddInProgress = true
+        lifecycleScope.launch {
+            try {
+                val apis = withContext(Dispatchers.IO) { PeScan.detectApis(candidate.root, exe.path) }
+                val entry = LibraryEntry(
+                    id = candidate.id,
+                    kind = Kind.PC,
+                    title = title,
+                    gameDir = candidate.gameDir,
+                    exe = exe.path,
+                    arch = exe.arch,
+                    apis = apis,
+                    addedAt = System.currentTimeMillis(),
+                )
+                if (persist(snapshot.copy(entries = snapshot.entries + entry))) {
+                    folderCandidate = null
+                    page = Page.HOME
+                    selected = null
+                    message = "Added ${entry.title}"
+                } else {
+                    if (candidate.copied) candidate.root.deleteRecursively()
+                    folderCandidate = null
+                }
+            } catch (error: Exception) {
+                message = error.message ?: "Could not scan the selected game folder"
+            } finally {
+                folderAddInProgress = false
+            }
+        }
+    }
+
+    internal fun cancelFolderCandidate() {
+        folderCandidate?.takeIf { it.copied }?.root?.deleteRecursively()
+        folderCandidate = null
+        folderChoice = null
+    }
 
     internal fun addInstalledApp(app: InstalledApp) {
         val icon = runCatching { packageManager.getApplicationIcon(app.packageName) }.getOrNull()
@@ -522,13 +706,20 @@ class MainActivity : ComponentActivity() {
 
     fun play(entry: LibraryEntry) {
         if (entry.kind == Kind.PC) {
-            if (WindowsRuntime.isInstalled(this)) {
-                lifecycleScope.launch { launchPcEntry(entry) }
-            } else {
-                pendingPcEntry = entry
-                runtimeInstallProgress = null
-                runtimeInstallError = null
-                showRuntimeInstallDialog = true
+            lifecycleScope.launch {
+                try {
+                    val profiledEntry = ensureControlsProfile(entry)
+                    if (WindowsRuntime.isInstalled(this@MainActivity)) {
+                        launchPcEntry(profiledEntry)
+                    } else {
+                        pendingPcEntry = profiledEntry
+                        runtimeInstallProgress = null
+                        runtimeInstallError = null
+                        showRuntimeInstallDialog = true
+                    }
+                } catch (error: Exception) {
+                    message = error.message ?: "Could not prepare controls for this game"
+                }
             }
             return
         }
@@ -577,56 +768,108 @@ class MainActivity : ComponentActivity() {
         pendingPcEntry = null
     }
 
+    internal fun openControls(entry: LibraryEntry) {
+        lifecycleScope.launch {
+            try {
+                val profiledEntry = ensureControlsProfile(entry)
+                startActivity(
+                    Intent(this@MainActivity, ControlsEditorActivity::class.java)
+                        .putExtra("entry_id", profiledEntry.id)
+                        .putExtra("controls_profile_id", profiledEntry.controlsProfileId),
+                )
+            } catch (error: Exception) {
+                message = error.message ?: "Could not open controls"
+            }
+        }
+    }
+
+    private fun ensureControlsProfile(entry: LibraryEntry): LibraryEntry {
+        val currentEntry = snapshot.currentEntry(entry)
+        if (currentEntry.kind != Kind.PC) return currentEntry
+        if (currentEntry.controlsProfileId != null) {
+            if (selected?.id == currentEntry.id && selected != currentEntry) selected = currentEntry
+            return currentEntry
+        }
+        val manager = InputControlsManager(this)
+        manager.getProfiles()
+        val profile = manager.createProfile(currentEntry.title)
+        val file = ControlsProfile.getProfileFile(this, profile.id)
+        try {
+            val current = if (file.isFile) ControlsDocument.parse(file.readText()) else ControlsDocument.create(profile.id, currentEntry.title)
+            val gamepad = assets.open("inputcontrols/profiles/controls-3.icp").bufferedReader().use {
+                ControlsDocument.parse(it.readText())
+            }
+            writeAtomically(file, File(filesDir, "controls-tmp"), current.applyPreset(gamepad).encode())
+            val profiledEntry = currentEntry.copy(controlsProfileId = profile.id)
+            val next = snapshot.copy(entries = snapshot.entries.map { if (it.id == currentEntry.id) profiledEntry else it })
+            if (!persist(next)) throw IllegalStateException("Could not save controls profile for this game")
+            if (selected?.id == profiledEntry.id) selected = profiledEntry
+            return profiledEntry
+        } catch (error: Throwable) {
+            manager.removeProfile(profile)
+            file.delete()
+            throw error
+        }
+    }
+
     private suspend fun launchPcEntry(entry: LibraryEntry) {
         try {
-            val gameDirPath = entry.gameDir ?: throw IllegalArgumentException("Game files are missing")
+            val launchEntry = ensureControlsProfile(entry)
+            val gameDirPath = launchEntry.gameDir ?: throw IllegalArgumentException("Game files are missing")
             val gameDir = resolveGameDirectory(filesDir, gameDirPath)
             if (!gameDir.isDirectory) throw IllegalArgumentException("Imported game files are missing")
 
-            val exe = entry.exe ?: throw IllegalArgumentException("Game executable is missing")
+            val exe = launchEntry.exe ?: throw IllegalArgumentException("Game executable is missing")
             val executable = File(gameDir, exe).canonicalFile
             if (!executable.path.startsWith(gameDir.path + File.separator) || !executable.isFile) {
                 throw IllegalArgumentException("Game executable is missing or invalid")
             }
 
             val manager = ContainerManager(this)
-            val existingContainer = entry.containerId?.let(manager::getContainerById)
+            val existingContainer = launchEntry.containerId?.let(manager::getContainerById)
             val createdContainer = existingContainer == null
             val container = if (existingContainer != null) {
                 existingContainer
             } else {
-                val drives = containerDrives(Container.DEFAULT_DRIVES, gameDir.absolutePath)
-                val wrapper = when (dxwrapperFor(entry.apis)) {
+                val drives = try {
+                    containerDrives(Container.DEFAULT_DRIVES, gameDir.absolutePath)
+                } catch (_: IllegalArgumentException) {
+                    throw IllegalArgumentException(
+                        "This game folder path contains ':', which Winlator cannot map as a drive. Choose a folder without ':' in its path.",
+                    )
+                }
+                val wrapper = when (dxwrapperFor(launchEntry.apis)) {
                     DXWrappers.VKD3D -> DXWrappers.VKD3D
                     DXWrappers.CNC_DDRAW -> DXWrappers.CNC_DDRAW
                     else -> DXWrappers.DXVK
                 }
                 val data = JSONObject().apply {
-                    put("name", entry.title)
+                    put("name", launchEntry.title)
                     put("drives", drives)
                     put("dxwrapper", wrapper)
                 }
                 createContainer(manager, data)
             }
 
-            if (snapshot.entries.none { it.id == entry.id }) {
+            if (snapshot.entries.none { it.id == launchEntry.id }) {
                 if (createdContainer) manager.removeContainerAsync(container) {}
                 return
             }
             val next = snapshot.copy(entries = snapshot.entries.map {
-                if (it.id == entry.id) it.copy(containerId = container.id, lastPlayed = System.currentTimeMillis()) else it
+                if (it.id == launchEntry.id) it.copy(containerId = container.id, lastPlayed = System.currentTimeMillis()) else it
             })
             val saved = persist(next)
             if (!saved && createdContainer) {
                 manager.removeContainerAsync(container) {}
                 return
             }
-            if (saved) selected = next.entries.firstOrNull { it.id == entry.id }
+            if (saved) selected = next.entries.firstOrNull { it.id == launchEntry.id }
 
             startActivity(
                 Intent(this, XServerDisplayActivity::class.java)
                     .putExtra("container_id", container.id)
-                    .putExtra("exec_path", executable.absolutePath),
+                    .putExtra("exec_path", executable.absolutePath)
+                    .putExtra("controls_profile_id", launchEntry.controlsProfileId ?: 0),
             )
         } catch (error: Exception) {
             message = error.message ?: "Could not launch PC game"
@@ -661,7 +904,14 @@ class MainActivity : ComponentActivity() {
                     manager.getContainerById(containerId)?.let { manager.removeContainerAsync(it) {} }
                 }
             }
-            File(filesDir, "games/${entry.id}").deleteRecursively()
+            runCatching {
+                val manager = InputControlsManager(this)
+                manager.getProfiles()
+                entry.controlsProfileId?.let(manager::getProfile)?.let(manager::removeProfile)
+            }
+            if (entry.gameDir == null || !File(entry.gameDir).isAbsolute) {
+                File(filesDir, "games/${entry.id}").deleteRecursively()
+            }
             entry.cover?.let { File(it).delete() }
         }
         confirmRemove = null
@@ -819,10 +1069,14 @@ private fun LauncherScreen(activity: MainActivity) {
             onDismissRequest = { activity.showAddMenu = false },
             title = { Text("Add to Bifrost") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     AddAction("Install APK…", "Choose an APK and confirm Android's install prompt", activity::pickApk)
                     AddAction("Add installed app…", "Browse apps already installed on this device", activity::showInstalledApps)
                     AddAction("Import PC game (.bifrost)…", "Import a package created on Windows by Bifrost", activity::pickPackage)
+                    AddAction("Add game folder", "A Windows game already on this phone", activity::pickGameFolder)
                 }
             },
             confirmButton = { TextButton(onClick = { activity.showAddMenu = false }) { Text("Close") } },
@@ -855,12 +1109,23 @@ private fun LauncherScreen(activity: MainActivity) {
         AlertDialog(
             onDismissRequest = { activity.confirmRemove = null },
             title = { Text("Remove ${entry.title}?") },
-            text = { Text(if (entry.kind == Kind.PC) "This deletes the imported game files from Bifrost." else "Remove this app from the Bifrost library?") },
+            text = {
+                Text(
+                    when {
+                        entry.kind != Kind.PC -> "Remove this app from the Bifrost library?"
+                        entry.gameDir?.let { File(it).isAbsolute } == true ->
+                            "Remove this game from the Bifrost library. Its folder and files on this phone will be left untouched."
+                        else -> "This removes the game from the library and deletes its copied files from Bifrost."
+                    },
+                )
+            },
             confirmButton = {
                 if (entry.kind == Kind.NATIVE) {
                     TextButton(onClick = { activity.removeEntry(entry, uninstall = true) }) { Text("Uninstall app") }
                 } else {
-                    TextButton(onClick = { activity.removeEntry(entry) }) { Text("Delete files") }
+                    TextButton(onClick = { activity.removeEntry(entry) }) {
+                        Text(if (entry.gameDir?.let { File(it).isAbsolute } == true) "Remove from library" else "Delete files")
+                    }
                 }
             },
             dismissButton = {
@@ -907,9 +1172,95 @@ private fun LauncherScreen(activity: MainActivity) {
     activity.importBytes?.let { bytes ->
         AlertDialog(
             onDismissRequest = {},
-            title = { Text("Importing game") },
+            title = { Text(activity.importTitle) },
             text = { Text("Copied $bytes bytes") },
             confirmButton = {},
+        )
+    }
+
+    activity.folderChoice?.let { choice ->
+        AlertDialog(
+            onDismissRequest = activity::cancelFolderCandidate,
+            title = { Text("Add Windows game folder") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Choose how to add this game.")
+                    if (choice.inPlaceRoot != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(
+                                selected = !activity.folderCopyChoice,
+                                onClick = { activity.folderCopyChoice = false },
+                            )
+                            Column {
+                                Text("Play from this folder", color = Color.White)
+                                Text("Files stay where they are.", color = Color(0xFF9CA8BA), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = activity.folderCopyChoice,
+                            onClick = { activity.folderCopyChoice = true },
+                        )
+                        Column {
+                            Text("Copy into Bifrost", color = Color.White)
+                            Text("Uses internal storage; the original is unchanged.", color = Color(0xFF9CA8BA), fontSize = 12.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (activity.folderCopyChoice) activity.copySelectedFolder()
+                        else activity.playFromSelectedFolder()
+                    },
+                ) { Text("Continue") }
+            },
+            dismissButton = { TextButton(onClick = activity::cancelFolderCandidate) { Text("Cancel") } },
+        )
+    }
+
+    activity.folderCandidate?.let { candidate ->
+        AlertDialog(
+            onDismissRequest = {
+                if (!activity.folderAddInProgress) activity.cancelFolderCandidate()
+            },
+            title = { Text("Confirm Windows game") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = activity.folderTitle,
+                        onValueChange = { activity.folderTitle = it },
+                        label = { Text("Title") },
+                        singleLine = true,
+                    )
+                    Text("Game .exe", color = Color(0xFF9CA8BA), fontWeight = FontWeight.SemiBold)
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
+                        items(candidate.scan.executables.size) { index ->
+                            val executable = candidate.scan.executables[index]
+                            Row(
+                                Modifier.fillMaxWidth().clickable { activity.folderExeIndex = index }.padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = activity.folderExeIndex == index,
+                                    onClick = { activity.folderExeIndex = index },
+                                )
+                                Text(executable.path, color = Color.White, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = activity::addSelectedFolder, enabled = !activity.folderAddInProgress) {
+                    Text(if (activity.folderAddInProgress) "Adding…" else "Add")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = activity::cancelFolderCandidate, enabled = !activity.folderAddInProgress) { Text("Cancel") }
+            },
         )
     }
 
@@ -1012,6 +1363,10 @@ private fun DetailScreen(activity: MainActivity, entry: LibraryEntry?, playFocus
             }
             Spacer(Modifier.height(28.dp))
             Button(onClick = { activity.play(entry) }, modifier = Modifier.focusRequester(playFocus).width(190.dp)) { Text("Play") }
+            if (entry.kind == Kind.PC) {
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(onClick = { activity.openControls(entry) }, modifier = Modifier.width(190.dp)) { Text("Controls") }
+            }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(onClick = { activity.requestRemove(entry) }, modifier = Modifier.width(190.dp)) { Text("Remove") }
             Spacer(Modifier.height(12.dp))

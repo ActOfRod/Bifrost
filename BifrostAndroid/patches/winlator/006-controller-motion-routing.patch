@@ -1,0 +1,14 @@
+diff --git a/java/com/winlator/XServerDisplayActivity.java b/java/com/winlator/XServerDisplayActivity.java
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -798,4 +798,10 @@
+     @Override
+     public boolean dispatchGenericMotionEvent(MotionEvent event) {
++        // Mask mapped axes in GamepadHandler so other pass-through axes still reach the game.
++        if (inputControlsView != null &&
++                inputControlsView.hasMotionBindingsForDevice(event.getDeviceId())) {
++            inputControlsView.onGenericMotionEvent(event);
++            return !winHandler.onGenericMotionEvent(event, inputControlsView) && !touchpadView.onExternalMouseEvent(event) && super.dispatchGenericMotionEvent(event);
++        }
+         return !winHandler.onGenericMotionEvent(event) && !touchpadView.onExternalMouseEvent(event) && super.dispatchGenericMotionEvent(event);
+     }

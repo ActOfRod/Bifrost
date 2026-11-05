@@ -1,0 +1,14 @@
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -626,6 +626,11 @@
+                 if (profile != null) showInputControls(profile);
+             }
+         }
++        int controlsProfileId = getIntent().getIntExtra("controls_profile_id", 0);
++        if (controlsProfileId > 0) {
++            ControlsProfile profile = inputControlsManager.getProfile(controlsProfileId);
++            if (profile != null) showInputControls(profile);
++        }
+ 
+         if (MainActivity.DEBUG_MODE) rootView.addView(AppUtils.createDebugMsgTextView(this));
+         AppUtils.observeSoftKeyboardVisibility(drawerLayout, renderer::setScreenOffsetYRelativeToCursor);

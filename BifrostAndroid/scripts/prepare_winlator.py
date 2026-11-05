@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import hashlib
 import io
 import os
 import re
@@ -249,6 +250,7 @@ def main():
     android_dir = script_dir.parent
     submodule = android_dir / "third_party" / "winlator-app"
     upstream = submodule / "app" / "src" / "main"
+    patches_dir = android_dir / "patches" / "winlator"
     output = android_dir / "app" / "build" / "winlator"
 
     for old, new, _ in JAVA_REPLACEMENTS:
@@ -285,6 +287,16 @@ def main():
     for name in ("res", "assets", "jniLibs"):
         shutil.copytree(upstream / name, output / name, symlinks=True)
 
+    patch_files = sorted(patches_dir.glob("*.patch"))
+    patch_digest = hashlib.sha256()
+    for patch_file in patch_files:
+        patch_digest.update(patch_file.read_bytes())
+        subprocess.run(
+            ["patch", "-p1", "--forward", "--batch", "-d", str(output)],
+            input=patch_file.read_bytes(),
+            check=True,
+        )
+
     for archive in sorted((output / "assets").rglob("*.tzst")):
         rewrite_archive(archive, archive.with_suffix(archive.suffix + ".rewritten"))
         archive.with_suffix(archive.suffix + ".rewritten").replace(archive)
@@ -300,8 +312,9 @@ def main():
             raise RuntimeError(f"Expected replacement was not found: {label}")
 
     stamp = output / ".source-sha"
-    stamp.write_text(f"{revision}\n", encoding="utf-8")
+    stamp.write_text(f"{revision}+{patch_digest.hexdigest()}\n", encoding="utf-8")
     print(f"Winlator source revision: {revision}")
+    print(f"  patches: {len(patch_files)} ({patch_digest.hexdigest()})")
     print(f"  {OLD_PATH.decode()} -> {NEW_PATH.decode()}: {path_count}")
     print(f"    Java: {COUNTS['Java']}")
     print(f"    C++: {COUNTS['C++']}")

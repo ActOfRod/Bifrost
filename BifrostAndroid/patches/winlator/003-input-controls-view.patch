@@ -1,0 +1,165 @@
+--- a/java/com/winlator/widget/InputControlsView.java
++++ b/java/com/winlator/widget/InputControlsView.java
+@@ -11,7 +11,12 @@
+ import android.graphics.PointF;
+ import android.graphics.PorterDuff;
+ import android.graphics.PorterDuffColorFilter;
++import android.hardware.input.InputManager;
+ import android.media.AudioManager;
++import android.os.Build;
++import android.os.VibrationEffect;
++import android.os.Vibrator;
++import android.view.InputDevice;
+ import android.view.KeyEvent;
+ import android.view.MotionEvent;
+ import android.view.View;
+@@ -60,6 +65,23 @@
+     private Timer mouseMoveTimer;
+     private final PointF mouseMoveOffset = new PointF();
+     private boolean showTouchscreenControls = true;
++    private InputManager inputManager;
++    private final InputManager.InputDeviceListener inputDeviceListener = new InputManager.InputDeviceListener() {
++        @Override
++        public void onInputDeviceAdded(int deviceId) {
++            invalidate();
++        }
++
++        @Override
++        public void onInputDeviceRemoved(int deviceId) {
++            invalidate();
++        }
++
++        @Override
++        public void onInputDeviceChanged(int deviceId) {
++            invalidate();
++        }
++    };
+ 
+     public InputControlsView(Context context) {
+         super(context);
+@@ -70,5 +92,45 @@
+         setLayoutParams(new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+     }
+ 
++    @Override
++    protected void onAttachedToWindow() {
++        super.onAttachedToWindow();
++        inputManager = (InputManager)getContext().getSystemService(Context.INPUT_SERVICE);
++        if (inputManager != null) inputManager.registerInputDeviceListener(inputDeviceListener, null);
++        invalidate();
++    }
++
++    @Override
++    protected void onDetachedFromWindow() {
++        if (inputManager != null) inputManager.unregisterInputDeviceListener(inputDeviceListener);
++        inputManager = null;
++        super.onDetachedFromWindow();
++    }
++
++    private boolean isControllerConnected() {
++        for (int deviceId : InputDevice.getDeviceIds()) {
++            InputDevice device = InputDevice.getDevice(deviceId);
++            if (device == null) continue;
++            int sources = device.getSources();
++            if ((sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
++                (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return true;
++        }
++        return false;
++    }
++
++    private boolean shouldHideControls() {
++        return !editMode && profile != null && profile.isAutoHideWithController() && isControllerConnected();
++    }
++
++    private void vibrateForPress() {
++        if (editMode || profile == null || !profile.isHapticsEnabled()) return;
++        Vibrator vibrator = (Vibrator)getContext().getSystemService(Context.VIBRATOR_SERVICE);
++        if (vibrator == null || !vibrator.hasVibrator()) return;
++        int strength = profile.getHapticStrength();
++        long duration = 10L + (30L * (strength - 1) / 99);
++        int amplitude = Math.max(1, Math.min(255, strength * 255 / 100));
++        if (Build.VERSION.SDK_INT >= 26) vibrator.vibrate(VibrationEffect.createOneShot(duration, amplitude));
++    }
++
+     public void setEditMode(boolean editMode) {
+         this.editMode = editMode;
+@@ -112,7 +174,7 @@
+             if (!profile.isElementsLoaded()) profile.loadElements(this);
+             List<ControlElement> elements = profile.getElements();
+             if (touchpadView != null && elements.isEmpty()) touchpadView.setPointerButtonRightEnabled(true);
+-            if (showTouchscreenControls) for (ControlElement element : elements) element.draw(canvas);
++            if (showTouchscreenControls && !shouldHideControls()) for (ControlElement element : elements) element.draw(canvas);
+         }
+ 
+         super.onDraw(canvas);
+@@ -373,6 +435,8 @@
+             int pointerId = event.getPointerId(actionIndex);
+             int actionMasked = event.getActionMasked();
+             boolean handled = false;
++            boolean controlsHidden = shouldHideControls();
++            boolean vibrated = false;
+ 
+             switch (actionMasked) {
+                 case MotionEvent.ACTION_DOWN:
+@@ -381,10 +445,18 @@
+                     float y = event.getY(actionIndex);
+ 
+                     touchpadView.setPointerButtonLeftEnabled(true);
+-                    for (ControlElement element : profile.getElements()) {
+-                        if (element.handleTouchDown(pointerId, x, y)) handled = true;
+-                        if (element.getBindingAt(0) == Binding.MOUSE_LEFT_BUTTON && element.getLastBindingIndex() == 0) {
+-                            touchpadView.setPointerButtonLeftEnabled(false);
++                    if (!controlsHidden) {
++                        for (ControlElement element : profile.getElements()) {
++                            if (element.handleTouchDown(pointerId, x, y)) {
++                                handled = true;
++                                if (!vibrated) {
++                                    vibrateForPress();
++                                    vibrated = true;
++                                }
++                            }
++                            if (!element.isHidden() && element.getBindingAt(0) == Binding.MOUSE_LEFT_BUTTON && element.getLastBindingIndex() == 0) {
++                                touchpadView.setPointerButtonLeftEnabled(false);
++                            }
+                         }
+                     }
+                     if (!handled) touchpadView.onTouchEvent(event);
+@@ -391,16 +463,19 @@
+                     break;
+                 }
+                 case MotionEvent.ACTION_MOVE: {
+-                    for (byte i = 0, count = (byte)event.getPointerCount(); i < count; i++) {
+-                        float x = event.getX(i);
+-                        float y = event.getY(i);
+-                        int movePointerId = event.getPointerId(i);
+-
+-                        handled = false;
+-                        for (ControlElement element : profile.getElements()) {
+-                            if (element.handleTouchMove(movePointerId, x, y)) handled = true;
++                    if (controlsHidden) touchpadView.onTouchEvent(event);
++                    else {
++                        for (byte i = 0, count = (byte)event.getPointerCount(); i < count; i++) {
++                            float x = event.getX(i);
++                            float y = event.getY(i);
++                            int movePointerId = event.getPointerId(i);
++
++                            handled = false;
++                            for (ControlElement element : profile.getElements()) {
++                                if (element.handleTouchMove(movePointerId, x, y)) handled = true;
++                            }
++                            if (!handled) touchpadView.onTouchEvent(event);
+                         }
+-                        if (!handled) touchpadView.onTouchEvent(event);
+                     }
+                     break;
+                 }
+@@ -409,8 +484,8 @@
+                 case MotionEvent.ACTION_CANCEL: {
+                     float x = event.getX(actionIndex);
+                     float y = event.getY(actionIndex);
+                     for (ControlElement element : profile.getElements()) if (element.handleTouchUp(pointerId, x, y)) handled = true;
+-                    if (!handled) touchpadView.onTouchEvent(event);
++                    if (controlsHidden || !handled) touchpadView.onTouchEvent(event);
+                     break;
+                 }
+             }
