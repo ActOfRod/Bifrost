@@ -70,6 +70,17 @@ internal fun LibrarySnapshot.recordPlay(entryId: String, timestamp: Long): Libra
         if (it.id == entryId) it.copy(lastPlayed = timestamp, playCount = it.playCount + 1) else it
     })
 
+internal fun LibrarySnapshot.recordPlayAndUpdate(
+    entryId: String,
+    timestamp: Long,
+    update: (LibraryEntry) -> LibraryEntry,
+): LibrarySnapshot {
+    val recorded = recordPlay(entryId, timestamp)
+    return recorded.copy(entries = recorded.entries.map {
+        if (it.id == entryId) update(it) else it
+    })
+}
+
 internal fun topPlayedGames(entries: List<LibraryEntry>): List<LibraryEntry> =
     entries.asSequence()
         .filter { it.playCount > 0 }
@@ -86,7 +97,6 @@ internal data class InstalledApp(
     val label: String,
     val isGame: Boolean,
     val isBifrostPort: Boolean,
-    val cover: String? = null,
 )
 
 internal fun defaultGamesOnly(apps: List<InstalledApp>): Boolean =

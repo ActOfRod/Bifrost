@@ -122,6 +122,19 @@ class LibraryTest {
     }
 
     @Test
+    fun recordingPcLaunchPreservesPlayAndContainerUpdates() {
+        val snapshot = LibrarySnapshot(
+            entries = listOf(LibraryEntry("game", Kind.PC, "Game", addedAt = 1, playCount = 2)),
+        )
+
+        val updated = snapshot.recordPlayAndUpdate("game", 1234L) { it.copy(containerId = 42) }
+
+        assertEquals(3, updated.entries.single().playCount)
+        assertEquals(1234L, updated.entries.single().lastPlayed)
+        assertEquals(42, updated.entries.single().containerId)
+    }
+
+    @Test
     fun topPlayedGamesUsesPlayCountAndCapsAtThree() {
         val entries = listOf(
             LibraryEntry("a", Kind.PC, "A", addedAt = 1, playCount = 4),

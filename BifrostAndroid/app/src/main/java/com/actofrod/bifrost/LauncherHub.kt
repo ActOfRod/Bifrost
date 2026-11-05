@@ -278,7 +278,7 @@ private fun GameHubScreen(activity: MainActivity) {
                                     entry = entry,
                                     rank = index + 1,
                                     compact = compactLayout,
-                                    modifier = Modifier.weight(1f).fillMaxHeight(if (index == 0) 1f else 0.88f),
+                                    modifier = Modifier.weight(1f).fillMaxHeight(),
                                     onClick = { activity.selectEntry(entry) },
                                 )
                             }
@@ -401,7 +401,7 @@ private fun HubRail(activity: MainActivity, systems: List<LauncherSystem>, modif
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Column(
-            Modifier.fillMaxWidth().height(36.dp),
+            Modifier.fillMaxWidth().height(48.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
@@ -1370,6 +1370,7 @@ private fun InstalledAppsScreen(activity: MainActivity) {
                 }
             } else {
                 items(visible, key = { it.packageName }) { app ->
+                    val icon = remember(app.packageName) { activity.loadInstalledAppIcon(app.packageName) }
                     val isLinked = app.packageName in linked
                     val checked = app.packageName in activity.selectedInstalledPackages
                     Row(
@@ -1382,7 +1383,11 @@ private fun InstalledAppsScreen(activity: MainActivity) {
                             }.padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        HubArtwork(app.cover, Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)), ContentScale.Crop, app.label)
+                        if (icon != null) {
+                            Image(icon, null, Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.Crop)
+                        } else {
+                            HubArtwork(null, Modifier.size(46.dp).clip(RoundedCornerShape(10.dp)), ContentScale.Crop, app.label)
+                        }
                         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                             Text(app.label, color = if (isLinked) HubMuted else Color.White, fontWeight = FontWeight.SemiBold)
                             Text(app.packageName, color = HubMuted, fontSize = 10.sp, maxLines = 1)
@@ -1415,9 +1420,13 @@ private fun InstalledAppsScreen(activity: MainActivity) {
     }
 }
 
-private object HubArtworkCache {
+internal object HubArtworkCache {
     private val cache = object : LruCache<String, ImageBitmap>(8 * 1024) {
         override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * 4 / 1024
+    }
+
+    fun invalidate(path: String?) {
+        if (path != null) cache.remove(path)
     }
 
     fun decode(path: String): ImageBitmap? {

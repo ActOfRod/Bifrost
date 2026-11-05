@@ -172,6 +172,8 @@ class ControlsEditorActivity : ComponentActivity() {
         presetConfirmation = null
     }
 
+    internal fun presetNames(): List<String> = templates.keys.toList()
+
     internal fun testVibration(strength: Int) {
         val vibrator = getSystemService(Vibrator::class.java) ?: return
         if (!vibrator.hasVibrator()) return
@@ -309,7 +311,7 @@ private fun EditorToolbar(activity: ControlsEditorActivity, modifier: Modifier) 
         Box(Modifier.weight(1f)) {
             EditorActionButton("Preset", "▤", Modifier.fillMaxWidth()) { presetMenu = true }
             DropdownMenu(expanded = presetMenu, onDismissRequest = { presetMenu = false }) {
-                listOf("Gamepad", "Keyboard + mouse", "RTS").forEach { name ->
+                activity.presetNames().forEach { name ->
                     DropdownMenuItem(
                         text = { Text(name) },
                         onClick = {

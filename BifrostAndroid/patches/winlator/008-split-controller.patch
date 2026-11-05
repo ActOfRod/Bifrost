@@ -4,23 +4,40 @@
  import android.widget.FrameLayout;
 +import android.widget.LinearLayout;
  import android.widget.Spinner;
-@@ -24,3 +25,8 @@
+@@ -24,3 +25,9 @@
  import androidx.core.view.GravityCompat;
 +import androidx.core.content.ContextCompat;
++import androidx.core.util.Consumer;
  import androidx.drawerlayout.widget.DrawerLayout;
  import androidx.preference.PreferenceManager;
 +import androidx.window.java.layout.WindowInfoTrackerCallbackAdapter;
 +import androidx.window.layout.FoldingFeature;
 +import androidx.window.layout.WindowInfoTracker;
 +import androidx.window.layout.WindowLayoutInfo;
-@@ -109,1 +114,7 @@
-     private TouchpadView touchpadView;
+@@ -109,1 +116,9 @@
+ private TouchpadView touchpadView;
 +    private boolean splitControllerMode;
 +    private LinearLayout splitControllerRoot;
 +    private FrameLayout splitGameArea;
 +    private FrameLayout splitControlsArea;
 +    private View splitFoldGap;
 +    private WindowInfoTrackerCallbackAdapter windowInfoTracker;
++    private Consumer<WindowLayoutInfo> windowLayoutInfoListener;
++    private boolean windowLayoutInfoListenerRegistered;
+@@ -342,7 +357,13 @@
+     @Override
+     protected void onDestroy() {
++        if (windowInfoTracker != null && windowLayoutInfoListenerRegistered && windowLayoutInfoListener != null) {
++            windowInfoTracker.removeWindowLayoutInfoListener(windowLayoutInfoListener);
++            windowLayoutInfoListenerRegistered = false;
++            windowLayoutInfoListener = null;
++            windowInfoTracker = null;
++        }
+         winHandler.stop();
+         if (environment != null) environment.stopEnvironmentComponents();
+         ForegroundService.stopSession(this);
+         super.onDestroy();
+     }
 @@ -583,3 +594,23 @@
      private void setupUI() {
          FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
@@ -57,14 +74,16 @@
 -        rootView.addView(inputControlsView);
 +        controlsSurface.addView(inputControlsView, new FrameLayout.LayoutParams(
 +            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-@@ -666,1 +688,9 @@
+@@ -666,1 +697,11 @@
 +        if (splitControllerMode && inputControlsView.getProfile() != null)
 +            inputControlsView.setVisibility(View.VISIBLE);
 +
-+        if (splitControllerMode) {
++        if (splitControllerMode && !windowLayoutInfoListenerRegistered) {
 +            windowInfoTracker = new WindowInfoTrackerCallbackAdapter(WindowInfoTracker.getOrCreate(this));
-+            windowInfoTracker.addWindowLayoutInfoListener(this, ContextCompat.getMainExecutor(this),
-+                this::updateSplitControllerLayout);
++            windowLayoutInfoListener = this::updateSplitControllerLayout;
++            windowInfoTracker.addWindowLayoutInfoListener(
++                this, ContextCompat.getMainExecutor(this), windowLayoutInfoListener);
++            windowLayoutInfoListenerRegistered = true;
 +        }
          if (MainActivity.DEBUG_MODE) rootView.addView(AppUtils.createDebugMsgTextView(this));
 @@ -683,1 +683,41 @@

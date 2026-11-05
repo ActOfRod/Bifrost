@@ -87,6 +87,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -115,6 +116,8 @@ private const val PORT_META = "com.actofrod.bifrost.PORT"
 private const val INSTALL_ACTION = "com.actofrod.INSTALL_RESULT"
 private val GAME_COVER_ID_PATTERN =
     Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+private val VERSIONED_ARTWORK_PATTERN = Regex("(.+)-(\\d+)")
+private val PACKAGE_COVER_ID_PATTERN = Regex("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")
 
 private fun deleteCachedInstallApk(context: Context, path: String?) {
     if (path == null) return
@@ -259,20 +262,28 @@ class MainActivity : ComponentActivity() {
         if (!snapshotLoaded) return
 
         val coversDirectory = File(filesDir, "covers")
-        val referencedCovers = snapshot.entries.mapNotNull { entry ->
-            entry.cover?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
-        }.toSet()
-        val nativeCoverNames = snapshot.entries.asSequence()
-            .filter { it.kind == Kind.NATIVE }
-            .mapNotNull { it.packageName }
-            .map { "${it.replace(Regex("[^A-Za-z0-9._-]"), "_")}.png" }
-            .toSet()
+        val referencedCovers = (
+            snapshot.entries.mapNotNull { entry ->
+                entry.cover?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
+            } + snapshot.systems.mapNotNull { system ->
+                system.icon?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
+            }
+            ).toSet()
         coversDirectory.listFiles()?.filter { cover ->
             val canonicalPath = runCatching { cover.canonicalPath }.getOrNull()
+            val name = cover.nameWithoutExtension
+            val versionedId = VERSIONED_ARTWORK_PATTERN.matchEntire(name)?.groupValues?.get(1)
+            val gameId = when {
+                GAME_COVER_ID_PATTERN.matches(name) -> name
+                versionedId != null && GAME_COVER_ID_PATTERN.matches(versionedId) -> versionedId
+                else -> null
+            }
             cover.isFile &&
-                GAME_COVER_ID_PATTERN.matches(cover.nameWithoutExtension) &&
-                cover.nameWithoutExtension !in gameIds &&
-                cover.name !in nativeCoverNames &&
+                (
+                    (gameId != null && gameId !in gameIds) ||
+                        (versionedId != null && gameId == null) ||
+                        PACKAGE_COVER_ID_PATTERN.matches(name)
+                    ) &&
                 canonicalPath !in referencedCovers
         }?.forEach { it.delete() }
     }
@@ -377,16 +388,27 @@ class MainActivity : ComponentActivity() {
                 val label = packageManager.getApplicationLabel(app).toString()
                 val isGame = (Build.VERSION.SDK_INT >= 26 && app.category == ApplicationInfo.CATEGORY_GAME) ||
                     (app.flags and ApplicationInfo.FLAG_IS_GAME) != 0
-                val cover = runCatching { saveApplicationCover(app).absolutePath }.getOrNull()
                 InstalledApp(
                     packageName = app.packageName,
                     label = label,
                     isGame = isGame,
                     isBifrostPort = app.metaData?.containsKey(PORT_META) == true,
-                    cover = cover,
                 )
             }
             .sortedWith(compareByDescending<InstalledApp> { it.isGame }.thenByDescending { it.isBifrostPort }.thenBy { it.label.lowercase() })
+    }
+
+    internal fun loadInstalledAppIcon(packageName: String): ImageBitmap? {
+        val drawable = runCatching { packageManager.getApplicationIcon(packageName) }.getOrNull() ?: return null
+        val intrinsicWidth = drawable.intrinsicWidth.takeIf { it > 0 } ?: 64
+        val intrinsicHeight = drawable.intrinsicHeight.takeIf { it > 0 } ?: 64
+        val scale = minOf(1f, 256f / maxOf(intrinsicWidth, intrinsicHeight))
+        val width = (intrinsicWidth * scale).toInt().coerceAtLeast(1)
+        val height = (intrinsicHeight * scale).toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        drawable.setBounds(0, 0, width, height)
+        drawable.draw(Canvas(bitmap))
+        return bitmap.asImageBitmap()
     }
 
     internal fun openSettings(section: SettingsSection = SettingsSection.ADD_GAMES) {
@@ -433,6 +455,7 @@ class MainActivity : ComponentActivity() {
         val system = LauncherSystem(UUID.randomUUID().toString(), normalized)
         if (persist(snapshot.copy(systems = snapshot.systems + system))) {
             selectedRail = "system:${system.id}"
+            targetSystemId = system.id
         }
     }
 
@@ -492,33 +515,86 @@ class MainActivity : ComponentActivity() {
         imageTargetId = null
         lifecycleScope.launch {
             try {
-                val file = withContext(Dispatchers.IO) {
-                    val (directory, name, dimension) = when (action) {
-                        ImageAction.BANNER -> Triple(File(filesDir, "hub"), "banner.png", 512)
-                        ImageAction.SYSTEM_ICON -> Triple(File(filesDir, "systems"), "$targetId.png", 256)
-                        ImageAction.COVER -> Triple(File(filesDir, "covers"), "custom-$targetId.png", 512)
-                    }
-                    saveUploadedImage(uri, File(directory, name), dimension)
+                val directory = when (action) {
+                    ImageAction.BANNER -> File(filesDir, "hub")
+                    ImageAction.SYSTEM_ICON -> File(filesDir, "systems")
+                    ImageAction.COVER -> File(filesDir, "covers")
                 }
-                when (action) {
+                val artworkId = when (action) {
+                    ImageAction.BANNER -> "banner"
+                    ImageAction.SYSTEM_ICON, ImageAction.COVER ->
+                        targetId ?: throw IllegalArgumentException("Artwork target is missing")
+                }
+                val oldPath = when (action) {
+                    ImageAction.BANNER -> customBannerPath
+                    ImageAction.SYSTEM_ICON -> snapshot.systems.firstOrNull { it.id == targetId }?.icon
+                    ImageAction.COVER -> snapshot.entries.firstOrNull { it.id == targetId }?.cover
+                }
+                val file = withContext(Dispatchers.IO) {
+                    val dimension = when (action) {
+                        ImageAction.BANNER -> 512
+                        ImageAction.SYSTEM_ICON -> 256
+                        ImageAction.COVER -> 512
+                    }
+                    val safeId = artworkId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    var timestamp = System.currentTimeMillis()
+                    var target = File(directory, "$safeId-$timestamp.png")
+                    while (target.exists()) {
+                        timestamp++
+                        target = File(directory, "$safeId-$timestamp.png")
+                    }
+                    saveUploadedImage(uri, target, dimension)
+                }
+                val persisted = when (action) {
                     ImageAction.BANNER -> {
-                        getSharedPreferences("hub", Context.MODE_PRIVATE)
-                            .edit().putString("banner", file.absolutePath).apply()
-                        customBannerPath = file.absolutePath
+                        val saved = getSharedPreferences("hub", Context.MODE_PRIVATE)
+                            .edit().putString("banner", file.absolutePath).commit()
+                        if (saved) customBannerPath = file.absolutePath
+                        saved
                     }
                     ImageAction.SYSTEM_ICON -> {
-                        val system = snapshot.systems.firstOrNull { it.id == targetId } ?: return@launch
-                        updateSystem(system.copy(icon = file.absolutePath))
+                        val system = snapshot.systems.firstOrNull { it.id == targetId }
+                        if (system == null) {
+                            false
+                        } else {
+                            updateSystem(system.copy(icon = file.absolutePath))
+                            snapshot.systems.any { it.id == system.id && it.icon == file.absolutePath }
+                        }
                     }
                     ImageAction.COVER -> {
-                        val entry = snapshot.entries.firstOrNull { it.id == targetId } ?: return@launch
-                        updateEntry(entry.id) { it.copy(cover = file.absolutePath) }
+                        val entry = snapshot.entries.firstOrNull { it.id == targetId }
+                        if (entry == null) {
+                            false
+                        } else {
+                            updateEntry(entry.id) { it.copy(cover = file.absolutePath) }
+                            snapshot.entries.any { it.id == entry.id && it.cover == file.absolutePath }
+                        }
                     }
                 }
+                if (!persisted) {
+                    file.delete()
+                    return@launch
+                }
+                deleteReplacedArtwork(oldPath, directory)
             } catch (error: Exception) {
                 message = error.message ?: "Could not load image"
             }
         }
+    }
+
+    private fun deleteReplacedArtwork(oldPath: String?, directory: File) {
+        if (oldPath == null) return
+        HubArtworkCache.invalidate(oldPath)
+        val oldFile = runCatching { File(oldPath).canonicalFile }.getOrNull() ?: return
+        val ownedDirectory = runCatching { directory.canonicalFile }.getOrNull() ?: return
+        if (oldFile.parentFile != ownedDirectory) return
+        val oldCanonicalPath = oldFile.path
+        val stillReferenced = snapshot.entries.any { entry ->
+            entry.cover?.let { runCatching { File(it).canonicalPath }.getOrNull() } == oldCanonicalPath
+        } || snapshot.systems.any { system ->
+            system.icon?.let { runCatching { File(it).canonicalPath }.getOrNull() } == oldCanonicalPath
+        } || customBannerPath?.let { runCatching { File(it).canonicalPath }.getOrNull() } == oldCanonicalPath
+        if (!stillReferenced) oldFile.delete()
     }
 
     private fun saveUploadedImage(uri: Uri, target: File, maxDimension: Int): File {
@@ -562,7 +638,7 @@ class MainActivity : ComponentActivity() {
         runtimeInstallProgress = 0
         lifecycleScope.launch {
             try {
-                WindowsRuntime.install(this@MainActivity) { progress ->
+                WindowsRuntime.install(this@MainActivity, force = true) { progress ->
                     runOnUiThread { if (runtimeInstallProgress != null) runtimeInstallProgress = progress }
                 }
                 runtimeInstallError = null
@@ -710,28 +786,44 @@ class MainActivity : ComponentActivity() {
     internal fun addInstalledApp(app: InstalledApp) = addInstalledApps(setOf(app.packageName))
 
     internal fun addInstalledApps(packageNames: Set<String>) {
-        val apps = installedApps.orEmpty().filter { it.packageName in packageNames }
+        val linkedPackages = snapshot.entries.mapNotNull { it.packageName }.toSet()
+        val apps = installedApps.orEmpty().filter {
+            it.packageName in packageNames && it.packageName !in linkedPackages
+        }
         if (apps.isEmpty()) return
+        val savedCovers = mutableListOf<File>()
         val added = apps.map { app ->
+            val cover = runCatching { saveApplicationCover(app.packageName) }.getOrNull()
+            cover?.let(savedCovers::add)
             LibraryEntry(
                 id = "native-${app.packageName}",
                 kind = Kind.NATIVE,
                 title = app.label,
                 packageName = app.packageName,
-                cover = app.cover,
+                cover = cover?.absolutePath,
                 addedAt = System.currentTimeMillis(),
                 systemId = targetSystemId,
             )
         }
-        if (persist(snapshot.copy(
+        val next = snapshot.copy(
             entries = snapshot.entries.filterNot { old -> added.any { it.packageName == old.packageName } } + added,
             dismissed = snapshot.dismissed - packageNames,
-        ))) {
-            selectedInstalledPackages = emptySet()
-            page = Page.SETTINGS
-            installedApps = null
-            message = "Added ${added.size} app${if (added.size == 1) "" else "s"}"
+        )
+        if (!persist(next)) {
+            val referencedCovers = (
+                snapshot.entries.mapNotNull { it.cover } +
+                    snapshot.systems.mapNotNull { it.icon } +
+                    listOfNotNull(customBannerPath)
+                ).mapNotNull { path -> runCatching { File(path).canonicalPath }.getOrNull() }.toSet()
+            savedCovers.filter {
+                runCatching { it.canonicalPath }.getOrNull() !in referencedCovers
+            }.forEach { it.delete() }
+            return
         }
+        selectedInstalledPackages = emptySet()
+        page = Page.SETTINGS
+        installedApps = null
+        message = "Added ${added.size} app${if (added.size == 1) "" else "s"}"
     }
 
     private fun prepareApk(uri: Uri) {
@@ -1078,11 +1170,9 @@ class MainActivity : ComponentActivity() {
                 if (createdContainer) manager.removeContainerAsync(container) {}
                 return
             }
-            val next = snapshot.recordPlay(launchEntry.id, System.currentTimeMillis()).copy(
-                entries = snapshot.entries.map {
-                    if (it.id == launchEntry.id) it.copy(containerId = container.id) else it
-                },
-            )
+            val next = snapshot.recordPlayAndUpdate(launchEntry.id, System.currentTimeMillis()) {
+                it.copy(containerId = container.id)
+            }
             val saved = persist(next)
             if (!saved && createdContainer) {
                 manager.removeContainerAsync(container) {}
@@ -1157,8 +1247,9 @@ class MainActivity : ComponentActivity() {
         return saveDrawable(target, drawable, 256)
     }
 
-    private fun saveApplicationCover(app: ApplicationInfo): File {
-        val safe = app.packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+    private fun saveApplicationCover(packageName: String): File {
+        val app = packageManager.getApplicationInfo(packageName, 0)
+        val safe = packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val target = File(File(filesDir, "covers").apply { mkdirs() }, "$safe.png")
         val banner = runCatching { packageManager.getApplicationBanner(app) }.getOrNull()
         return saveDrawable(target, banner ?: packageManager.getApplicationIcon(app), 512)
