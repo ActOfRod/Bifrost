@@ -107,7 +107,7 @@ enum Cmd {
         /// Directory containing the x86/ and x64/ Bifrost FSR Vulkan layer builds
         #[arg(long, value_name = "DIR")]
         fsr_layer: Option<PathBuf>,
-        /// Enable DSOAL when the game imports DirectSound (the default)
+        /// Require DSOAL when the game imports DirectSound
         #[arg(long, conflicts_with = "no_dsoal")]
         dsoal: bool,
         /// Leave DirectSound unchanged
@@ -249,7 +249,7 @@ fn run() -> anyhow::Result<()> {
             single_core,
             play_exe,
         } => {
-            use bifrost::modernize::{Compat, DxvkSource, ModernizeOptions, Upscale};
+            use bifrost::modernize::{Compat, DsoalMode, DxvkSource, ModernizeOptions, Upscale};
             if scan {
                 return modernize_scan(&game);
             }
@@ -285,7 +285,13 @@ fn run() -> anyhow::Result<()> {
                         _ => Upscale::Off,
                     }
                 },
-                dsoal: !no_dsoal || dsoal,
+                dsoal: if no_dsoal {
+                    DsoalMode::Disabled
+                } else if dsoal {
+                    DsoalMode::Enabled
+                } else {
+                    DsoalMode::Auto
+                },
                 dsoal_dir,
                 fsr_layer,
                 play_exe,

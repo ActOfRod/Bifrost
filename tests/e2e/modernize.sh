@@ -233,7 +233,7 @@ grep -q '^mode=nis$' "$W/ofsr64/bifrost_fsr.ini" || fail "NIS layer mode"
 echo "ok   Direct3D FSR layer"
 
 mkdir -p "$W/gdsoal" && cp "$W/dsound_test.exe" "$W/gdsoal/Game.exe"
-if $BF modernize "$W/gdsoal" -o "$W/odsoal" --no-dxvk --no-ddraw --dsoal-dir "$PWD/target/dsoal" > "$W/dsoal.txt" 2>&1; then
+if $BF modernize "$W/gdsoal" -o "$W/odsoal" --no-dxvk --no-ddraw --dsoal --dsoal-dir "$PWD/target/dsoal" > "$W/dsoal.txt" 2>&1; then
     for f in dsound.dll dsoal-aldrv.dll libc++.dll libunwind.dll DSOAL_LICENSE.txt OpenAL_LICENSE.txt DSOAL_SOURCE.txt; do
         [ -f "$W/odsoal/$f" ] || fail "missing DSOAL file $f"
     done
@@ -242,10 +242,15 @@ else
     cat "$W/dsoal.txt"
     fail "DSOAL modernization"
 fi
-if $BF modernize "$W/gdsoal" -o "$W/odsoal-missing" --no-dxvk --no-ddraw --dsoal-dir "$W/missing-dsoal" > "$W/dsoal-missing.txt" 2>&1; then
-    fail "missing DSOAL binaries accepted"
+$BF modernize "$W/gdsoal" -o "$W/odsoal-auto-missing" --no-dxvk --no-ddraw --dsoal-dir "$W/missing-dsoal" > "$W/dsoal-auto-missing.txt" 2>&1 || fail "automatic DSOAL fallback"
+grep -Fq 'DSOAL files not found; use --dsoal-dir' "$W/odsoal-auto-missing/bifrost_modernize.txt" || fail "automatic DSOAL warning"
+[ ! -e "$W/odsoal-auto-missing/dsound.dll" ] || fail "automatic DSOAL fallback installed missing files"
+$BF modernize "$W/gdsoal" -o "$W/odsoal-disabled" --no-dxvk --no-ddraw --no-dsoal --dsoal-dir "$W/missing-dsoal" > "$W/dsoal-disabled.txt" 2>&1 || fail "disabled DSOAL run"
+[ ! -e "$W/odsoal-disabled/dsound.dll" ] || fail "disabled DSOAL installed files"
+if $BF modernize "$W/gdsoal" -o "$W/odsoal-explicit-missing" --no-dxvk --no-ddraw --dsoal --dsoal-dir "$W/missing-dsoal" > "$W/dsoal-explicit-missing.txt" 2>&1; then
+    fail "explicit missing DSOAL binaries accepted"
 fi
-grep -Fq 'DSOAL files not found; use --dsoal-dir' "$W/dsoal-missing.txt" || fail "DSOAL missing-files error"
+grep -Fq 'DSOAL files not found; use --dsoal-dir' "$W/dsoal-explicit-missing.txt" || fail "explicit DSOAL missing-files error"
 if command -v wine >/dev/null && command -v xvfb-run >/dev/null; then
     WINE_LAUNCHER="$PWD/target/x86_64-pc-windows-gnu/debug/bifrost-play.exe"
     cargo build --quiet --target x86_64-pc-windows-gnu --bin bifrost-play

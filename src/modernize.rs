@@ -571,7 +571,7 @@ pub struct ModernizeOptions {
     pub ddraw: Option<DxvkSource>,
     pub upscale: Upscale,
     /// Restore DirectSound 3D/EAX when the game imports dsound.dll.
-    pub dsoal: bool,
+    pub dsoal: DsoalMode,
     /// Directory containing x86/ and x64/ DSOAL DLLs.
     pub dsoal_dir: Option<PathBuf>,
     /// Directory containing the x86/ and x64/ Bifrost FSR Vulkan layer builds.
@@ -580,6 +580,14 @@ pub struct ModernizeOptions {
     pub play_exe: Option<PathBuf>,
     pub controller: bool,
     pub single_core: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DsoalMode {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
 }
 
 impl Default for ModernizeOptions {
@@ -596,7 +604,7 @@ impl Default for ModernizeOptions {
             apply_compat: false,
             ddraw: Some(DxvkSource::Download),
             upscale: Upscale::Off,
-            dsoal: true,
+            dsoal: DsoalMode::Auto,
             dsoal_dir: None,
             fsr_layer: None,
             play_exe: None,
@@ -760,14 +768,14 @@ fn play_exe_file(source: Option<&Path>) -> Result<Vec<u8>> {
 fn play_ini(exe: &str, layer: bool, controller: bool, single_core: bool) -> String {
     let mut env = String::new();
     if layer {
-        env.push_str("VK_LAYER_PATH=.\nVK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1\nBIFROST_FSR_CONFIG_DIR=.\n");
+        env.push_str("VK_LAYER_PATH=%BIFROST_DIR%\nVK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1\nBIFROST_FSR_CONFIG_DIR=%BIFROST_DIR%\n");
     }
     format!(
         "; Bifrost launch settings. Edit button values using bifrost-play key names.\n\
          [game]\nexe={exe}\nargs=\n\
          [env]\n{env}\
          [timing]\nsingle_core={single_core}\npriority=normal\n\
-         [controller]\nenabled={controller}\n\
+         [controller]\nenabled={controller}\nmouse_speed=12\n\
          [buttons]\n\
          dpad_up=Up\ndpad_down=Down\ndpad_left=Left\ndpad_right=Right\n\
          left_up=Up\nleft_down=Down\nleft_left=Left\nleft_right=Right\n\
@@ -957,10 +965,17 @@ pub fn run(opts: &ModernizeOptions, sink: &mut dyn FnMut(Event)) -> Result<Moder
     }
     let has_native_dsound = sc.root.join(&exe_dir_rel).join("dsound.dll").exists();
     let imports_dsound = has(Api::DirectSound);
-    let dsoal = if opts.dsoal && imports_dsound && !has_native_dsound {
-        Some(dsoal_files(opts.dsoal_dir.as_deref(), info.arch)?)
+    let dsoal = if opts.dsoal != DsoalMode::Disabled && imports_dsound && !has_native_dsound {
+        match dsoal_files(opts.dsoal_dir.as_deref(), info.arch) {
+            Ok(files) => Some(files),
+            Err(_) if opts.dsoal == DsoalMode::Auto => {
+                warnings.push("DSOAL files not found; use --dsoal-dir".into());
+                None
+            }
+            Err(error) => return Err(error),
+        }
     } else {
-        if has_native_dsound && opts.dsoal && imports_dsound {
+        if has_native_dsound && opts.dsoal != DsoalMode::Disabled && imports_dsound {
             warnings.push("DSOAL skipped because the game already has dsound.dll beside its executable".into());
         }
         None
@@ -1343,7 +1358,7 @@ impl Job<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ddraw_ini, fsr_ini, play_ini, uses_legacy_d3d, Upscale};
+    use super::{ddraw_ini, fsr_ini, play_ini, uses_legacy_d3d, DsoalMode, ModernizeOptions, Upscale};
 
     #[test]
     fn detects_direct3d7_interface_id_bytes() {
@@ -1371,8 +1386,15 @@ mod tests {
     fn launcher_ini_configures_layer_timing_and_controller() {
         let ini = play_ini("Game.exe", true, true, true);
         assert!(ini.contains("exe=Game.exe"));
+        assert!(ini.contains("VK_LAYER_PATH=%BIFROST_DIR%"));
         assert!(ini.contains("VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1"));
+        assert!(ini.contains("BIFROST_FSR_CONFIG_DIR=%BIFROST_DIR%"));
         assert!(ini.contains("[timing]\nsingle_core=true\npriority=normal"));
-        assert!(ini.contains("[controller]\nenabled=true"));
+        assert!(ini.contains("[controller]\nenabled=true\nmouse_speed=12"));
+    }
+
+    #[test]
+    fn dsoal_defaults_to_automatic_mode() {
+        assert_eq!(ModernizeOptions::default().dsoal, DsoalMode::Auto);
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(any(windows, test))]
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct Config {
     exe: String,
     args: String,
@@ -12,8 +12,58 @@ struct Config {
     single_core: bool,
     high_priority: bool,
     controller: bool,
+    mouse_speed: u32,
     buttons: BTreeMap<String, String>,
 }
+
+#[cfg(any(windows, test))]
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            exe: String::new(),
+            args: String::new(),
+            env: BTreeMap::new(),
+            single_core: false,
+            high_priority: false,
+            controller: false,
+            mouse_speed: 12,
+            buttons: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn insert_case_insensitive(map: &mut BTreeMap<String, String>, key: String, value: String) {
+    if let Some(existing) = map.keys().find(|existing| existing.eq_ignore_ascii_case(&key)).cloned() {
+        map.remove(&existing);
+    }
+    map.insert(key, value);
+}
+
+#[cfg(any(windows, test))]
+fn merge_environment(
+    inherited: impl IntoIterator<Item = (String, String)>,
+    overrides: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut vars = Vec::<(String, String)>::new();
+    for (key, value) in inherited.into_iter().chain(overrides) {
+        if let Some(existing) = vars.iter_mut().find(|(existing, _)| existing.eq_ignore_ascii_case(&key)) {
+            *existing = (key, value);
+        } else {
+            vars.push((key, value));
+        }
+    }
+    vars.sort_by(|(a, _), (b, _)| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()).then_with(|| a.cmp(b)));
+    vars
+}
+
+#[cfg(any(windows, test))]
+fn expand_bifrost_dir(value: &str, directory: &str) -> String {
+    value.replace("%BIFROST_DIR%", directory)
+}
+
+#[cfg(any(windows, test))]
+const STICK_DEADZONE: i16 = 8192;
 
 #[cfg(any(windows, test))]
 fn parse_ini(text: &str) -> Result<Config, String> {
@@ -31,16 +81,19 @@ fn parse_ini(text: &str) -> Result<Config, String> {
         let Some((key, value)) = line.split_once('=') else {
             return Err(format!("invalid INI line {}", line_number + 1));
         };
-        let (key, value) = (key.trim().to_ascii_lowercase(), value.trim().to_string());
+        let raw_key = key.trim().to_string();
+        let key = raw_key.to_ascii_lowercase();
+        let value = value.trim().to_string();
         match section.as_str() {
             "game" if key == "exe" => config.exe = value,
             "game" if key == "args" => config.args = value,
-            "env" => {
-                config.env.insert(key, value);
-            }
+            "env" => insert_case_insensitive(&mut config.env, raw_key, value),
             "timing" if key == "single_core" => config.single_core = value.eq_ignore_ascii_case("true"),
             "timing" if key == "priority" => config.high_priority = value.eq_ignore_ascii_case("high"),
             "controller" if key == "enabled" => config.controller = value.eq_ignore_ascii_case("true"),
+            "controller" if key == "mouse_speed" => {
+                config.mouse_speed = value.parse().map_err(|_| format!("invalid controller mouse_speed at line {}", line_number + 1))?;
+            }
             "buttons" => {
                 config.buttons.insert(key, value);
             }
@@ -81,7 +134,6 @@ fn active_inputs(pad: PadState) -> BTreeSet<&'static str> {
     const B: u16 = 0x2000;
     const X: u16 = 0x4000;
     const Y: u16 = 0x8000;
-    const DEADZONE: i16 = 8192;
     let mut active = BTreeSet::new();
     for (mask, name) in [
         (DPAD_UP, "dpad_up"), (DPAD_DOWN, "dpad_down"), (DPAD_LEFT, "dpad_left"), (DPAD_RIGHT, "dpad_right"),
@@ -92,35 +144,49 @@ fn active_inputs(pad: PadState) -> BTreeSet<&'static str> {
             active.insert(name);
         }
     }
-    if pad.left_y > DEADZONE { active.insert("left_up"); }
-    if pad.left_y < -DEADZONE { active.insert("left_down"); }
-    if pad.left_x < -DEADZONE { active.insert("left_left"); }
-    if pad.left_x > DEADZONE { active.insert("left_right"); }
-    if pad.right_y > DEADZONE { active.insert("right_up"); }
-    if pad.right_y < -DEADZONE { active.insert("right_down"); }
-    if pad.right_x < -DEADZONE { active.insert("right_left"); }
-    if pad.right_x > DEADZONE { active.insert("right_right"); }
+    if pad.left_y > STICK_DEADZONE { active.insert("left_up"); }
+    if pad.left_y < -STICK_DEADZONE { active.insert("left_down"); }
+    if pad.left_x < -STICK_DEADZONE { active.insert("left_left"); }
+    if pad.left_x > STICK_DEADZONE { active.insert("left_right"); }
+    if pad.right_y > STICK_DEADZONE { active.insert("right_up"); }
+    if pad.right_y < -STICK_DEADZONE { active.insert("right_down"); }
+    if pad.right_x < -STICK_DEADZONE { active.insert("right_left"); }
+    if pad.right_x > STICK_DEADZONE { active.insert("right_right"); }
     if pad.left_trigger > 30 { active.insert("lt"); }
     if pad.right_trigger > 30 { active.insert("rt"); }
     active
 }
 
+#[cfg(any(windows, test))]
+fn scale_mouse_axis(value: i16, mouse_speed: u32) -> i32 {
+    let value = i64::from(value);
+    let deadzone = i64::from(STICK_DEADZONE);
+    if mouse_speed == 0 || value.abs() <= deadzone {
+        return 0;
+    }
+    let max_axis = i64::from(i16::MAX);
+    let magnitude = value.abs().min(max_axis) - deadzone;
+    let range = max_axis - deadzone;
+    let pixels = ((magnitude * i64::from(mouse_speed) + range / 2) / range)
+        .max(1)
+        .min(i64::from(i32::MAX)) as i32;
+    if value < 0 { -pixels } else { pixels }
+}
+
 fn main() {
     #[cfg(windows)]
-    if let Err(()) = windows::run() {
-        std::process::exit(1);
-    }
+    windows::run();
 }
 
 #[cfg(windows)]
 mod windows {
-    use super::{active_inputs, parse_ini, Config, PadState};
-    use std::collections::{BTreeMap, BTreeSet};
+    use super::{active_inputs, expand_bifrost_dir, merge_environment, parse_ini, scale_mouse_axis, Config, PadState};
+    use std::collections::BTreeSet;
     use std::ffi::{c_void, OsStr};
     use std::mem::zeroed;
     use std::os::windows::ffi::OsStrExt;
     use std::path::PathBuf;
-    use std::ptr::null;
+    use std::ptr::{null, null_mut};
 
     type Handle = *mut c_void;
     type Bool = i32;
@@ -221,6 +287,7 @@ mod windows {
         fn ResumeThread(thread: Handle) -> Dword;
         fn WaitForSingleObject(handle: Handle, millis: Dword) -> Dword;
         fn GetExitCodeProcess(process: Handle, code: *mut Dword) -> Bool;
+        fn GetLastError() -> Dword;
         fn CloseHandle(handle: Handle) -> Bool;
         fn LoadLibraryW(name: *const u16) -> Handle;
         fn GetProcAddress(module: Handle, name: *const i8) -> *mut c_void;
@@ -232,6 +299,7 @@ mod windows {
         fn GetForegroundWindow() -> Handle;
         fn GetWindowThreadProcessId(window: Handle, process_id: *mut Dword) -> Dword;
         fn SendInput(count: Dword, input: *const Input, size: i32) -> Dword;
+        fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, kind: u32) -> i32;
     }
 
     fn wide(s: &OsStr) -> Vec<u16> {
@@ -260,14 +328,18 @@ mod windows {
         out
     }
 
-    fn load_config(folder: &PathBuf) -> Result<Config, ()> {
-        let text = std::fs::read_to_string(folder.join("bifrost_play.ini")).map_err(|_| ())?;
-        parse_ini(&text).map_err(|_| ())
+    fn load_config(folder: &PathBuf) -> Result<Config, String> {
+        let path = folder.join("bifrost_play.ini");
+        let text = std::fs::read_to_string(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+        parse_ini(&text).map_err(|error| format!("Invalid {}: {error}", path.display()))
     }
 
-    fn environment(config: &Config) -> Vec<u16> {
-        let mut vars: BTreeMap<String, String> = std::env::vars().collect();
-        vars.extend(config.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    fn environment(config: &Config, folder: &PathBuf) -> Vec<u16> {
+        let directory = folder.to_string_lossy();
+        let vars = merge_environment(
+            std::env::vars(),
+            config.env.iter().map(|(key, value)| (key.clone(), expand_bifrost_dir(value, &directory))),
+        );
         let mut block = Vec::new();
         for (key, value) in vars {
             block.extend(OsStr::new(&format!("{key}={value}")).encode_wide());
@@ -336,14 +408,34 @@ mod windows {
         foreground_pid == pid
     }
 
-    pub(super) fn run() -> Result<(), ()> {
-        let folder = std::env::current_exe().map_err(|_| ())?.parent().ok_or(())?.to_path_buf();
+    fn show_error(message: &str) {
+        let text = wide(OsStr::new(message));
+        let title = wide(OsStr::new("Bifrost"));
+        unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), 0x10); }
+    }
+
+    pub(super) fn run() {
+        match run_inner() {
+            Ok(code) => std::process::exit(code),
+            Err(message) => {
+                show_error(&message);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    fn run_inner() -> Result<i32, String> {
+        let executable = std::env::current_exe().map_err(|error| format!("Could not locate the Bifrost launcher: {error}"))?;
+        let folder = executable.parent().ok_or_else(|| "Could not locate the Bifrost launcher folder".to_string())?.to_path_buf();
         let config = load_config(&folder)?;
         let game = folder.join(&config.exe);
+        if !game.is_file() {
+            return Err(format!("Game executable not found: {}", game.display()));
+        }
         let game_wide = wide(game.as_os_str());
         let command = format!("{} {}", quote_arg(&game.to_string_lossy()), config.args);
         let mut command_wide = wide(OsStr::new(&command));
-        let mut env = environment(&config);
+        let mut env = environment(&config, &folder);
         let mut directory = wide(folder.as_os_str());
         let mut startup: StartupInfo = unsafe { zeroed() };
         startup.cb = std::mem::size_of::<StartupInfo>() as Dword;
@@ -352,7 +444,14 @@ mod windows {
             CreateProcessW(game_wide.as_ptr(), command_wide.as_mut_ptr(), null(), null(), 0,
                 0x00000004 | 0x00000400, env.as_mut_ptr().cast(), directory.as_mut_ptr(), &mut startup, &mut process)
         };
-        if ok == 0 { return Err(()); }
+        if ok == 0 {
+            let error = unsafe { GetLastError() };
+            return Err(format!(
+                "Could not start {} (Windows error {error}): {}",
+                game.display(),
+                std::io::Error::from_raw_os_error(error as i32)
+            ));
+        }
         unsafe {
             if config.single_core { SetProcessAffinityMask(process.process, 1); }
             SetPriorityClass(process.process, if config.high_priority { 0x00000080 } else { 0x00000020 });
@@ -387,29 +486,65 @@ mod windows {
             }
             held = now;
             if in_focus && available {
-                send_mouse_move(state.gamepad.right_x as i32 / 8192, -(state.gamepad.right_y as i32) / 8192);
+                send_mouse_move(
+                    scale_mouse_axis(state.gamepad.right_x, config.mouse_speed),
+                    -scale_mouse_axis(state.gamepad.right_y, config.mouse_speed),
+                );
             }
         }
         for name in held {
             if let Some(binding) = config.buttons.get(&name) { send_binding(binding, false); }
         }
         unsafe { CloseHandle(process.process); }
-        let _ = (env, directory);
-        std::process::exit(exit_code as i32)
+        Ok(exit_code as i32)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{active_inputs, parse_ini, PadState};
+    use super::{active_inputs, expand_bifrost_dir, merge_environment, parse_ini, scale_mouse_axis, PadState};
 
     #[test]
     fn parses_ini_sections_and_defaults() {
         let config = parse_ini("[game]\nexe=Game.exe\n[env]\nK=V\n[timing]\nsingle_core=true\n[controller]\nenabled=true\n[buttons]\na=Enter\n").unwrap();
         assert_eq!(config.exe, "Game.exe");
-        assert_eq!(config.env["k"], "V");
+        assert_eq!(config.env["K"], "V");
         assert!(config.single_core && config.controller);
+        assert_eq!(config.mouse_speed, 12);
         assert_eq!(config.buttons["a"], "Enter");
+    }
+
+    #[test]
+    fn parses_configured_controller_mouse_speed() {
+        let config = parse_ini("[game]\nexe=Game.exe\n[controller]\nmouse_speed=20\n").unwrap();
+        assert_eq!(config.mouse_speed, 20);
+    }
+
+    #[test]
+    fn environment_overrides_match_case_insensitively_and_sort() {
+        let config = parse_ini("[game]\nexe=Game.exe\n[env]\nPath=first\nPATH=last\n").unwrap();
+        assert_eq!(config.env.len(), 1);
+        assert_eq!(config.env["PATH"], "last");
+        let vars = merge_environment(
+            [("Path".into(), "inherited".into()), ("z".into(), "z".into()), ("alpha".into(), "a".into())],
+            config.env,
+        );
+        assert_eq!(
+            vars,
+            vec![
+                ("alpha".into(), "a".into()),
+                ("PATH".into(), "last".into()),
+                ("z".into(), "z".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn expands_bifrost_directory_placeholder() {
+        assert_eq!(
+            expand_bifrost_dir(r"%BIFROST_DIR%\layer;%BIFROST_DIR%", r"C:\Games\Bifrost"),
+            r"C:\Games\Bifrost\layer;C:\Games\Bifrost"
+        );
     }
 
     #[test]
@@ -418,5 +553,15 @@ mod tests {
         assert!(!active.contains("left_right"));
         let active = active_inputs(PadState { left_x: 9000, ..PadState::default() });
         assert!(active.contains("left_right"));
+    }
+
+    #[test]
+    fn mouse_speed_scales_right_stick_deflection_after_deadzone() {
+        assert_eq!(scale_mouse_axis(32767, 0), 0);
+        assert_eq!(scale_mouse_axis(8192, 12), 0);
+        assert_eq!(scale_mouse_axis(8193, 12), 1);
+        assert_eq!(scale_mouse_axis(32767, 12), 12);
+        assert_eq!(scale_mouse_axis(-32768, 12), -12);
+        assert_eq!(scale_mouse_axis(32767, 20), 20);
     }
 }

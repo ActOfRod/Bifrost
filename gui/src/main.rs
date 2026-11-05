@@ -2,7 +2,7 @@
 //! Bifrost desktop front end. Pick a task:
 //! - Recomp: choose a Switch game to compile or a Windows game to package for Android.
 //! - Modernize: an older Windows game and the upgrades to apply, then Begin Modernization.
-use bifrost::modernize::{self, Api, Arch, ApiReport, Compat, DxvkSource, ModernizeOptions, Scan, Upscale};
+use bifrost::modernize::{self, Api, Arch, ApiReport, Compat, DsoalMode, DxvkSource, ModernizeOptions, Scan, Upscale};
 use bifrost::pipeline::{self, BuildOptions, Event, InputSystem, Target};
 use eframe::egui;
 use std::path::PathBuf;
@@ -332,7 +332,7 @@ impl App {
             apply_compat: m.apply_compat,
             ddraw: m.ddraw.then_some(DxvkSource::Download),
             upscale: if m.ddraw || m.dxvk { m.upscale } else { Upscale::Off },
-            dsoal: m.dsoal,
+            dsoal: if m.dsoal { DsoalMode::Auto } else { DsoalMode::Disabled },
             dsoal_dir: None,
             fsr_layer: None,
             play_exe: None,
@@ -668,18 +668,26 @@ impl App {
                     ui.radio_value(&mut m.upscale, Upscale::Nis, "NVIDIA Image Scaling")
                         .on_hover_text("Upscales Direct3D 8–11 games through the Bifrost Vulkan layer.");
                 })
+                .response
                 .on_disabled_hover_text("NVIDIA Image Scaling is available for Direct3D 8–11 games; use AMD FSR 1 for DirectDraw games");
             });
             ui.label("Input");
             ui.vertical(|ui| {
                 ui.checkbox(&mut m.controller, "Controller support (for keyboard-only games)")
                     .on_hover_text("Map gamepad buttons and sticks to keyboard and mouse input.");
-                ui.checkbox(&mut m.single_core, "Run on one CPU core")
-                    .on_hover_text("Can fix games that run too fast or stutter.");
+                if m.controller {
+                    ui.label(egui::RichText::new("Change buttons in bifrost_play.ini next to the game.").small());
+                }
                 if m.apis.apis.contains_key(&bifrost::modernize::Api::DirectSound) {
                     ui.checkbox(&mut m.dsoal, "Restore 3D sound and EAX (DSOAL)")
                         .on_hover_text("Restores positional audio and EAX for games using DirectSound.");
                 }
+            });
+            ui.end_row();
+            ui.label("Timing");
+            ui.vertical(|ui| {
+                ui.checkbox(&mut m.single_core, "Run on one CPU core")
+                    .on_hover_text("Can fix games that run too fast or stutter.");
             });
             ui.end_row();
             ui.strong("Memory");
