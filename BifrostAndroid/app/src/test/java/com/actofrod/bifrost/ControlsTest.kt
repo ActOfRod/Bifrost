@@ -76,6 +76,15 @@ class ControlsTest {
     }
 
     @Test
+    fun splitControllerPresetFitsAWideLowerDeck() {
+        val preset = ControlsDocument.splitControllerPreset(12)
+        assertEquals(13, preset.elements.size)
+        assertTrue(preset.elements.all { it.x in 0f..1f && it.y in 0.18f..0.67f })
+        assertTrue(preset.elements.any { "GAMEPAD_RIGHT_THUMB_UP" in it.bindings })
+        assertTrue(preset.elements.any { "GAMEPAD_BUTTON_START" in it.bindings })
+    }
+
+    @Test
     fun wildcardControllerBindingUsesWinlatorJsonShape() {
         val document = ControlsDocument.create(1, "Game").withControllerBinding(96, "KEY_SPACE")
         val controller = Json.parseToJsonElement(document.encode()).jsonObject["controllers"]!!.jsonArray.single().jsonObject

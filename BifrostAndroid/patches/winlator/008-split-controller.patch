@@ -1,0 +1,112 @@
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -18,2 +18,3 @@
+ import android.widget.FrameLayout;
++import android.widget.LinearLayout;
+ import android.widget.Spinner;
+@@ -24,3 +25,8 @@
+ import androidx.core.view.GravityCompat;
++import androidx.core.content.ContextCompat;
+ import androidx.drawerlayout.widget.DrawerLayout;
+ import androidx.preference.PreferenceManager;
++import androidx.window.java.layout.WindowInfoTrackerCallbackAdapter;
++import androidx.window.layout.FoldingFeature;
++import androidx.window.layout.WindowInfoTracker;
++import androidx.window.layout.WindowLayoutInfo;
+@@ -109,1 +114,7 @@
+     private TouchpadView touchpadView;
++    private boolean splitControllerMode;
++    private LinearLayout splitControllerRoot;
++    private FrameLayout splitGameArea;
++    private FrameLayout splitControlsArea;
++    private View splitFoldGap;
++    private WindowInfoTrackerCallbackAdapter windowInfoTracker;
+@@ -583,3 +594,23 @@
+     private void setupUI() {
+         FrameLayout rootView = findViewById(R.id.FLXServerDisplay);
++        splitControllerMode = "split".equals(getIntent().getStringExtra("controller_mode"));
++        FrameLayout gameSurface = rootView;
++        FrameLayout controlsSurface = rootView;
++        if (splitControllerMode) {
++            splitControllerRoot = new LinearLayout(this);
++            splitControllerRoot.setOrientation(LinearLayout.VERTICAL);
++            splitGameArea = new FrameLayout(this);
++            splitControlsArea = new FrameLayout(this);
++            splitFoldGap = new View(this);
++            splitControllerRoot.addView(splitGameArea, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0, 55f));
++            splitControllerRoot.addView(splitFoldGap, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0));
++            splitControllerRoot.addView(splitControlsArea, new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0, 45f));
++            rootView.addView(splitControllerRoot, new FrameLayout.LayoutParams(
++                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
++            gameSurface = splitGameArea;
++            controlsSurface = splitControlsArea;
++        }
+         xServerView = new XServerView(this, xServer);
+@@ -592,1 +612,2 @@
+-        rootView.addView(xServerView);
++        gameSurface.addView(xServerView, new FrameLayout.LayoutParams(
++            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+@@ -602,1 +623,2 @@
+-        rootView.addView(touchpadView);
++        gameSurface.addView(touchpadView, new FrameLayout.LayoutParams(
++            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+@@ -613,1 +635,2 @@
+-        rootView.addView(inputControlsView);
++        controlsSurface.addView(inputControlsView, new FrameLayout.LayoutParams(
++            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+@@ -666,1 +688,9 @@
++        if (splitControllerMode && inputControlsView.getProfile() != null)
++            inputControlsView.setVisibility(View.VISIBLE);
++
++        if (splitControllerMode) {
++            windowInfoTracker = new WindowInfoTrackerCallbackAdapter(WindowInfoTracker.getOrCreate(this));
++            windowInfoTracker.addWindowLayoutInfoListener(this, ContextCompat.getMainExecutor(this),
++                this::updateSplitControllerLayout);
++        }
+         if (MainActivity.DEBUG_MODE) rootView.addView(AppUtils.createDebugMsgTextView(this));
+@@ -683,1 +683,41 @@
+-    private void showInputControlsDialog() {
++
++    private void updateSplitControllerLayout(WindowLayoutInfo layoutInfo) {
++        if (!splitControllerMode || splitControllerRoot == null || splitControllerRoot.getHeight() <= 1) return;
++        FoldingFeature horizontalFold = null;
++        for (androidx.window.layout.DisplayFeature feature : layoutInfo.getDisplayFeatures()) {
++            if (feature instanceof FoldingFeature &&
++                ((FoldingFeature) feature).getOrientation() == FoldingFeature.Orientation.HORIZONTAL) {
++                horizontalFold = (FoldingFeature) feature;
++                if (horizontalFold.isSeparating()) break;
++            }
++        }
++        LinearLayout.LayoutParams gameParams;
++        LinearLayout.LayoutParams gapParams;
++        LinearLayout.LayoutParams controlsParams;
++        if (horizontalFold != null && horizontalFold.getBounds().top > 0 &&
++            horizontalFold.getBounds().bottom < splitControllerRoot.getHeight()) {
++            int gameHeight = horizontalFold.getBounds().top;
++            int gapHeight = horizontalFold.getBounds().height();
++            int controlsHeight = splitControllerRoot.getHeight() - horizontalFold.getBounds().bottom;
++            gameParams = new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, gameHeight);
++            gapParams = new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, gapHeight);
++            controlsParams = new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, controlsHeight);
++            splitFoldGap.setBackgroundColor(0xFF090D17);
++        }
++        else {
++            gameParams = new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0, 55f);
++            gapParams = new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0);
++            controlsParams = new LinearLayout.LayoutParams(
++                LinearLayout.LayoutParams.MATCH_PARENT, 0, 45f);
++            splitFoldGap.setBackgroundColor(android.graphics.Color.TRANSPARENT);
++        }
++        splitGameArea.setLayoutParams(gameParams);
++        splitFoldGap.setLayoutParams(gapParams);
++        splitControlsArea.setLayoutParams(controlsParams);
++    }
++    private void showInputControlsDialog() {

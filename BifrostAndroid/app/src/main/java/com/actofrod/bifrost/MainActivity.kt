@@ -2,12 +2,16 @@ package com.actofrod.bifrost
 
 import android.app.PendingIntent
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
@@ -123,10 +127,11 @@ private fun deleteCachedInstallApk(context: Context, path: String?) {
     }
 }
 
-internal enum class Page { HOME, DETAIL }
+internal enum class Page { HOME, DETAIL, SETTINGS, LINK_APPS }
 internal enum class Tab { ALL, NATIVE, PC }
+internal enum class SettingsSection { ADD_GAMES, SYSTEMS, APPEARANCE, WINDOWS_RUNTIME, ABOUT }
+internal enum class ImageAction { BANNER, SYSTEM_ICON, COVER }
 
-internal data class InstalledApp(val packageName: String, val label: String, val isBifrostPort: Boolean)
 internal data class FolderSelection(val uri: Uri, val inPlaceRoot: File?, val folderName: String)
 internal data class FolderCandidate(
     val id: String,
@@ -141,6 +146,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var store: LibraryStore
     private lateinit var apkPicker: ActivityResultLauncher<Array<String>>
     private lateinit var packagePicker: ActivityResultLauncher<Array<String>>
+    private lateinit var imagePicker: ActivityResultLauncher<String>
     private lateinit var folderPicker: ActivityResultLauncher<Uri?>
     private lateinit var storagePermissionRequest: ActivityResultLauncher<Array<String>>
     private lateinit var unknownAppsSettings: ActivityResultLauncher<Intent>
@@ -148,8 +154,20 @@ class MainActivity : ComponentActivity() {
     internal var page by mutableStateOf(Page.HOME)
     internal var tab by mutableStateOf(Tab.ALL)
     internal var selected by mutableStateOf<LibraryEntry?>(null)
+    internal var selectedRail by mutableStateOf("all")
+    internal var searchQuery by mutableStateOf("")
+    internal var settingsSection by mutableStateOf(SettingsSection.ADD_GAMES)
+    internal var targetSystemId by mutableStateOf<String?>(null)
+    internal var showOptionsFor by mutableStateOf<LibraryEntry?>(null)
     internal var showAddMenu by mutableStateOf(false)
     internal var installedApps by mutableStateOf<List<InstalledApp>?>(null)
+    internal var installedSearch by mutableStateOf("")
+    internal var installedGamesOnly by mutableStateOf(true)
+    internal var selectedInstalledPackages by mutableStateOf<Set<String>>(emptySet())
+    internal var accentArgb by mutableStateOf(0xFF83F0C9L)
+    internal var customBannerPath by mutableStateOf<String?>(null)
+    internal var imageAction by mutableStateOf<ImageAction?>(null)
+    internal var imageTargetId by mutableStateOf<String?>(null)
     internal var confirmRemove by mutableStateOf<LibraryEntry?>(null)
     internal var message by mutableStateOf<String?>(null)
     internal var importBytes by mutableStateOf<Long?>(null)
@@ -165,10 +183,11 @@ class MainActivity : ComponentActivity() {
     internal var runtimeInstallError by mutableStateOf<String?>(null)
     private var pendingApk by mutableStateOf<File?>(null)
     private var pendingPcEntry: LibraryEntry? = null
+    private var pendingInstallSystemId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility =
@@ -177,6 +196,9 @@ class MainActivity : ComponentActivity() {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
         cleanupStaleInstallApks()
         store = LibraryStore(File(filesDir, "library.json"))
+        accentArgb = getSharedPreferences("hub", Context.MODE_PRIVATE)
+            .getLong("accent", 0xFF83F0C9L)
+        customBannerPath = getSharedPreferences("hub", Context.MODE_PRIVATE).getString("banner", null)
         val storedSnapshot = runCatching { store.read() }
         snapshot = storedSnapshot.getOrElse {
             Toast.makeText(this, "Could not read library: ${it.message}", Toast.LENGTH_LONG).show()
@@ -190,6 +212,9 @@ class MainActivity : ComponentActivity() {
         packagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) importPackage(uri)
         }
+        imagePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) savePickedImage(uri)
+        }
         folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             if (uri != null) onGameFolderPicked(uri)
         }
@@ -201,7 +226,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(
-                primary = Color(0xFF83F0C9),
+                primary = Color(accentArgb),
                 secondary = Color(0xFF9CAEFF),
                 background = Color(0xFF090D17),
                 surface = Color(0xFF121A29),
@@ -209,7 +234,7 @@ class MainActivity : ComponentActivity() {
                 onSurface = Color(0xFFF2F5FC),
             )) {
                 Surface(Modifier.fillMaxSize(), color = Color(0xFF090D17)) {
-                    LauncherScreen(this)
+                    HubScreen(this)
                 }
             }
         }
@@ -263,6 +288,7 @@ class MainActivity : ComponentActivity() {
         handleInstallIntent(intent)
     }
 
+    @SuppressLint("RestrictedApi")
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BUTTON_A) {
             val center = KeyEvent(event.downTime, event.eventTime, event.action, KeyEvent.KEYCODE_DPAD_CENTER, event.repeatCount, event.metaState, event.deviceId, event.scanCode, event.flags)
@@ -270,15 +296,18 @@ class MainActivity : ComponentActivity() {
         }
         if (event.action == KeyEvent.ACTION_DOWN) {
             when (event.keyCode) {
-                KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_Y -> {
-                    showAddMenu = true
+                KeyEvent.KEYCODE_BUTTON_Y, KeyEvent.KEYCODE_Y, KeyEvent.KEYCODE_MENU -> {
+                    selected?.let { showOptionsFor = it }
                     return true
                 }
                 KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_ESCAPE -> {
-                    if (showAddMenu) showAddMenu = false
-                    else if (page == Page.DETAIL) { page = Page.HOME; selected = null }
-                    else if (installedApps != null) installedApps = null
-                    else super.onBackPressed()
+                    when {
+                        showOptionsFor != null -> showOptionsFor = null
+                        page == Page.LINK_APPS -> { page = Page.SETTINGS; installedApps = null }
+                        page == Page.SETTINGS -> page = Page.HOME
+                        page == Page.DETAIL -> { page = Page.HOME; selected = null }
+                        else -> super.onBackPressed()
+                    }
                     return true
                 }
                 KeyEvent.KEYCODE_BUTTON_L1 -> { cycleTab(-1); return true }
@@ -335,25 +364,42 @@ class MainActivity : ComponentActivity() {
     private fun listInstalledApps(): List<InstalledApp> {
         val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         @Suppress("DEPRECATION")
-        return packageManager.queryIntentActivities(
+        val resolved = packageManager.queryIntentActivities(
             launcher,
             PackageManager.GET_META_DATA,
         )
-            .mapNotNull { result ->
-                val info = result.activityInfo ?: return@mapNotNull null
-                if (info.packageName == packageName) return@mapNotNull null
-                val app = info.applicationInfo
-                InstalledApp(info.packageName, result.loadLabel(packageManager).toString(), app.metaData?.containsKey(PORT_META) == true)
-            }
+        return resolved
+            .mapNotNull { it.activityInfo?.applicationInfo }
             .distinctBy { it.packageName }
-            .sortedWith(compareByDescending<InstalledApp> { it.isBifrostPort }.thenBy { it.label.lowercase() })
+            .filterNot { it.packageName == packageName }
+            .map { app ->
+                @Suppress("DEPRECATION")
+                val label = packageManager.getApplicationLabel(app).toString()
+                val isGame = (Build.VERSION.SDK_INT >= 26 && app.category == ApplicationInfo.CATEGORY_GAME) ||
+                    (app.flags and ApplicationInfo.FLAG_IS_GAME) != 0
+                val cover = runCatching { saveApplicationCover(app).absolutePath }.getOrNull()
+                InstalledApp(
+                    packageName = app.packageName,
+                    label = label,
+                    isGame = isGame,
+                    isBifrostPort = app.metaData?.containsKey(PORT_META) == true,
+                    cover = cover,
+                )
+            }
+            .sortedWith(compareByDescending<InstalledApp> { it.isGame }.thenByDescending { it.isBifrostPort }.thenBy { it.label.lowercase() })
     }
 
-    fun openAddMenu() { showAddMenu = true }
-    fun pickApk() { showAddMenu = false; apkPicker.launch(arrayOf("application/vnd.android.package-archive")) }
-    fun pickPackage() { showAddMenu = false; packagePicker.launch(arrayOf("*/*")) }
+    internal fun openSettings(section: SettingsSection = SettingsSection.ADD_GAMES) {
+        settingsSection = section
+        targetSystemId = selectedRail.removePrefix("system:").takeIf { selectedRail.startsWith("system:") }
+        page = Page.SETTINGS
+    }
+
+    fun openAddMenu() = openSettings(SettingsSection.ADD_GAMES)
+
+    fun pickApk() { apkPicker.launch(arrayOf("application/vnd.android.package-archive")) }
+    fun pickPackage() { packagePicker.launch(arrayOf("*/*")) }
     fun pickGameFolder() {
-        showAddMenu = false
         if (Build.VERSION.SDK_INT >= 23 &&
             (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
                 ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
@@ -366,7 +412,167 @@ class MainActivity : ComponentActivity() {
             folderPicker.launch(null)
         }
     }
-    fun showInstalledApps() { showAddMenu = false; installedApps = listInstalledApps() }
+    fun showInstalledApps() {
+        val apps = listInstalledApps()
+        installedApps = apps
+        installedGamesOnly = defaultGamesOnly(apps)
+        installedSearch = ""
+        selectedInstalledPackages = emptySet()
+        page = Page.LINK_APPS
+    }
+
+    internal fun pickImage(action: ImageAction, targetId: String? = null) {
+        imageAction = action
+        imageTargetId = targetId
+        imagePicker.launch("image/*")
+    }
+
+    internal fun createSystem(name: String) {
+        val normalized = name.trim()
+        if (normalized.isEmpty()) return
+        val system = LauncherSystem(UUID.randomUUID().toString(), normalized)
+        if (persist(snapshot.copy(systems = snapshot.systems + system))) {
+            selectedRail = "system:${system.id}"
+        }
+    }
+
+    internal fun updateSystem(system: LauncherSystem) {
+        persist(snapshot.copy(systems = snapshot.systems.map { if (it.id == system.id) system else it }))
+    }
+
+    internal fun reorderSystem(systemId: String, direction: Int) {
+        val systems = snapshot.systems.toMutableList()
+        val index = systems.indexOfFirst { it.id == systemId }
+        val target = index + direction
+        if (index !in systems.indices || target !in systems.indices) return
+        val item = systems.removeAt(index)
+        systems.add(target, item)
+        persist(snapshot.copy(systems = systems))
+    }
+
+    internal fun deleteSystem(system: LauncherSystem) {
+        if (persist(snapshot.deleteSystem(system.id))) {
+            system.icon?.let { File(it).delete() }
+            if (selectedRail == "system:${system.id}") selectedRail = "all"
+        }
+    }
+
+    internal fun updateEntry(entryId: String, transform: (LibraryEntry) -> LibraryEntry) {
+        val next = snapshot.copy(entries = snapshot.entries.map { if (it.id == entryId) transform(it) else it })
+        if (persist(next)) selected = next.entries.firstOrNull { it.id == selected?.id }
+    }
+
+    internal fun setAccent(color: Long) {
+        accentArgb = color
+        getSharedPreferences("hub", Context.MODE_PRIVATE).edit().putLong("accent", color).apply()
+    }
+
+    internal fun setControllerMode(entry: LibraryEntry, mode: ControllerMode, applyPreset: Boolean) {
+        lifecycleScope.launch {
+            try {
+                val current = ensureControlsProfile(snapshot.currentEntry(entry))
+                if (applyPreset) {
+                    val profileId = current.controlsProfileId ?: throw IllegalStateException("Controls profile is missing")
+                    val file = ControlsProfile.getProfileFile(this@MainActivity, profileId)
+                    val existing = ControlsDocument.parse(file.readText())
+                    val preset = ControlsDocument.splitControllerPreset(profileId, "Split-Controller")
+                    writeAtomically(file, File(filesDir, "controls-tmp"), existing.applyPreset(preset).encode())
+                }
+                updateEntry(current.id) { it.copy(controllerMode = mode) }
+            } catch (error: Exception) {
+                message = error.message ?: "Could not change controller mode"
+            }
+        }
+    }
+
+    private fun savePickedImage(uri: Uri) {
+        val action = imageAction ?: return
+        val targetId = imageTargetId
+        imageAction = null
+        imageTargetId = null
+        lifecycleScope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    val (directory, name, dimension) = when (action) {
+                        ImageAction.BANNER -> Triple(File(filesDir, "hub"), "banner.png", 512)
+                        ImageAction.SYSTEM_ICON -> Triple(File(filesDir, "systems"), "$targetId.png", 256)
+                        ImageAction.COVER -> Triple(File(filesDir, "covers"), "custom-$targetId.png", 512)
+                    }
+                    saveUploadedImage(uri, File(directory, name), dimension)
+                }
+                when (action) {
+                    ImageAction.BANNER -> {
+                        getSharedPreferences("hub", Context.MODE_PRIVATE)
+                            .edit().putString("banner", file.absolutePath).apply()
+                        customBannerPath = file.absolutePath
+                    }
+                    ImageAction.SYSTEM_ICON -> {
+                        val system = snapshot.systems.firstOrNull { it.id == targetId } ?: return@launch
+                        updateSystem(system.copy(icon = file.absolutePath))
+                    }
+                    ImageAction.COVER -> {
+                        val entry = snapshot.entries.firstOrNull { it.id == targetId } ?: return@launch
+                        updateEntry(entry.id) { it.copy(cover = file.absolutePath) }
+                    }
+                }
+            } catch (error: Exception) {
+                message = error.message ?: "Could not load image"
+            }
+        }
+    }
+
+    private fun saveUploadedImage(uri: Uri, target: File, maxDimension: Int): File {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            ?: throw IllegalArgumentException("Could not open image")
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Selected file is not an image" }
+        var sample = 1
+        while (maxOf(bounds.outWidth / sample, bounds.outHeight / sample) > maxDimension * 2) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bitmap = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+            ?: throw IllegalArgumentException("Could not decode image")
+        val scale = minOf(1f, maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height))
+        val resized = if (scale < 1f) {
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        } else bitmap
+        target.parentFile?.mkdirs()
+        FileOutputStream(target).use { resized.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        if (resized !== bitmap) resized.recycle()
+        bitmap.recycle()
+        return target
+    }
+
+    internal fun bannerPath(): String? =
+        customBannerPath
+
+    internal fun resetBanner() {
+        customBannerPath = null
+        getSharedPreferences("hub", Context.MODE_PRIVATE).edit().remove("banner").apply()
+    }
+
+    internal fun installRuntimeFromSettings() {
+        if (runtimeInstallProgress != null) return
+        runtimeInstallError = null
+        runtimeInstallProgress = 0
+        lifecycleScope.launch {
+            try {
+                WindowsRuntime.install(this@MainActivity) { progress ->
+                    runOnUiThread { if (runtimeInstallProgress != null) runtimeInstallProgress = progress }
+                }
+                runtimeInstallError = null
+                message = "Windows runtime installed"
+            } catch (error: Exception) {
+                runtimeInstallError = error.message ?: "Could not install Windows runtime"
+            } finally {
+                runtimeInstallProgress = null
+            }
+        }
+    }
 
     @Suppress("DEPRECATION")
     private fun onGameFolderPicked(uri: Uri) {
@@ -475,6 +681,7 @@ class MainActivity : ComponentActivity() {
                     arch = exe.arch,
                     apis = apis,
                     addedAt = System.currentTimeMillis(),
+                    systemId = targetSystemId,
                 )
                 if (persist(snapshot.copy(entries = snapshot.entries + entry))) {
                     folderCandidate = null
@@ -499,21 +706,30 @@ class MainActivity : ComponentActivity() {
         folderChoice = null
     }
 
-    internal fun addInstalledApp(app: InstalledApp) {
-        val icon = runCatching { packageManager.getApplicationIcon(app.packageName) }.getOrNull()
-        val entry = LibraryEntry(
-            id = "native-${app.packageName}",
-            kind = Kind.NATIVE,
-            title = app.label,
-            packageName = app.packageName,
-            cover = icon?.let { saveIcon(app.packageName, it).absolutePath },
-            addedAt = System.currentTimeMillis(),
-        )
+    internal fun addInstalledApp(app: InstalledApp) = addInstalledApps(setOf(app.packageName))
+
+    internal fun addInstalledApps(packageNames: Set<String>) {
+        val apps = installedApps.orEmpty().filter { it.packageName in packageNames }
+        if (apps.isEmpty()) return
+        val added = apps.map { app ->
+            LibraryEntry(
+                id = "native-${app.packageName}",
+                kind = Kind.NATIVE,
+                title = app.label,
+                packageName = app.packageName,
+                cover = app.cover,
+                addedAt = System.currentTimeMillis(),
+                systemId = targetSystemId,
+            )
+        }
         if (persist(snapshot.copy(
-            entries = (snapshot.entries.filterNot { it.packageName == app.packageName } + entry),
-            dismissed = snapshot.dismissed - app.packageName,
+            entries = snapshot.entries.filterNot { old -> added.any { it.packageName == old.packageName } } + added,
+            dismissed = snapshot.dismissed - packageNames,
         ))) {
+            selectedInstalledPackages = emptySet()
+            page = Page.SETTINGS
             installedApps = null
+            message = "Added ${added.size} app${if (added.size == 1) "" else "s"}"
         }
     }
 
@@ -551,10 +767,12 @@ class MainActivity : ComponentActivity() {
                 val previousPackage = pendingInstallPackage
                 val previousLabel = pendingInstallLabel
                 val previousCover = pendingInstallCover
+                val previousSystemId = pendingInstallSystemId
                 pendingApk = apk
                 pendingInstallPackage = packageInfo.packageName
                 pendingInstallLabel = label
                 pendingInstallCover = cover.absolutePath
+                pendingInstallSystemId = targetSystemId
                 try {
                     if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
                         unknownAppsSettings.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
@@ -566,6 +784,7 @@ class MainActivity : ComponentActivity() {
                     pendingInstallPackage = previousPackage
                     pendingInstallLabel = previousLabel
                     pendingInstallCover = previousCover
+                    pendingInstallSystemId = previousSystemId
                     throw error
                 }
                 previousApk?.let { deleteCachedInstallApk(this@MainActivity, it.absolutePath) }
@@ -604,6 +823,7 @@ class MainActivity : ComponentActivity() {
                             putExtra("title", pendingInstallLabel)
                             putExtra("cover", pendingInstallCover)
                             putExtra("apkPath", apk.absolutePath)
+                            putExtra("systemId", pendingInstallSystemId)
                         }
                         val pending = PendingIntent.getBroadcast(
                             this@MainActivity,
@@ -631,6 +851,7 @@ class MainActivity : ComponentActivity() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
         }.getOrDefault(packageName)
         val cover = intent.getStringExtra("cover") ?: pendingInstallCover
+        val systemId = intent.getStringExtra("systemId") ?: pendingInstallSystemId
         val apkPath = intent.getStringExtra("apkPath") ?: pendingApk?.absolutePath
         val saved = persist(snapshot.copy(
             entries = snapshot.entries.filterNot { it.packageName == packageName } + LibraryEntry(
@@ -640,6 +861,7 @@ class MainActivity : ComponentActivity() {
                 packageName = packageName,
                 cover = cover,
                 addedAt = System.currentTimeMillis(),
+                systemId = systemId,
             ),
             dismissed = snapshot.dismissed - packageName,
         ))
@@ -649,6 +871,7 @@ class MainActivity : ComponentActivity() {
             pendingInstallPackage = null
             pendingInstallLabel = null
             pendingInstallCover = null
+            pendingInstallSystemId = null
         }
         message = if (saved) "Installed $label" else null
         intent.action = null
@@ -682,6 +905,7 @@ class MainActivity : ComponentActivity() {
                     apis = imported.manifest.apis,
                     cover = imported.cover?.absolutePath,
                     addedAt = System.currentTimeMillis(),
+                    systemId = targetSystemId,
                 )
                 if (persist(snapshot.copy(entries = snapshot.entries + entry))) {
                     page = Page.HOME
@@ -701,7 +925,7 @@ class MainActivity : ComponentActivity() {
 
     fun selectEntry(entry: LibraryEntry) {
         selected = entry
-        page = Page.DETAIL
+        page = Page.HOME
     }
 
     fun play(entry: LibraryEntry) {
@@ -728,9 +952,7 @@ class MainActivity : ComponentActivity() {
             message = "Not installed"
             return
         }
-        persist(snapshot.copy(entries = snapshot.entries.map {
-            if (it.id == entry.id) it.copy(lastPlayed = System.currentTimeMillis()) else it
-        }))
+        persist(snapshot.recordPlay(entry.id, System.currentTimeMillis()))
         startActivity(launch)
     }
 
@@ -855,9 +1077,11 @@ class MainActivity : ComponentActivity() {
                 if (createdContainer) manager.removeContainerAsync(container) {}
                 return
             }
-            val next = snapshot.copy(entries = snapshot.entries.map {
-                if (it.id == launchEntry.id) it.copy(containerId = container.id, lastPlayed = System.currentTimeMillis()) else it
-            })
+            val next = snapshot.recordPlay(launchEntry.id, System.currentTimeMillis()).copy(
+                entries = snapshot.entries.map {
+                    if (it.id == launchEntry.id) it.copy(containerId = container.id) else it
+                },
+            )
             val saved = persist(next)
             if (!saved && createdContainer) {
                 manager.removeContainerAsync(container) {}
@@ -869,7 +1093,11 @@ class MainActivity : ComponentActivity() {
                 Intent(this, XServerDisplayActivity::class.java)
                     .putExtra("container_id", container.id)
                     .putExtra("exec_path", executable.absolutePath)
-                    .putExtra("controls_profile_id", launchEntry.controlsProfileId ?: 0),
+                    .putExtra("controls_profile_id", launchEntry.controlsProfileId ?: 0)
+                    .putExtra(
+                        "controller_mode",
+                        if (launchEntry.controllerMode == ControllerMode.SPLIT) "split" else "overlay",
+                    ),
             )
         } catch (error: Exception) {
             message = error.message ?: "Could not launch PC game"
@@ -925,14 +1153,36 @@ class MainActivity : ComponentActivity() {
     private fun saveIcon(name: String, drawable: Drawable): File {
         val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val target = File(File(filesDir, "covers").apply { mkdirs() }, "$safe.png")
-        val bitmap = if (drawable is BitmapDrawable) drawable.bitmap else {
-            Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888).also { bmp ->
-                val canvas = Canvas(bmp)
-                drawable.setBounds(0, 0, canvas.width, canvas.height)
+        return saveDrawable(target, drawable, 256)
+    }
+
+    private fun saveApplicationCover(app: ApplicationInfo): File {
+        val safe = app.packageName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val target = File(File(filesDir, "covers").apply { mkdirs() }, "$safe.png")
+        val banner = runCatching { packageManager.getApplicationBanner(app) }.getOrNull()
+        return saveDrawable(target, banner ?: packageManager.getApplicationIcon(app), 512)
+    }
+
+    private fun saveDrawable(target: File, drawable: Drawable, maxDimension: Int): File {
+        val source = if (drawable is BitmapDrawable) drawable.bitmap else {
+            val width = drawable.intrinsicWidth.coerceIn(1, maxDimension)
+            val height = drawable.intrinsicHeight.coerceIn(1, maxDimension)
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                val canvas = Canvas(bitmap)
+                drawable.setBounds(0, 0, width, height)
                 drawable.draw(canvas)
             }
         }
-        FileOutputStream(target).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        val scale = minOf(1f, maxDimension.toFloat() / maxOf(source.width, source.height))
+        val result = if (scale < 1f) Bitmap.createScaledBitmap(
+            source,
+            (source.width * scale).toInt().coerceAtLeast(1),
+            (source.height * scale).toInt().coerceAtLeast(1),
+            true,
+        ) else source
+        FileOutputStream(target).use { result.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        if (result !== source) result.recycle()
+        if (drawable !is BitmapDrawable) source.recycle()
         return target
     }
 }
@@ -953,6 +1203,7 @@ class InstallStatusReceiver : BroadcastReceiver() {
                     putExtra("title", intent.getStringExtra("title"))
                     putExtra("cover", intent.getStringExtra("cover"))
                     putExtra("apkPath", intent.getStringExtra("apkPath"))
+                    putExtra("systemId", intent.getStringExtra("systemId"))
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 }
                 context.startActivity(result)

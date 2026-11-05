@@ -74,6 +74,100 @@ class LibraryTest {
     }
 
     @Test
+    fun decodesPreHubLibraryWithNewFieldsDefaulted() {
+        val temp = Files.createTempDirectory("bifrost-pre-hub-library").toFile()
+        try {
+            val library = File(temp, "library.json")
+            library.writeText(
+                """{"entries":[{"id":"old","kind":"NATIVE","title":"Old app","addedAt":1}],"dismissed":[]}""",
+            )
+            val snapshot = LibraryStore(library).read()
+            val entry = snapshot.entries.single()
+            assertTrue(snapshot.systems.isEmpty())
+            assertEquals(null, entry.systemId)
+            assertEquals(0, entry.playCount)
+            assertEquals(ControllerMode.OVERLAY, entry.controllerMode)
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun deletingSystemUnassignsItsGames() {
+        val snapshot = LibrarySnapshot(
+            entries = listOf(
+                LibraryEntry("one", Kind.PC, "One", addedAt = 1, systemId = "retro"),
+                LibraryEntry("two", Kind.NATIVE, "Two", addedAt = 2, systemId = "other"),
+            ),
+            systems = listOf(LauncherSystem("retro", "Retro"), LauncherSystem("other", "Other")),
+        )
+
+        val updated = snapshot.deleteSystem("retro")
+
+        assertEquals(listOf(LauncherSystem("other", "Other")), updated.systems)
+        assertEquals(null, updated.entries.first { it.id == "one" }.systemId)
+        assertEquals("other", updated.entries.first { it.id == "two" }.systemId)
+    }
+
+    @Test
+    fun recordsPlayCountAndLastPlayed() {
+        val snapshot = LibrarySnapshot(
+            entries = listOf(LibraryEntry("game", Kind.PC, "Game", addedAt = 1, playCount = 2)),
+        )
+
+        val updated = snapshot.recordPlay("game", 1234L)
+
+        assertEquals(3, updated.entries.single().playCount)
+        assertEquals(1234L, updated.entries.single().lastPlayed)
+    }
+
+    @Test
+    fun topPlayedGamesUsesPlayCountAndCapsAtThree() {
+        val entries = listOf(
+            LibraryEntry("a", Kind.PC, "A", addedAt = 1, playCount = 4),
+            LibraryEntry("b", Kind.PC, "B", addedAt = 2, playCount = 9),
+            LibraryEntry("c", Kind.PC, "C", addedAt = 3, playCount = 0),
+            LibraryEntry("d", Kind.PC, "D", addedAt = 4, playCount = 2),
+            LibraryEntry("e", Kind.PC, "E", addedAt = 5, playCount = 5),
+        )
+
+        assertEquals(listOf("b", "e", "a"), topPlayedGames(entries).map { it.id })
+    }
+
+    @Test
+    fun installedAppsCanBeFilteredByGameSearchAndLinkedState() {
+        val apps = listOf(
+            InstalledApp("games.one", "One Game", isGame = true, isBifrostPort = false),
+            InstalledApp("tools.two", "Two Tool", isGame = false, isBifrostPort = false),
+            InstalledApp("ports.three", "Three Port", isGame = true, isBifrostPort = true),
+        )
+
+        assertTrue(defaultGamesOnly(apps))
+        assertEquals(
+            listOf("games.one"),
+            filterInstalledApps(apps, gamesOnly = true, query = "one", linkedPackages = emptySet())
+                .map { it.packageName },
+        )
+        assertEquals(
+            listOf("tools.two"),
+            filterInstalledApps(apps, gamesOnly = false, query = "tools", linkedPackages = setOf("games.one"))
+                .map { it.packageName },
+        )
+        assertFalse(defaultGamesOnly(apps.filterNot { it.isGame }))
+    }
+
+    @Test
+    fun splitControllerRectsUseFoldBoundsOrDefaultRatio() {
+        val folded = splitControllerRects(1000, 1800, PixelRect(0, 980, 1000, 1020))
+        assertEquals(PixelRect(0, 0, 1000, 980), folded.game)
+        assertEquals(PixelRect(0, 1020, 1000, 1800), folded.controls)
+
+        val default = splitControllerRects(1000, 1800)
+        assertEquals(990, default.game.bottom)
+        assertEquals(default.game.bottom, default.controls.top)
+    }
+
+    @Test
     fun resolvesStaleEntryFromCurrentLibrarySnapshot() {
         val current = LibraryEntry(
             id = "game",

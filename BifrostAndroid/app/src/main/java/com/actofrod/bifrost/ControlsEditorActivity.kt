@@ -56,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
@@ -86,6 +87,7 @@ class ControlsEditorActivity : ComponentActivity() {
     internal var selectedIndex by mutableStateOf(-1)
     internal var canvasWidthPx by mutableStateOf(1)
     internal var snapEnabled by mutableStateOf(true)
+    internal var splitPreview by mutableStateOf(false)
     internal var showSettings by mutableStateOf(false)
     internal var showControllerMap by mutableStateOf(false)
     internal var presetConfirmation by mutableStateOf<String?>(null)
@@ -117,6 +119,7 @@ class ControlsEditorActivity : ComponentActivity() {
                 "Gamepad" to readTemplate("controls-3.icp"),
                 "Keyboard + mouse" to readTemplate("controls-4.icp"),
                 "RTS" to readTemplate("controls-1.icp"),
+                "Split-Controller" to ControlsDocument.splitControllerPreset(profileId, "Split-Controller"),
             )
         } catch (exception: Exception) {
             error = exception.message ?: "Could not load controls"
@@ -200,8 +203,23 @@ private fun ErrorScreen(message: String, onBack: () -> Unit) {
 private fun ControlsEditorScreen(activity: ControlsEditorActivity, document: ControlsDocument) {
     BackHandler { activity.requestClose() }
     Box(Modifier.fillMaxSize().background(EditorBackground)) {
-        ControlsCanvas(activity, document, Modifier.fillMaxSize())
-        document.elements.getOrNull(activity.selectedIndex)?.let { selected ->
+        if (activity.splitPreview) {
+            Column(Modifier.fillMaxSize()) {
+                Box(
+                    Modifier.fillMaxWidth().weight(0.55f)
+                        .background(Brush.verticalGradient(listOf(Color(0xFF29374A), Color(0xFF111723)))),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("MOCK GAME AREA", color = Color.White.copy(alpha = 0.6f), letterSpacing = 2.sp, fontSize = 12.sp)
+                }
+                Box(Modifier.fillMaxWidth().weight(0.45f).background(Color(0xFF080B12))) {
+                    ControlsCanvas(activity, document, Modifier.fillMaxSize())
+                }
+            }
+        } else {
+            ControlsCanvas(activity, document, Modifier.fillMaxSize())
+        }
+        if (!activity.splitPreview) document.elements.getOrNull(activity.selectedIndex)?.let { selected ->
             val canvasWidth = activity.canvasWidthPx.coerceAtLeast(1)
             val halfWidth = elementBounds(selected, max(1, canvasWidth / 100).toFloat()).first
             val centerX = selected.x * canvasWidth
@@ -304,6 +322,9 @@ private fun EditorToolbar(activity: ControlsEditorActivity, modifier: Modifier) 
         }
         EditorActionButton("Snap", if (activity.snapEnabled) "✓" else "□", Modifier.weight(1f)) {
             activity.snapEnabled = !activity.snapEnabled
+        }
+        EditorActionButton("Split preview", if (activity.splitPreview) "✓" else "▱", Modifier.weight(1f)) {
+            activity.splitPreview = !activity.splitPreview
         }
         EditorActionButton("Settings", "⚙", Modifier.weight(1f)) { activity.showSettings = true }
         EditorActionButton("Controller", "🎮", Modifier.weight(1f)) { activity.showControllerMap = true }

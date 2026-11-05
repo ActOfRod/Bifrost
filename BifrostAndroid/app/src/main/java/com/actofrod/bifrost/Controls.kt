@@ -173,6 +173,30 @@ data class ControlsDocument(val json: JsonObject) {
             put("elements", JsonArray(emptyList()))
         })
 
+        fun splitControllerPreset(id: Int = 0, name: String = "Split-Controller"): ControlsDocument {
+            var document = create(id, name)
+            fun add(type: String, x: Float, y: Float, scale: Float, bindings: List<String>) {
+                document = document.addElement(type, x, y)
+                document = document.updateElement(document.elements.lastIndex) {
+                    it.update(scale = scale, bindings = bindings)
+                }
+            }
+            add("D_PAD", 0.12f, 0.55f, 0.9f, listOf("GAMEPAD_DPAD_UP", "GAMEPAD_DPAD_RIGHT", "GAMEPAD_DPAD_DOWN", "GAMEPAD_DPAD_LEFT"))
+            add("STICK", 0.32f, 0.56f, 0.76f, listOf("GAMEPAD_LEFT_THUMB_UP", "GAMEPAD_LEFT_THUMB_RIGHT", "GAMEPAD_LEFT_THUMB_DOWN", "GAMEPAD_LEFT_THUMB_LEFT"))
+            add("STICK", 0.68f, 0.56f, 0.76f, listOf("GAMEPAD_RIGHT_THUMB_UP", "GAMEPAD_RIGHT_THUMB_RIGHT", "GAMEPAD_RIGHT_THUMB_DOWN", "GAMEPAD_RIGHT_THUMB_LEFT"))
+            add("BUTTON", 0.83f, 0.43f, 0.62f, listOf("GAMEPAD_BUTTON_X", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.91f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_B", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.75f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_A", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.83f, 0.67f, 0.62f, listOf("GAMEPAD_BUTTON_Y", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.14f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L1", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.29f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L2", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.71f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R1", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.86f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R2", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.46f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_SELECT", "NONE", "NONE", "NONE"))
+            add("BUTTON", 0.54f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_START", "NONE", "NONE", "NONE"))
+            return document
+        }
+
         fun snap(x: Float, y: Float, viewWidthPx: Int, viewHeightPx: Int): NormalizedPosition {
             val step = max(1, viewWidthPx / 100)
             val width = max(1, viewWidthPx)
