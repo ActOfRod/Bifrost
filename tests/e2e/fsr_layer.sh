@@ -37,9 +37,10 @@ done
 [[ -f "$ready" ]] || fail "Xvfb did not become ready"
 rm -f "$ready"
 
-mkdir -p "$ARTIFACTS/config-scale" "$ARTIFACTS/config-auto"
+mkdir -p "$ARTIFACTS/config-scale" "$ARTIFACTS/config-auto" "$ARTIFACTS/config-nis"
 printf '[fsr]\nsharpness=0.2\nscale=2.0\nfake_mode_switch=false\nlog=true\n' >"$ARTIFACTS/config-scale/bifrost_fsr.ini"
 printf '[fsr]\nsharpness=0.2\nscale=auto\nfake_mode_switch=false\nlog=true\n' >"$ARTIFACTS/config-auto/bifrost_fsr.ini"
+printf '[fsr]\nmode=nis\nsharpness=0.2\nscale=2.0\nfake_mode_switch=false\nlog=true\n' >"$ARTIFACTS/config-nis/bifrost_fsr.ini"
 export VK_ICD_FILENAMES="$lavapipe_icd"
 export VK_LAYER_PATH="$layer:/usr/share/vulkan/explicit_layer.d"
 export VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1:VK_LAYER_KHRONOS_validation
@@ -66,6 +67,30 @@ set -e
 grep -q '256x192 -> 512x384' "$ARTIFACTS/config-scale/bifrost_fsr.log" || fail "scaled swapchain was not logged"
 if grep -Eq 'VUID-|Validation Error' "$ARTIFACTS/scale.stderr.log"; then fail "validation error in scaled run"; fi
 [[ "$colors" =~ ^[0-9]+$ && "$colors" -gt 1 ]] || fail "scaled screenshot is uniformly black"
+
+set +e
+rm -f "$ARTIFACTS/nis.png"
+BIFROST_FSR_CONFIG_DIR="$ARTIFACTS/config-nis" vkcube --c 2000 --width 512 --height 384 \
+    >"$ARTIFACTS/nis.stdout.log" 2>"$ARTIFACTS/nis.stderr.log" &
+cube_pid=$!
+colors=1
+for _ in $(seq 1 30); do
+    if ! kill -0 "$cube_pid" 2>/dev/null; then break; fi
+    import -window root "$ARTIFACTS/nis.png" >"$ARTIFACTS/nis-screenshot.log" 2>&1 || true
+    if [[ -f "$ARTIFACTS/nis.png" ]]; then
+        colors=$(convert "$ARTIFACTS/nis.png" -format '%k' info:)
+        if [[ "$colors" =~ ^[0-9]+$ && "$colors" -gt 1 ]]; then break; fi
+    fi
+    sleep 0.05
+done
+kill "$cube_pid" 2>/dev/null || true
+wait "$cube_pid"
+status=$?
+set -e
+[[ $status -eq 0 || $status -eq 143 ]] || fail "NIS vkcube exited with status $status (see $ARTIFACTS/nis.stderr.log)"
+grep -q '256x192 -> 512x384' "$ARTIFACTS/config-nis/bifrost_fsr.log" || fail "NIS scaling was not logged"
+if grep -Eq 'VUID-|Validation Error' "$ARTIFACTS/nis.stderr.log"; then fail "validation error in NIS run"; fi
+[[ "$colors" =~ ^[0-9]+$ && "$colors" -gt 1 ]] || fail "NIS screenshot is uniformly black"
 
 set +e
 BIFROST_FSR_CONFIG_DIR="$ARTIFACTS/config-auto" vkcube --c 120 --width 512 --height 384 \

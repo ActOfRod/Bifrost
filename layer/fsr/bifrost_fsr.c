@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -38,6 +39,11 @@
 #include "easu.frag.h"
 #include "rcas.frag.h"
 #include "fullscreen.vert.h"
+#include "copy.frag.h"
+#include "nis.comp.h"
+
+extern bool bifrost_nis_update_config(void *, float, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+extern void bifrost_nis_get_coefficients(float *, float *);
 
 #ifdef _WIN32
 static int fake_width, fake_height;
@@ -49,9 +55,10 @@ typedef struct Config {
     float sharpness;
     int log_enabled;
     int fake_mode_switch;
+    int nis_mode;
     char directory[1024];
 } Config;
-static Config config = {1.0f, 0.2f, 0, 1, "."};
+static Config config = {1.0f, 0.2f, 0, 1, 0, "."};
 
 static void log_message(const char *fmt, ...) {
     if (!config.log_enabled) return;
@@ -130,6 +137,7 @@ static void load_config(void) {
         } else if (strcmp(key, "log") == 0) config.log_enabled = strcmp(v, "true") == 0 || strcmp(v, "1") == 0;
         else if (strcmp(key, "fake_mode_switch") == 0)
             config.fake_mode_switch = strcmp(v, "false") != 0 && strcmp(v, "0") != 0;
+        else if (strcmp(key, "mode") == 0) config.nis_mode = strcmp(v, "nis") == 0;
     }
     fclose(f);
 }
@@ -239,6 +247,7 @@ struct InstanceState {
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR GetSurfaceSupport;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties GetQueueFamilies;
     PFN_vkGetPhysicalDeviceMemoryProperties GetMemoryProperties;
+    PFN_vkGetPhysicalDeviceFormatProperties GetFormatProperties;
     InstanceState *next;
 };
 struct DeviceState {
@@ -268,6 +277,7 @@ struct DeviceState {
     PFN_vkCreateDescriptorSetLayout CreateDescriptorSetLayout; PFN_vkDestroyDescriptorSetLayout DestroyDescriptorSetLayout;
     PFN_vkCreatePipelineLayout CreatePipelineLayout; PFN_vkDestroyPipelineLayout DestroyPipelineLayout;
     PFN_vkCreateGraphicsPipelines CreateGraphicsPipelines; PFN_vkDestroyPipeline DestroyPipeline;
+    PFN_vkCreateComputePipelines CreateComputePipelines;
     PFN_vkCreateDescriptorPool CreateDescriptorPool; PFN_vkDestroyDescriptorPool DestroyDescriptorPool;
     PFN_vkAllocateDescriptorSets AllocateDescriptorSets; PFN_vkUpdateDescriptorSets UpdateDescriptorSets;
     PFN_vkCreateCommandPool CreateCommandPool; PFN_vkDestroyCommandPool DestroyCommandPool;
@@ -277,6 +287,10 @@ struct DeviceState {
     PFN_vkCmdEndRenderPass CmdEndRenderPass; PFN_vkCmdBindPipeline CmdBindPipeline;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets; PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdSetViewport CmdSetViewport; PFN_vkCmdSetScissor CmdSetScissor; PFN_vkCmdDraw CmdDraw;
+    PFN_vkCmdDispatch CmdDispatch; PFN_vkCmdClearColorImage CmdClearColorImage;
+    PFN_vkCreateBuffer CreateBuffer; PFN_vkDestroyBuffer DestroyBuffer;
+    PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements; PFN_vkBindBufferMemory BindBufferMemory;
+    PFN_vkMapMemory MapMemory; PFN_vkUnmapMemory UnmapMemory; PFN_vkGetImageSubresourceLayout GetImageSubresourceLayout;
     PFN_vkCreateFence CreateFence; PFN_vkDestroyFence DestroyFence; PFN_vkWaitForFences WaitForFences;
     PFN_vkResetFences ResetFences; PFN_vkCreateSemaphore CreateSemaphore; PFN_vkDestroySemaphore DestroySemaphore;
     PFN_vkReleaseSwapchainImagesEXT ReleaseImages;
@@ -291,10 +305,12 @@ typedef struct Frame {
     VkImageView app_view, intermediate_view, real_view;
     VkFramebuffer easu_fb, rcas_fb;
     VkDescriptorSet easu_set, rcas_set;
+    VkDescriptorSet nis_set;
     VkCommandBuffer command;
     VkFence fence;
     VkSemaphore done;
     int real_initialized;
+    int nis_initialized;
 } Frame;
 struct Swapchain {
     VkSwapchainKHR app, real; DeviceState *device; VkFormat format;
@@ -302,7 +318,12 @@ struct Swapchain {
     Frame *frames; int scaled; uint32_t pool_family;
     VkCommandPool pool; VkSampler sampler; VkRenderPass easu_pass, rcas_pass;
     VkDescriptorSetLayout set_layout; VkPipelineLayout pipeline_layout;
-    VkPipeline easu_pipeline, rcas_pipeline; VkDescriptorPool descriptor_pool;
+    VkPipeline easu_pipeline, rcas_pipeline, copy_pipeline, nis_pipeline; VkDescriptorPool descriptor_pool, nis_descriptor_pool;
+    VkDescriptorSetLayout nis_set_layout; VkPipelineLayout nis_pipeline_layout;
+    VkBuffer nis_config_buffer; VkDeviceMemory nis_config_memory;
+    VkImage coef_scale_image, coef_usm_image; VkDeviceMemory coef_scale_memory, coef_usm_memory;
+    VkImageView coef_scale_view, coef_usm_view; VkSampler nis_sampler;
+    int nis_mode, nis_textures_initialized;
     Swapchain *next;
 };
 static InstanceState *instances;
@@ -435,6 +456,11 @@ static uint32_t memory_type(DeviceState *d, uint32_t bits) {
     for (uint32_t i = 0; i < d->memory.memoryTypeCount; ++i) if (bits & (1u << i)) return i;
     return UINT32_MAX;
 }
+static uint32_t memory_type_with_flags(DeviceState *d, uint32_t bits, VkMemoryPropertyFlags flags) {
+    for (uint32_t i = 0; i < d->memory.memoryTypeCount; ++i)
+        if ((bits & (1u << i)) && (d->memory.memoryTypes[i].propertyFlags & flags) == flags) return i;
+    return UINT32_MAX;
+}
 
 static uint32_t choose_graphics_family(DeviceState *d, VkSurfaceKHR surface,
                                        PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support) {
@@ -487,6 +513,46 @@ static int make_image(DeviceState *d, VkFormat format, VkExtent2D extent, VkImag
     vi.image = *image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = format;
     vi.subresourceRange = (VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
     return d->CreateImageView(d->handle,&vi,NULL,view) == VK_SUCCESS;
+}
+static int make_coeff_image(DeviceState *d, const float *pixels, VkImage *image,
+                            VkDeviceMemory *memory, VkImageView *view) {
+    VkImageCreateInfo ci={VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType=VK_IMAGE_TYPE_2D;ci.format=VK_FORMAT_R32G32B32A32_SFLOAT;
+    ci.extent=(VkExtent3D){2,64,1};ci.mipLevels=ci.arrayLayers=1;ci.samples=VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling=VK_IMAGE_TILING_LINEAR;ci.usage=VK_IMAGE_USAGE_SAMPLED_BIT;
+    ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;ci.initialLayout=VK_IMAGE_LAYOUT_PREINITIALIZED;
+    if(d->CreateImage(d->handle,&ci,NULL,image)!=VK_SUCCESS)return 0;
+    VkMemoryRequirements req;d->GetImageMemoryRequirements(d->handle,*image,&req);
+    uint32_t type=memory_type_with_flags(d,req.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if(type==UINT32_MAX)return 0;
+    VkMemoryAllocateInfo ai={VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=req.size;ai.memoryTypeIndex=type;
+    if(d->AllocateMemory(d->handle,&ai,NULL,memory)!=VK_SUCCESS)return 0;
+    if(d->BindImageMemory(d->handle,*image,*memory,0)!=VK_SUCCESS)return 0;
+    VkImageSubresource sub={VK_IMAGE_ASPECT_COLOR_BIT,0,0};VkSubresourceLayout layout;
+    d->GetImageSubresourceLayout(d->handle,*image,&sub,&layout);
+    void *mapped=NULL;if(d->MapMemory(d->handle,*memory,0,req.size,0,&mapped)!=VK_SUCCESS)return 0;
+    for(uint32_t y=0;y<64;y++)
+        memcpy((uint8_t *)mapped+layout.offset+(VkDeviceSize)y*layout.rowPitch,pixels+(size_t)y*8,8*sizeof(float));
+    d->UnmapMemory(d->handle,*memory);
+    VkImageViewCreateInfo vi={VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image=*image;vi.viewType=VK_IMAGE_VIEW_TYPE_2D;vi.format=VK_FORMAT_R32G32B32A32_SFLOAT;
+    vi.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    return d->CreateImageView(d->handle,&vi,NULL,view)==VK_SUCCESS;
+}
+static int make_uniform_buffer(DeviceState *d, const void *data, VkDeviceSize size,
+                               VkBuffer *buffer, VkDeviceMemory *memory) {
+    VkBufferCreateInfo ci={VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};ci.size=size;ci.usage=VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+    if(d->CreateBuffer(d->handle,&ci,NULL,buffer)!=VK_SUCCESS)return 0;
+    VkMemoryRequirements req;d->GetBufferMemoryRequirements(d->handle,*buffer,&req);
+    uint32_t type=memory_type_with_flags(d,req.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if(type==UINT32_MAX)return 0;
+    VkMemoryAllocateInfo ai={VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=req.size;ai.memoryTypeIndex=type;
+    if(d->AllocateMemory(d->handle,&ai,NULL,memory)!=VK_SUCCESS)return 0;
+    if(d->BindBufferMemory(d->handle,*buffer,*memory,0)!=VK_SUCCESS)return 0;
+    void *mapped=NULL;if(d->MapMemory(d->handle,*memory,0,size,0,&mapped)!=VK_SUCCESS)return 0;
+    memcpy(mapped,data,(size_t)size);d->UnmapMemory(d->handle,*memory);
+    return 1;
 }
 static VkRenderPass make_render_pass(DeviceState *d, VkFormat format, VkAttachmentLoadOp load,
                                     VkImageLayout initial, VkImageLayout final) {
@@ -554,6 +620,92 @@ static VkPipeline make_pipeline(DeviceState *d, VkPipelineLayout layout, VkRende
     d->DestroyShaderModule(d->handle,vertex,NULL);
     return r == VK_SUCCESS ? pipeline : VK_NULL_HANDLE;
 }
+static int setup_nis(Swapchain *s) {
+    DeviceState *d=s->device;
+    float factor=fminf((float)s->output_extent.width/s->app_extent.width,(float)s->output_extent.height/s->app_extent.height);
+    uint32_t fitw=(uint32_t)fmaxf(1.0f,floorf(s->app_extent.width*factor+0.5f));
+    uint32_t fith=(uint32_t)fmaxf(1.0f,floorf(s->app_extent.height*factor+0.5f));
+    uint32_t ox=(s->output_extent.width-fitw)/2,oy=(s->output_extent.height-fith)/2;
+    uint8_t config_data[256]={0};
+    if(!bifrost_nis_update_config(config_data,config.sharpness,s->app_extent.width,s->app_extent.height,
+            ox,oy,fitw,fith,s->output_extent.width,s->output_extent.height))return 0;
+    if(!make_uniform_buffer(d,config_data,sizeof(config_data),&s->nis_config_buffer,&s->nis_config_memory))return 0;
+    float scale[64*8],usm[64*8];bifrost_nis_get_coefficients(scale,usm);
+    if(!make_coeff_image(d,scale,&s->coef_scale_image,&s->coef_scale_memory,&s->coef_scale_view) ||
+       !make_coeff_image(d,usm,&s->coef_usm_image,&s->coef_usm_memory,&s->coef_usm_view))return 0;
+    VkSamplerCreateInfo si={VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};si.magFilter=si.minFilter=VK_FILTER_LINEAR;
+    si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;si.maxLod=0.0f;
+    if(d->CreateSampler(d->handle,&si,NULL,&s->nis_sampler)!=VK_SUCCESS)return 0;
+
+    VkDescriptorSetLayoutBinding bindings[6]={{0}};
+    bindings[0]=(VkDescriptorSetLayoutBinding){0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
+    bindings[1]=(VkDescriptorSetLayoutBinding){1,VK_DESCRIPTOR_TYPE_SAMPLER,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
+    bindings[2]=(VkDescriptorSetLayoutBinding){2,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
+    bindings[3]=(VkDescriptorSetLayoutBinding){3,VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
+    bindings[4]=(VkDescriptorSetLayoutBinding){4,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
+    bindings[5]=(VkDescriptorSetLayoutBinding){5,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL};
+    VkDescriptorSetLayoutCreateInfo dli={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dli.bindingCount=6;dli.pBindings=bindings;
+    if(d->CreateDescriptorSetLayout(d->handle,&dli,NULL,&s->nis_set_layout)!=VK_SUCCESS)return 0;
+    VkPipelineLayoutCreateInfo pli={VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount=1;pli.pSetLayouts=&s->nis_set_layout;
+    if(d->CreatePipelineLayout(d->handle,&pli,NULL,&s->nis_pipeline_layout)!=VK_SUCCESS)return 0;
+    VkShaderModuleCreateInfo smi={VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    smi.codeSize=sizeof(nis_spv);smi.pCode=nis_spv;
+    VkShaderModule shader;
+    if(d->CreateShaderModule(d->handle,&smi,NULL,&shader)!=VK_SUCCESS)return 0;
+    VkComputePipelineCreateInfo cpi={VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpi.stage=(VkPipelineShaderStageCreateInfo){VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    cpi.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;cpi.stage.module=shader;cpi.stage.pName="main";
+    cpi.layout=s->nis_pipeline_layout;
+    VkResult result=d->CreateComputePipelines(d->handle,VK_NULL_HANDLE,1,&cpi,NULL,&s->nis_pipeline);
+    d->DestroyShaderModule(d->handle,shader,NULL);
+    if(result!=VK_SUCCESS)return 0;
+
+    VkDescriptorPoolSize pool_sizes[4]={
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,s->count},
+        {VK_DESCRIPTOR_TYPE_SAMPLER,s->count},
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,s->count*3},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,s->count}
+    };
+    VkDescriptorPoolCreateInfo dpi={VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.maxSets=s->count;dpi.poolSizeCount=4;dpi.pPoolSizes=pool_sizes;
+    if(d->CreateDescriptorPool(d->handle,&dpi,NULL,&s->nis_descriptor_pool)!=VK_SUCCESS)return 0;
+    VkDescriptorSetLayout *layouts=calloc(s->count,sizeof(*layouts));
+    VkDescriptorSet *sets=calloc(s->count,sizeof(*sets));
+    if(!layouts||!sets){free(layouts);free(sets);return 0;}
+    for(uint32_t i=0;i<s->count;i++)layouts[i]=s->nis_set_layout;
+    VkDescriptorSetAllocateInfo dai={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool=s->nis_descriptor_pool;dai.descriptorSetCount=s->count;dai.pSetLayouts=layouts;
+    if(d->AllocateDescriptorSets(d->handle,&dai,sets)!=VK_SUCCESS){free(layouts);free(sets);return 0;}
+    VkDescriptorBufferInfo config_info={s->nis_config_buffer,0,sizeof(config_data)};
+    VkDescriptorImageInfo sampler_info={s->nis_sampler,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_UNDEFINED};
+    VkDescriptorImageInfo coefficients[2]={
+        {VK_NULL_HANDLE,s->coef_scale_view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {VK_NULL_HANDLE,s->coef_usm_view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+    };
+    for(uint32_t i=0;i<s->count;i++){
+        Frame *f=&s->frames[i];f->nis_set=sets[i];
+        VkDescriptorImageInfo input={VK_NULL_HANDLE,f->app_view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorImageInfo output={VK_NULL_HANDLE,f->intermediate_view,VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet writes[6];
+        for(uint32_t j=0;j<6;j++){
+            writes[j]=(VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[j].dstSet=f->nis_set;writes[j].dstBinding=j;writes[j].descriptorCount=1;
+        }
+        writes[0].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;writes[0].pBufferInfo=&config_info;
+        writes[1].descriptorType=VK_DESCRIPTOR_TYPE_SAMPLER;writes[1].pImageInfo=&sampler_info;
+        writes[2].descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;writes[2].pImageInfo=&input;
+        writes[3].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;writes[3].pImageInfo=&output;
+        writes[4].descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;writes[4].pImageInfo=&coefficients[0];
+        writes[5].descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;writes[5].pImageInfo=&coefficients[1];
+        d->UpdateDescriptorSets(d->handle,6,writes,0,NULL);
+    }
+    free(layouts);free(sets);
+    s->nis_mode=1;
+    return 1;
+}
 static void destroy_swapchain_resources(Swapchain *s) {
     DeviceState *d = s->device;
     if (s->pool) d->DeviceWaitIdle(d->handle);
@@ -574,10 +726,24 @@ static void destroy_swapchain_resources(Swapchain *s) {
     }
     free(s->frames);
     if (s->descriptor_pool) d->DestroyDescriptorPool(d->handle,s->descriptor_pool,NULL);
+    if (s->nis_descriptor_pool) d->DestroyDescriptorPool(d->handle,s->nis_descriptor_pool,NULL);
     if (s->easu_pipeline) d->DestroyPipeline(d->handle,s->easu_pipeline,NULL);
     if (s->rcas_pipeline) d->DestroyPipeline(d->handle,s->rcas_pipeline,NULL);
+    if (s->copy_pipeline) d->DestroyPipeline(d->handle,s->copy_pipeline,NULL);
+    if (s->nis_pipeline) d->DestroyPipeline(d->handle,s->nis_pipeline,NULL);
     if (s->pipeline_layout) d->DestroyPipelineLayout(d->handle,s->pipeline_layout,NULL);
+    if (s->nis_pipeline_layout) d->DestroyPipelineLayout(d->handle,s->nis_pipeline_layout,NULL);
     if (s->set_layout) d->DestroyDescriptorSetLayout(d->handle,s->set_layout,NULL);
+    if (s->nis_set_layout) d->DestroyDescriptorSetLayout(d->handle,s->nis_set_layout,NULL);
+    if (s->nis_config_buffer) d->DestroyBuffer(d->handle,s->nis_config_buffer,NULL);
+    if (s->nis_config_memory) d->FreeMemory(d->handle,s->nis_config_memory,NULL);
+    if (s->nis_sampler) d->DestroySampler(d->handle,s->nis_sampler,NULL);
+    if (s->coef_scale_view) d->DestroyImageView(d->handle,s->coef_scale_view,NULL);
+    if (s->coef_usm_view) d->DestroyImageView(d->handle,s->coef_usm_view,NULL);
+    if (s->coef_scale_image) d->DestroyImage(d->handle,s->coef_scale_image,NULL);
+    if (s->coef_usm_image) d->DestroyImage(d->handle,s->coef_usm_image,NULL);
+    if (s->coef_scale_memory) d->FreeMemory(d->handle,s->coef_scale_memory,NULL);
+    if (s->coef_usm_memory) d->FreeMemory(d->handle,s->coef_usm_memory,NULL);
     if (s->easu_pass) d->DestroyRenderPass(d->handle,s->easu_pass,NULL);
     if (s->rcas_pass) d->DestroyRenderPass(d->handle,s->rcas_pass,NULL);
     if (s->sampler) d->DestroySampler(d->handle,s->sampler,NULL);
@@ -586,6 +752,7 @@ static void destroy_swapchain_resources(Swapchain *s) {
 
 static int setup_swapchain(Swapchain *s,uint32_t family) {
     DeviceState *d = s->device;
+    s->nis_mode=config.nis_mode;
     if(family>=d->family_count || !(d->families[family].queueFlags&VK_QUEUE_GRAPHICS_BIT)) return 0;
     VkImage *real_images = calloc(s->count,sizeof(*real_images));
     if (!real_images) return 0;
@@ -593,9 +760,10 @@ static int setup_swapchain(Swapchain *s,uint32_t family) {
     if (d->GetSwapchainImages(d->handle,s->real,&n,real_images)!=VK_SUCCESS || n!=s->count) { free(real_images); return 0; }
     s->frames=calloc(n,sizeof(*s->frames)); if (!s->frames) { free(real_images); return 0; }
     s->count=n;
-    s->easu_pass=make_render_pass(d,VK_FORMAT_R16G16B16A16_SFLOAT,VK_ATTACHMENT_LOAD_OP_CLEAR,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if(!s->nis_mode)
+        s->easu_pass=make_render_pass(d,VK_FORMAT_R16G16B16A16_SFLOAT,VK_ATTACHMENT_LOAD_OP_CLEAR,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     s->rcas_pass=make_render_pass(d,s->format,VK_ATTACHMENT_LOAD_OP_DONT_CARE,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    if (!s->easu_pass || !s->rcas_pass) { free(real_images); return 0; }
+    if ((!s->nis_mode && !s->easu_pass) || !s->rcas_pass) { free(real_images); return 0; }
     VkDescriptorSetLayoutBinding bind={0}; bind.binding=0; bind.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bind.descriptorCount=1; bind.stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo dli={VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; dli.bindingCount=1; dli.pBindings=&bind;
@@ -608,9 +776,13 @@ static int setup_swapchain(Swapchain *s,uint32_t family) {
     si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST; si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.maxLod=0.0f;
     if (d->CreateSampler(d->handle,&si,NULL,&s->sampler)!=VK_SUCCESS) { free(real_images); return 0; }
-    s->easu_pipeline=make_pipeline(d,s->pipeline_layout,s->easu_pass,easu_spv,sizeof(easu_spv));
-    s->rcas_pipeline=make_pipeline(d,s->pipeline_layout,s->rcas_pass,rcas_spv,sizeof(rcas_spv));
-    if (!s->easu_pipeline || !s->rcas_pipeline) { free(real_images); return 0; }
+    if(s->nis_mode)
+        s->copy_pipeline=make_pipeline(d,s->pipeline_layout,s->rcas_pass,copy_spv,sizeof(copy_spv));
+    else {
+        s->easu_pipeline=make_pipeline(d,s->pipeline_layout,s->easu_pass,easu_spv,sizeof(easu_spv));
+        s->rcas_pipeline=make_pipeline(d,s->pipeline_layout,s->rcas_pass,rcas_spv,sizeof(rcas_spv));
+    }
+    if ((s->nis_mode && !s->copy_pipeline) || (!s->nis_mode && (!s->easu_pipeline || !s->rcas_pipeline))) { free(real_images); return 0; }
     VkDescriptorPoolSize ps={VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,n*2};
     VkDescriptorPoolCreateInfo dpi={VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; dpi.maxSets=n*2; dpi.poolSizeCount=1; dpi.pPoolSizes=&ps;
     if (d->CreateDescriptorPool(d->handle,&dpi,NULL,&s->descriptor_pool)!=VK_SUCCESS) { free(real_images); return 0; }
@@ -634,11 +806,16 @@ static int setup_swapchain(Swapchain *s,uint32_t family) {
         rvi.image=f->real; if (d->CreateImageView(d->handle,&rvi,NULL,&f->real_view)!=VK_SUCCESS) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
         /* We sample and render through each image's own format; Vulkan performs sRGB conversion when requested. */
         if (!make_image(d,s->format,s->app_extent,s->app_usage|VK_IMAGE_USAGE_SAMPLED_BIT,&f->app,&f->app_memory,&f->app_view)) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
-        if (!make_image(d,VK_FORMAT_R16G16B16A16_SFLOAT,s->output_extent,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,&f->intermediate,&f->intermediate_memory,&f->intermediate_view)) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
+        VkFormat intermediate_format=s->nis_mode?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_R16G16B16A16_SFLOAT;
+        VkImageUsageFlags intermediate_usage=VK_IMAGE_USAGE_SAMPLED_BIT|
+            (s->nis_mode?(VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT):VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        if (!make_image(d,intermediate_format,s->output_extent,intermediate_usage,&f->intermediate,&f->intermediate_memory,&f->intermediate_view)) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
         VkFramebufferCreateInfo fbi={VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO}; fbi.width=s->output_extent.width;fbi.height=s->output_extent.height;fbi.layers=1;
-        fbi.renderPass=s->easu_pass;fbi.attachmentCount=1;fbi.pAttachments=&f->intermediate_view;
-        if (d->CreateFramebuffer(d->handle,&fbi,NULL,&f->easu_fb)!=VK_SUCCESS) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
-        fbi.renderPass=s->rcas_pass;fbi.pAttachments=&f->real_view;
+        if(!s->nis_mode){
+            fbi.renderPass=s->easu_pass;fbi.attachmentCount=1;fbi.pAttachments=&f->intermediate_view;
+            if (d->CreateFramebuffer(d->handle,&fbi,NULL,&f->easu_fb)!=VK_SUCCESS) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
+        }
+        fbi.renderPass=s->rcas_pass;fbi.attachmentCount=1;fbi.pAttachments=&f->real_view;
         if (d->CreateFramebuffer(d->handle,&fbi,NULL,&f->rcas_fb)!=VK_SUCCESS) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
         VkFenceCreateInfo fci={VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fci.flags=VK_FENCE_CREATE_SIGNALED_BIT;
         if (d->CreateFence(d->handle,&fci,NULL,&f->fence)!=VK_SUCCESS) { free(commands);free(layouts);free(sets);free(real_images);return 0; }
@@ -653,6 +830,7 @@ static int setup_swapchain(Swapchain *s,uint32_t family) {
         d->UpdateDescriptorSets(d->handle,2,writes,0,NULL);
     }
     free(commands);free(layouts);free(sets);free(real_images);
+    if(s->nis_mode&&!setup_nis(s))return 0;
     return 1;
 }
 
@@ -714,6 +892,7 @@ static VkResult VKAPI_CALL layerCreateInstance(const VkInstanceCreateInfo *ci, c
     ILOAD(GetSurfaceSupport,GetPhysicalDeviceSurfaceSupportKHR);
     ILOAD(GetQueueFamilies,GetPhysicalDeviceQueueFamilyProperties);
     ILOAD(GetMemoryProperties,GetPhysicalDeviceMemoryProperties);
+    ILOAD(GetFormatProperties,GetPhysicalDeviceFormatProperties);
 #undef ILOAD
     state_lock();
     s->next=instances; instances=s;
@@ -777,11 +956,15 @@ static VkResult VKAPI_CALL layerCreateDevice(VkPhysicalDevice phys,const VkDevic
     DLOAD(CreateRenderPass);DLOAD(DestroyRenderPass);DLOAD(CreateFramebuffer);DLOAD(DestroyFramebuffer);
     DLOAD(CreateShaderModule);DLOAD(DestroyShaderModule);DLOAD(CreateDescriptorSetLayout);DLOAD(DestroyDescriptorSetLayout);
     DLOAD(CreatePipelineLayout);DLOAD(DestroyPipelineLayout);DLOAD(CreateGraphicsPipelines);DLOAD(DestroyPipeline);
+    DLOAD(CreateComputePipelines);
     DLOAD(CreateDescriptorPool);DLOAD(DestroyDescriptorPool);DLOAD(AllocateDescriptorSets);DLOAD(UpdateDescriptorSets);
     DLOAD(CreateCommandPool);DLOAD(DestroyCommandPool);DLOAD(AllocateCommandBuffers);DLOAD(FreeCommandBuffers);
     DLOAD(BeginCommandBuffer);DLOAD(EndCommandBuffer);DLOAD(CmdPipelineBarrier);DLOAD(CmdBeginRenderPass);
     DLOAD(CmdEndRenderPass);DLOAD(CmdBindPipeline);DLOAD(CmdBindDescriptorSets);DLOAD(CmdPushConstants);
     DLOAD(CmdSetViewport);DLOAD(CmdSetScissor);DLOAD(CmdDraw);DLOAD(CreateFence);DLOAD(DestroyFence);
+    DLOAD(CmdDispatch);DLOAD(CmdClearColorImage);DLOAD(CreateBuffer);DLOAD(DestroyBuffer);
+    DLOAD(GetBufferMemoryRequirements);DLOAD(BindBufferMemory);DLOAD(MapMemory);DLOAD(UnmapMemory);
+    DLOAD(GetImageSubresourceLayout);
     DLOAD(WaitForFences);DLOAD(ResetFences);DLOAD(CreateSemaphore);DLOAD(DestroySemaphore);
     d->ReleaseImages=(PFN_vkReleaseSwapchainImagesEXT)next_gdpa(*out,"vkReleaseSwapchainImagesEXT");
 #undef DLOAD
@@ -827,8 +1010,24 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps=is?is->GetCaps:NULL;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties get_families=is?is->GetQueueFamilies:NULL;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR get_support=is?is->GetSurfaceSupport:NULL;
+    PFN_vkGetPhysicalDeviceFormatProperties get_format_properties=is?is->GetFormatProperties:NULL;
     state_unlock();
     if(!d||!create_swapchain)return VK_ERROR_INITIALIZATION_FAILED;
+    if(config.nis_mode){
+        VkFormatProperties output_props={0},coeff_props={0};
+        if(!get_format_properties){
+            log_message("NIS format properties are unavailable; passing through");
+            return create_swapchain(dev,ci,a,out);
+        }
+        get_format_properties(physical,VK_FORMAT_R8G8B8A8_UNORM,&output_props);
+        get_format_properties(physical,VK_FORMAT_R32G32B32A32_SFLOAT,&coeff_props);
+        if((output_props.optimalTilingFeatures&(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) !=
+             (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ||
+           !(coeff_props.linearTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)){
+            log_message("NIS image formats are unsupported; passing through");
+            return create_swapchain(dev,ci,a,out);
+        }
+    }
     VkSurfaceCapabilitiesKHR caps={0};
     if(!get_caps||get_caps(physical,ci->surface,&caps)!=VK_SUCCESS) {
         log_message("pass-through swapchain %ux%u",ci->imageExtent.width,ci->imageExtent.height);
@@ -867,7 +1066,14 @@ static VkResult VKAPI_CALL layerCreateSwapchain(VkDevice dev,const VkSwapchainCr
     uint32_t n=0;r=get_images(dev,s->real,&n,NULL);
     if(r!=VK_SUCCESS||!n){destroy_swapchain(dev,*out,a);free(s);return r==VK_SUCCESS?VK_ERROR_INITIALIZATION_FAILED:r;}
     s->count=n;
-    if(!setup_swapchain(s,family)){destroy_swapchain_resources(s);destroy_swapchain(dev,*out,a);free(s);return VK_ERROR_INITIALIZATION_FAILED;}
+    if(!setup_swapchain(s,family)){
+        destroy_swapchain_resources(s);destroy_swapchain(dev,*out,a);free(s);
+        if(config.nis_mode){
+            log_message("NIS setup failed; using plain swapchain");
+            return create_swapchain(dev,ci,a,out);
+        }
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     state_lock();
     s->next=swapchains;swapchains=s;
     VkExtent2D app_extent=s->app_extent, output_extent=s->output_extent;
@@ -933,31 +1139,73 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     app.oldLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;app.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     app.srcQueueFamilyIndex=app.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;app.image=f->app;
     app.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-    d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,NULL,0,NULL,1,&app);
+    VkPipelineStageFlags app_read_stage=s->nis_mode?
+        (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT):VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,app_read_stage,0,0,NULL,0,NULL,1,&app);
 
     uint32_t rw=s->output_extent.width,rh=s->output_extent.height;
     float factor=fminf((float)rw/s->app_extent.width,(float)rh/s->app_extent.height);
     uint32_t fitw=(uint32_t)fmaxf(1.0f,floorf(s->app_extent.width*factor+0.5f));
     uint32_t fith=(uint32_t)fmaxf(1.0f,floorf(s->app_extent.height*factor+0.5f));
     uint32_t ox=(rw-fitw)/2,oy=(rh-fith)/2;
-    uint32_t c0[4],c1[4],c2[4],c3[4],rc[4];
-    FsrEasuCon(c0,c1,c2,c3,(float)s->app_extent.width,(float)s->app_extent.height,
-               (float)s->app_extent.width,(float)s->app_extent.height,(float)fitw,(float)fith);
-    FsrRcasCon(rc,config.sharpness);
-    uint32_t push[20]={0};
-    memcpy(push,c0,16);memcpy(push+4,c1,16);memcpy(push+8,c2,16);memcpy(push+12,c3,16);
-    push[16]=ox;push[17]=oy;
-    VkClearValue clear={.color={{0,0,0,1}}};
-    VkRenderPassBeginInfo rp={VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};rp.renderPass=s->easu_pass;
-    rp.framebuffer=f->easu_fb;rp.renderArea=(VkRect2D){{0,0},{rw,rh}};rp.clearValueCount=1;rp.pClearValues=&clear;
-    d->CmdBeginRenderPass(f->command,&rp,VK_SUBPASS_CONTENTS_INLINE);
-    VkViewport viewport={(float)ox,(float)oy,(float)fitw,(float)fith,0.0f,1.0f};
-    VkRect2D scissor={{(int32_t)ox,(int32_t)oy},{fitw,fith}};
-    d->CmdSetViewport(f->command,0,1,&viewport);d->CmdSetScissor(f->command,0,1,&scissor);
-    d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->easu_pipeline);
-    d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->pipeline_layout,0,1,&f->easu_set,0,NULL);
-    d->CmdPushConstants(f->command,s->pipeline_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,80,push);
-    d->CmdDraw(f->command,3,1,0,0);d->CmdEndRenderPass(f->command);
+    VkRenderPassBeginInfo rp={VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    VkViewport viewport;
+    VkRect2D scissor;
+    if(s->nis_mode){
+        VkImageMemoryBarrier output={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        output.srcAccessMask=f->nis_initialized?VK_ACCESS_SHADER_READ_BIT:0;
+        output.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+        output.oldLayout=f->nis_initialized?VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_UNDEFINED;
+        output.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        output.srcQueueFamilyIndex=output.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        output.image=f->intermediate;output.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        d->CmdPipelineBarrier(f->command,f->nis_initialized?VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,NULL,0,NULL,1,&output);
+        VkClearColorValue black={{0,0,0,1}};
+        VkImageSubresourceRange range={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        d->CmdClearColorImage(f->command,f->intermediate,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&black,1,&range);
+        output.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;output.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
+        output.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;output.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+        d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,1,&output);
+        if(!s->nis_textures_initialized){
+            VkImageMemoryBarrier coeffs[2]={{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
+            coeffs[0].srcAccessMask=coeffs[1].srcAccessMask=VK_ACCESS_HOST_WRITE_BIT;
+            coeffs[0].dstAccessMask=coeffs[1].dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+            coeffs[0].oldLayout=coeffs[1].oldLayout=VK_IMAGE_LAYOUT_PREINITIALIZED;
+            coeffs[0].newLayout=coeffs[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            coeffs[0].srcQueueFamilyIndex=coeffs[0].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+            coeffs[1].srcQueueFamilyIndex=coeffs[1].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+            coeffs[0].image=s->coef_scale_image;coeffs[1].image=s->coef_usm_image;
+            coeffs[0].subresourceRange=coeffs[1].subresourceRange=range;
+            d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,2,coeffs);
+            s->nis_textures_initialized=1;
+        }
+        d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_COMPUTE,s->nis_pipeline);
+        d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_COMPUTE,s->nis_pipeline_layout,0,1,&f->nis_set,0,NULL);
+        d->CmdDispatch(f->command,(fitw+31)/32,(fith+23)/24,1);
+        output.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;output.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+        output.oldLayout=VK_IMAGE_LAYOUT_GENERAL;output.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,NULL,0,NULL,1,&output);
+        f->nis_initialized=1;
+    }else{
+        uint32_t c0[4],c1[4],c2[4],c3[4];
+        FsrEasuCon(c0,c1,c2,c3,(float)s->app_extent.width,(float)s->app_extent.height,
+                   (float)s->app_extent.width,(float)s->app_extent.height,(float)fitw,(float)fith);
+        uint32_t push[20]={0};
+        memcpy(push,c0,16);memcpy(push+4,c1,16);memcpy(push+8,c2,16);memcpy(push+12,c3,16);
+        push[16]=ox;push[17]=oy;
+        VkClearValue clear={.color={{0,0,0,1}}};
+        rp.renderPass=s->easu_pass;
+        rp.framebuffer=f->easu_fb;rp.renderArea=(VkRect2D){{0,0},{rw,rh}};rp.clearValueCount=1;rp.pClearValues=&clear;
+        d->CmdBeginRenderPass(f->command,&rp,VK_SUBPASS_CONTENTS_INLINE);
+        viewport=(VkViewport){(float)ox,(float)oy,(float)fitw,(float)fith,0.0f,1.0f};
+        scissor=(VkRect2D){{(int32_t)ox,(int32_t)oy},{fitw,fith}};
+        d->CmdSetViewport(f->command,0,1,&viewport);d->CmdSetScissor(f->command,0,1,&scissor);
+        d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->easu_pipeline);
+        d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->pipeline_layout,0,1,&f->easu_set,0,NULL);
+        d->CmdPushConstants(f->command,s->pipeline_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,80,push);
+        d->CmdDraw(f->command,3,1,0,0);d->CmdEndRenderPass(f->command);
+    }
 
     VkImageMemoryBarrier real={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     real.srcAccessMask=0;real.dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
@@ -969,9 +1217,12 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     d->CmdBeginRenderPass(f->command,&rp,VK_SUBPASS_CONTENTS_INLINE);
     viewport=(VkViewport){0,0,(float)rw,(float)rh,0,1};scissor=(VkRect2D){{0,0},{rw,rh}};
     d->CmdSetViewport(f->command,0,1,&viewport);d->CmdSetScissor(f->command,0,1,&scissor);
-    d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->rcas_pipeline);
+    d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->nis_mode?s->copy_pipeline:s->rcas_pipeline);
     d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->pipeline_layout,0,1,&f->rcas_set,0,NULL);
-    d->CmdPushConstants(f->command,s->pipeline_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,16,rc);
+    if(!s->nis_mode){
+        uint32_t rcas[4];FsrRcasCon(rcas,config.sharpness);
+        d->CmdPushConstants(f->command,s->pipeline_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,16,rcas);
+    }
     d->CmdDraw(f->command,3,1,0,0);d->CmdEndRenderPass(f->command);
     VkImageMemoryBarrier back[2]={app,real};
     back[0].srcAccessMask=VK_ACCESS_SHADER_READ_BIT;back[0].dstAccessMask=0;
