@@ -72,7 +72,7 @@ diff --git a/java/com/winlator/widget/InputControlsView.java b/java/com/winlator
 @@ -393,0 +394,13 @@
 +    @Override
 +    public boolean isAxisMapped(int deviceId, int axis, float value) {
-+        if (editMode || Math.abs(value) <= ControlElement.STICK_DEAD_ZONE) return false;
++        if (editMode || value == 0.0f) return false;
 +        ExternalController controller = profile != null ? profile.getController(deviceId) : null;
 +        byte direction = (byte)Math.signum(value);
 +        return controller != null && hasControllerBinding(controller, ExternalControllerBinding.getKeyCodeForAxis(axis, direction));
