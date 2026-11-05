@@ -135,6 +135,34 @@ class LibraryTest {
     }
 
     @Test
+    fun artworkCleanupOnlyDeletesUnreferencedFilesFromItsOwnedDirectory() {
+        val ownedArtwork = "/app/files/hub/banner-1.png"
+        val referencedArtwork = "/app/files/hub/banner-2.png"
+
+        assertTrue(
+            shouldDeleteUnreferencedOwnedArtwork(
+                ownedArtwork,
+                "/app/files/hub",
+                setOf(referencedArtwork),
+            ),
+        )
+        assertFalse(
+            shouldDeleteUnreferencedOwnedArtwork(
+                referencedArtwork,
+                "/app/files/hub",
+                setOf(referencedArtwork),
+            ),
+        )
+        assertFalse(
+            shouldDeleteUnreferencedOwnedArtwork(
+                "/app/files/covers/cover.png",
+                "/app/files/hub",
+                emptySet(),
+            ),
+        )
+    }
+
+    @Test
     fun topPlayedGamesUsesPlayCountAndCapsAtThree() {
         val entries = listOf(
             LibraryEntry("a", Kind.PC, "A", addedAt = 1, playCount = 4),

@@ -15,6 +15,13 @@ import kotlinx.serialization.json.Json
 internal const val DEFAULT_MIN_FREE_BYTES = 512L * 1024 * 1024
 internal const val STORAGE_CHECK_INTERVAL_BYTES = 64L * 1024 * 1024
 
+internal fun shouldDeleteUnreferencedOwnedArtwork(
+    artworkPath: String,
+    ownedDirectoryPath: String,
+    referencedPaths: Set<String>,
+): Boolean =
+    File(artworkPath).parentFile?.path == ownedDirectoryPath && artworkPath !in referencedPaths
+
 @Serializable
 enum class Kind { NATIVE, PC }
 

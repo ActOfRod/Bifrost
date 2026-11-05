@@ -262,13 +262,7 @@ class MainActivity : ComponentActivity() {
         if (!snapshotLoaded) return
 
         val coversDirectory = File(filesDir, "covers")
-        val referencedCovers = (
-            snapshot.entries.mapNotNull { entry ->
-                entry.cover?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
-            } + snapshot.systems.mapNotNull { system ->
-                system.icon?.let { path -> runCatching { File(path).canonicalPath }.getOrNull() }
-            }
-            ).toSet()
+        val referencedPaths = referencedArtworkPaths()
         coversDirectory.listFiles()?.filter { cover ->
             val canonicalPath = runCatching { cover.canonicalPath }.getOrNull()
             val name = cover.nameWithoutExtension
@@ -284,8 +278,28 @@ class MainActivity : ComponentActivity() {
                         (versionedId != null && gameId == null) ||
                         PACKAGE_COVER_ID_PATTERN.matches(name)
                     ) &&
-                canonicalPath !in referencedCovers
+                canonicalPath !in referencedPaths
         }?.forEach { it.delete() }
+        cleanupOrphanedArtworkDirectory(File(filesDir, "hub"), referencedPaths)
+        cleanupOrphanedArtworkDirectory(File(filesDir, "systems"), referencedPaths)
+    }
+
+    private fun referencedArtworkPaths(): Set<String> =
+        (
+            snapshot.entries.mapNotNull { it.cover } +
+                snapshot.systems.mapNotNull { it.icon } +
+                listOfNotNull(customBannerPath)
+            ).mapNotNull { path -> runCatching { File(path).canonicalPath }.getOrNull() }.toSet()
+
+    private fun cleanupOrphanedArtworkDirectory(directory: File, referencedPaths: Set<String>) {
+        val ownedDirectoryPath = runCatching { directory.canonicalPath }.getOrNull() ?: return
+        directory.listFiles()?.forEach { file ->
+            if (!file.isFile) return@forEach
+            val artworkPath = runCatching { file.canonicalPath }.getOrNull() ?: return@forEach
+            if (shouldDeleteUnreferencedOwnedArtwork(artworkPath, ownedDirectoryPath, referencedPaths)) {
+                file.delete()
+            }
+        }
     }
 
     override fun onResume() {
@@ -587,14 +601,9 @@ class MainActivity : ComponentActivity() {
         HubArtworkCache.invalidate(oldPath)
         val oldFile = runCatching { File(oldPath).canonicalFile }.getOrNull() ?: return
         val ownedDirectory = runCatching { directory.canonicalFile }.getOrNull() ?: return
-        if (oldFile.parentFile != ownedDirectory) return
-        val oldCanonicalPath = oldFile.path
-        val stillReferenced = snapshot.entries.any { entry ->
-            entry.cover?.let { runCatching { File(it).canonicalPath }.getOrNull() } == oldCanonicalPath
-        } || snapshot.systems.any { system ->
-            system.icon?.let { runCatching { File(it).canonicalPath }.getOrNull() } == oldCanonicalPath
-        } || customBannerPath?.let { runCatching { File(it).canonicalPath }.getOrNull() } == oldCanonicalPath
-        if (!stillReferenced) oldFile.delete()
+        if (shouldDeleteUnreferencedOwnedArtwork(oldFile.path, ownedDirectory.path, referencedArtworkPaths())) {
+            oldFile.delete()
+        }
     }
 
     private fun saveUploadedImage(uri: Uri, target: File, maxDimension: Int): File {
@@ -628,8 +637,13 @@ class MainActivity : ComponentActivity() {
         customBannerPath
 
     internal fun resetBanner() {
+        val oldPath = customBannerPath
+        if (!getSharedPreferences("hub", Context.MODE_PRIVATE).edit().remove("banner").commit()) {
+            message = "Could not reset banner"
+            return
+        }
         customBannerPath = null
-        getSharedPreferences("hub", Context.MODE_PRIVATE).edit().remove("banner").apply()
+        deleteReplacedArtwork(oldPath, File(filesDir, "hub"))
     }
 
     internal fun installRuntimeFromSettings() {
