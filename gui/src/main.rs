@@ -174,6 +174,7 @@ struct App {
     dlc: Vec<PathBuf>,
     out_dir: String,
     android_sdk: String,
+    windows_deps: String,
     status: Status,
     log: Vec<String>,
     rx: Option<mpsc::Receiver<Msg>>,
@@ -208,6 +209,7 @@ impl Default for App {
             dlc: Vec::new(),
             out_dir: out.display().to_string(),
             android_sdk: sdk,
+            windows_deps: String::new(),
             status: Status::Idle,
             log: Vec::new(),
             rx: None,
@@ -280,6 +282,7 @@ impl App {
                 Output::Android => Target::Android,
             },
             android_sdk: Some(self.android_sdk.trim()).filter(|s| !s.is_empty()).map(PathBuf::from),
+            windows_deps: Some(self.windows_deps.trim()).filter(|s| !s.is_empty()).map(PathBuf::from),
             ..Default::default()
         };
         self.spawn(ctx, move |sink| {
@@ -441,6 +444,17 @@ impl App {
                 if ui.button("Browse…").clicked() {
                     if let Some(d) = rfd::FileDialog::new().pick_folder() {
                         self.android_sdk = d.display().to_string();
+                    }
+                }
+                ui.end_row();
+            }
+            if self.output == Output::Windows {
+                ui.label("Windows renderer deps");
+                ui.add(egui::TextEdit::singleline(&mut self.windows_deps)
+                    .hint_text("optional; or set BIFROST_WINDOWS_DEPS").desired_width(380.0));
+                if ui.button("Browse…").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        self.windows_deps = d.display().to_string();
                     }
                 }
                 ui.end_row();

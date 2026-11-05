@@ -19,6 +19,7 @@ pub mod modernize;
 pub mod pipeline;
 pub mod pack;
 pub mod project;
+pub mod renderer;
 pub mod romfs;
 
 pub use disasm::disassemble;

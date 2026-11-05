@@ -44,6 +44,9 @@ enum Cmd {
         /// Renderer dependencies (scripts/build_android_deps.sh output) for NVN titles; defaults to BIFROST_ANDROID_DEPS
         #[arg(long)]
         android_deps: Option<PathBuf>,
+        /// Windows renderer dependencies (scripts/build_windows_deps.sh output); defaults to BIFROST_WINDOWS_DEPS
+        #[arg(long)]
+        windows_deps: Option<PathBuf>,
         /// File with extra code entry points (one hex address per line, e.g. bifrost_missing.txt)
         #[arg(long)]
         extra_entries: Vec<PathBuf>,
@@ -184,6 +187,7 @@ fn run() -> anyhow::Result<()> {
             dlc,
             android_sdk,
             android_deps,
+            windows_deps,
             extra_entries,
             compile,
         } => {
@@ -198,6 +202,7 @@ fn run() -> anyhow::Result<()> {
                 target: compile.parse()?,
                 android_sdk,
                 android_deps,
+                windows_deps,
                 ..Default::default()
             };
             build(&opts)

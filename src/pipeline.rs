@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use crate::android::{self, AndroidSdk};
+use crate::renderer::{self, RendererDeps, RendererPlatform};
 use crate::intake::{self, RomfsRef, RomfsSource};
 use crate::lift::cfg::{lift_program, CodeSource};
 use crate::project::{self, BuildReport, ProjectInfo};
@@ -55,6 +56,8 @@ pub struct BuildOptions {
     pub android_sdk: Option<PathBuf>,
     /// NVN → Vulkan renderer dependencies (scripts/build_android_deps.sh output).
     pub android_deps: Option<PathBuf>,
+    /// NVN → Vulkan renderer dependencies (scripts/build_windows_deps.sh output).
+    pub windows_deps: Option<PathBuf>,
     /// RomFS images above this size are left beside the APK instead of being embedded.
     pub android_embed_limit: u64,
 }
@@ -73,6 +76,7 @@ impl Default for BuildOptions {
             target: Target::None,
             android_sdk: None,
             android_deps: None,
+            windows_deps: None,
             android_embed_limit: 1 << 30,
         }
     }
@@ -405,43 +409,102 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
     sources.sort();
     let artifact = match opts.target {
         Target::None => None,
-        Target::Native | Target::Windows => {
+        Target::Native => {
             let (cc, file, ldflags): (String, String, Vec<String>) =
-                if opts.target == Target::Native {
+                {
                     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-                    let file = if cfg!(windows) {
-                        format!("{exe}.exe")
-                    } else {
-                        exe.clone()
-                    };
-                    let ld = if cfg!(windows) {
-                        vec![]
-                    } else {
-                        vec!["-lpthread".into(), "-lm".into()]
-                    };
+                    let file = if cfg!(windows) { format!("{exe}.exe") } else { exe.clone() };
+                    let ld = if cfg!(windows) { vec![] } else { vec!["-lpthread".into(), "-lm".into()] };
                     (cc, file, ld)
-                } else {
-                    let cc = if cfg!(windows) {
-                        "gcc".to_string()
-                    } else {
-                        "x86_64-w64-mingw32-gcc".to_string()
-                    };
-                    (cc, format!("{exe}.exe"), vec!["-static".into()])
                 };
             let output = out.join(&file);
-            compile_and_link(
-                Path::new(&cc),
-                out,
-                &sources,
-                &[],
-                &ldflags,
-                &out.join("obj"),
-                &output,
-                &mut r,
-                0.68,
-                0.99,
-                "Compiling",
-            )?;
+            compile_and_link(Path::new(&cc), out, &sources, &[], &ldflags, &out.join("obj"), &output,
+                &mut r, 0.68, 0.99, "Compiling")?;
+            Some(output)
+        }
+        Target::Windows => {
+            let nvn = program.imports.iter().any(|(_, n)| renderer::NVN_IMPORTS.contains(&n.as_str()));
+            let deps = if nvn {
+                RendererDeps::locate(RendererPlatform::Windows, opts.windows_deps.as_deref())
+            } else {
+                None
+            };
+            if nvn && deps.is_none() {
+                notes.push(
+                    "title draws through NVN but the renderer dependencies were not found (run scripts/build_windows_deps.sh, \
+                     then pass --windows-deps); this executable has no renderer".into(),
+                );
+            }
+                let output = out.join(format!("{exe}.exe"));
+            if let Some(deps) = deps {
+                sources.extend(renderer::write_renderer_sources(out, &deps, RendererPlatform::Windows)?);
+                let cc = renderer::mingw_posix_tool("x86_64-w64-mingw32-gcc")?;
+                let cxx = renderer::mingw_posix_tool("x86_64-w64-mingw32-g++")?;
+                let vma = out.join("obj/windows/vma.o");
+                let imgui = out.join("obj/windows/imgui_glue.o");
+                renderer::compile_windows_cpp(
+                    Path::new("las/nvn/vulkan/vma.cpp"), &cxx, &deps, out, &vma,
+                )?;
+                renderer::compile_windows_cpp(
+                    Path::new("las/nvn/vulkan/imgui_glue.cpp"), &cxx, &deps, out, &imgui,
+                )?;
+                let mut cflags = renderer::defines(&deps, out, RendererPlatform::Windows);
+                cflags.extend(["-DBF_NO_MAIN".into(), "-fno-strict-aliasing".into()]);
+                let mut ldflags = vec![
+                    "-static-libstdc++".into(),
+                    "-static-libgcc".into(),
+                    vma.display().to_string(),
+                    imgui.display().to_string(),
+                ];
+                for (i, source) in [
+                    "imgui.cpp",
+                    "imgui_draw.cpp",
+                    "imgui_tables.cpp",
+                    "imgui_widgets.cpp",
+                    "backends/imgui_impl_vulkan.cpp",
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let obj = out.join(format!("obj/windows/imgui_{i}.o"));
+                    renderer::compile_windows_cpp(
+                        &deps.root.join("include/imgui").join(source),
+                        &cxx,
+                        &deps,
+                        out,
+                        &obj,
+                    )?;
+                    ldflags.push(obj.display().to_string());
+                }
+                ldflags.extend([
+                    format!("-L{}", deps.root.join("lib").display()),
+                    "-lSDL3".into(),
+                    "-lshaderc_shared".into(),
+                    "-lvulkan-1".into(),
+                    "-Wl,-Bstatic".into(),
+                    "-lstdc++".into(),
+                    "-lwinpthread".into(),
+                    "-Wl,-Bdynamic".into(),
+                ]);
+                compile_and_link(
+                    &cc, out, &sources, &cflags, &ldflags, &out.join("obj/windows"), &output,
+                    &mut r, 0.68, 0.99, "Compiling Windows NVN renderer",
+                )?;
+                for entry in std::fs::read_dir(deps.root.join("lib"))? {
+                    let source = entry?.path();
+                    if source.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("dll")) {
+                        let name = source.file_name().unwrap();
+                        std::fs::copy(&source, out.join(name))
+                            .with_context(|| format!("copy renderer runtime {}", name.to_string_lossy()))?;
+                    }
+                }
+            } else {
+                let cc = if cfg!(windows) { "gcc" } else { "x86_64-w64-mingw32-gcc" };
+                compile_and_link(
+                    Path::new(cc), out, &sources, &[], &["-static".into()], &out.join("obj"),
+                    &output, &mut r, 0.68, 0.99, "Compiling",
+                )?;
+            }
             Some(output)
         }
         Target::Android => {
@@ -457,9 +520,9 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
             let nvn = program
                 .imports
                 .iter()
-                .any(|(_, n)| android::NVN_IMPORTS.contains(&n.as_str()));
+                .any(|(_, n)| renderer::NVN_IMPORTS.contains(&n.as_str()));
             let deps = if nvn {
-                android::RendererDeps::locate(opts.android_deps.as_deref())
+                RendererDeps::locate(RendererPlatform::Android, opts.android_deps.as_deref())
             } else {
                 None
             };
@@ -478,7 +541,7 @@ pub fn run(opts: &BuildOptions, sink: &mut dyn FnMut(Event)) -> Result<BuildOutp
                 )?;
                 let clang = sdk.clang()?;
                 let mut all = sources.clone();
-                all.extend(android::write_renderer_sources(out, &deps)?);
+                all.extend(renderer::write_renderer_sources(out, &deps, RendererPlatform::Android)?);
                 r.at(0.68, "Compiling the renderer's C++ part");
                 let vma = android::compile_vma(&sdk, &deps, out)?;
                 let mut cflags = android::renderer_compile_args(&deps, out);

@@ -10,4 +10,4 @@ its own runtime (`cpu.h` maps `Cpu` to `BfCpu`). Local changes to the vendored f
 - `nvn/texpatch.c`: stb_truetype include path.
 - `nvn/vulkan/android_driver.c` is kept as `.adrenotools` (custom driver loading; not built yet).
 
-Built into Android APKs for titles that load NVN (`bifrost build ... --compile android --android-deps ...`), on top of SDL3 + shaderc (`bf_las_glue.c`, `bf_las_game_stubs.c`, `bf_android_sdl.c`). Not yet built for Windows, and not yet validated on a real title.
+Built into Android APKs for titles that load NVN (`bifrost build ... --compile android --android-deps ...`) and cross-built for Windows when `--windows-deps` points at the output of `scripts/build_windows_deps.sh`. The Windows smoke test checks that the executable imports SDL3, shaderc and the Vulkan loader; real-title rendering has not been validated. Android uses `bf_android_sdl.c`; Windows uses `bf_windows_sdl.c`, reads runtime files beside the executable, and tees logs to stderr and `bifrost.log`.

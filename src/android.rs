@@ -1,5 +1,6 @@
 //! Android output: NativeActivity sources, NDK cross-compilation and APK packaging.
 use anyhow::{anyhow, bail, Context, Result};
+use crate::renderer::{self, RendererDeps, RendererPlatform};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -361,47 +362,9 @@ pub fn package(
     Ok(apk)
 }
 
-// ---- NVN → Vulkan renderer builds (runtime/las, vendored from LASRecompAndroid) ----
-
-pub static LAS_DIR: include_dir::Dir<'static> =
-    include_dir::include_dir!("$CARGO_MANIFEST_DIR/runtime/las");
-
-/// Imports that mark a title as drawing through NVN.
-pub const NVN_IMPORTS: &[&str] = &["nvnBootstrapLoader", "nvnDeviceGetProcAddress"];
-
-/// Prebuilt renderer dependencies (scripts/build_android_deps.sh output, arm64-v8a only).
-pub struct RendererDeps {
-    pub root: PathBuf,
-}
+// ---- NVN → Vulkan Android renderer builds ----
 
 impl RendererDeps {
-    pub fn locate(dir: Option<&Path>) -> Option<Self> {
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-        let candidates = [
-            dir.map(Path::to_path_buf),
-            std::env::var_os("BIFROST_ANDROID_DEPS").map(|d| PathBuf::from(d).join("out")),
-            home.map(|h| PathBuf::from(h).join(".bifrost/android-deps/out")),
-        ];
-        candidates
-            .into_iter()
-            .flatten()
-            .map(|root| RendererDeps { root })
-            .find(|d| d.complete())
-    }
-
-    fn complete(&self) -> bool {
-        [
-            "lib/libSDL3.so",
-            "lib/libshaderc_shared.so",
-            "include/vulkan/vulkan_core.h",
-            "include/vma/vk_mem_alloc.h",
-            "volk/volk.c",
-            "java/org/libsdl/app/SDLActivity.java",
-        ]
-        .iter()
-        .all(|p| self.root.join(p).is_file())
-    }
-
     /// Stripped copies of the shared libraries the APK ships (shaderc alone is ~160 MiB with symbols).
     pub fn shared_libs(&self, sdk: &AndroidSdk, out: &Path) -> Result<Vec<PathBuf>> {
         let strip = sdk.clang()?.with_file_name(exe("llvm-strip"));
@@ -423,86 +386,6 @@ impl RendererDeps {
 
 pub const RENDERER_ABI: (&str, &str) = ("arm64-v8a", "aarch64-linux-android");
 
-/// Unpacks the renderer into `out/las` (plus generated includes) and returns its C sources, relative to `out`.
-pub fn write_renderer_sources(out: &Path, deps: &RendererDeps) -> Result<Vec<PathBuf>> {
-    let las = out.join("las");
-    let _ = fs::remove_dir_all(&las);
-    fs::create_dir_all(&las)?;
-    LAS_DIR.extract(&las)?;
-    let gen = las.join("gen");
-    fs::create_dir_all(&gen)?;
-    fs::write(
-        gen.join("shader_variants.inc"),
-        c_string_lines(&fs::read_to_string(las.join("nvn/shader_variants.txt"))?),
-    )?;
-    fs::write(
-        gen.join("smaa_hlsl.inc"),
-        c_string_lines(&String::from_utf8_lossy(&fs::read(
-            las.join("third_party/smaa/SMAA.hlsl"),
-        )?)),
-    )?;
-    let mut srcs = Vec::new();
-    for sub in ["nvn", "nvn/maxwell", "nvn/vulkan"] {
-        let mut v: Vec<PathBuf> = fs::read_dir(las.join(sub))?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "c"))
-            .map(|p| p.strip_prefix(out).unwrap().to_path_buf())
-            .collect();
-        v.sort();
-        srcs.extend(v);
-    }
-    for f in ["bf_las_glue.c", "bf_las_game_stubs.c", "bf_android_sdl.c"] {
-        srcs.push(Path::new("las").join(f));
-    }
-    srcs.push(deps.root.join("volk/volk.c"));
-    Ok(srcs)
-}
-
-/// Each line of `text` as a C string literal line ("...\n"), terminated by an empty literal.
-fn c_string_lines(text: &str) -> String {
-    let mut s = String::new();
-    for line in text.replace('\r', "").split('\n') {
-        s.push('"');
-        for ch in line.chars() {
-            match ch {
-                '"' => s.push_str("\\\""),
-                '\\' => s.push_str("\\\\"),
-                '\t' => s.push_str("\\t"),
-                c if (c as u32) < 0x20 => {}
-                c => s.push(c),
-            }
-        }
-        s.push_str("\\n\"\n");
-    }
-    s.push_str("\"\"\n");
-    s
-}
-
-fn renderer_defines(deps: &RendererDeps, out: &Path) -> Vec<String> {
-    let las = out.join("las");
-    let mut v: Vec<String> = [
-        "-DVK_NO_PROTOTYPES",
-        "-DVK_USE_PLATFORM_ANDROID_KHR",
-        "-DVMA_STATIC_VULKAN_FUNCTIONS=0",
-        "-DVMA_DYNAMIC_VULKAN_FUNCTIONS=1",
-        "-DBF_RENDERER=1",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    for inc in [
-        las.clone(),
-        las.join("nvn"),
-        las.join("gen"),
-        las.join("third_party/smaa"),
-        deps.root.join("include"),
-        deps.root.join("volk"),
-    ] {
-        v.push(format!("-I{}", inc.display()));
-    }
-    v
-}
-
 /// Compiler arguments for the renderer build (arm64 only).
 pub fn renderer_compile_args(deps: &RendererDeps, out: &Path) -> Vec<String> {
     let mut v = vec![
@@ -512,7 +395,7 @@ pub fn renderer_compile_args(deps: &RendererDeps, out: &Path) -> Vec<String> {
         "-fno-strict-aliasing".into(),
         "-Wno-format".into(),
     ];
-    v.extend(renderer_defines(deps, out));
+    v.extend(renderer::defines(deps, out, RendererPlatform::Android));
     v
 }
 
@@ -524,7 +407,7 @@ pub fn compile_vma(sdk: &AndroidSdk, deps: &RendererDeps, out: &Path) -> Result<
     run(Command::new(clangxx)
         .arg(format!("--target={}{MIN_SDK}", RENDERER_ABI.1))
         .args(["-c", "-O2", "-fPIC", "-std=c++17"])
-        .args(renderer_defines(deps, out))
+        .args(renderer::defines(deps, out, RendererPlatform::Android))
         .arg("-o")
         .arg(&obj)
         .arg(out.join("las/nvn/vulkan/vma.cpp")))?;

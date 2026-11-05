@@ -148,8 +148,21 @@ static inline uint64_t clz64(uint64_t v) { return v ? __builtin_clzll(v) : 64; }
 static inline uint32_t clz32(uint32_t v) { return v ? __builtin_clz(v) : 32; }
 static inline uint64_t cls64(uint64_t v) { return clz64(v ^ (uint64_t)((int64_t)v >> 1)) - 1; }
 static inline uint32_t cls32(uint32_t v) { return clz32(v ^ (uint32_t)((int32_t)v >> 1)) - 1; }
-static inline uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
-static inline uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
+static inline uint64_t rbit64(uint64_t v) {
+    v = ((v >> 1) & 0x5555555555555555ull) | ((v & 0x5555555555555555ull) << 1);
+    v = ((v >> 2) & 0x3333333333333333ull) | ((v & 0x3333333333333333ull) << 2);
+    v = ((v >> 4) & 0x0f0f0f0f0f0f0f0full) | ((v & 0x0f0f0f0f0f0f0f0full) << 4);
+    v = ((v >> 8) & 0x00ff00ff00ff00ffull) | ((v & 0x00ff00ff00ff00ffull) << 8);
+    v = ((v >> 16) & 0x0000ffff0000ffffull) | ((v & 0x0000ffff0000ffffull) << 16);
+    return (v >> 32) | (v << 32);
+}
+static inline uint32_t rbit32(uint32_t v) {
+    v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
+    v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
+    v = ((v >> 4) & 0x0f0f0f0fu) | ((v & 0x0f0f0f0fu) << 4);
+    v = ((v >> 8) & 0x00ff00ffu) | ((v & 0x00ff00ffu) << 8);
+    return (v >> 16) | (v << 16);
+}
 static inline uint32_t rev16_32(uint32_t v) { return ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); }
 static inline uint64_t rev16_64(uint64_t v) {
     return ((v & 0x00ff00ff00ff00ffull) << 8) | ((v >> 8) & 0x00ff00ff00ff00ffull);
@@ -170,8 +183,4 @@ static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
     return (uint32_t)((int32_t)a / (int32_t)b);
 }
 
-// Portable FP/SIMD helpers for code lifted with --simd=c (default off AArch64; gen.py includes simd.h itself
-// in that mode, so AArch64 hosts can build it too).
-#if !defined(__cplusplus) && !defined(__aarch64__)
-#include "simd.h"
-#endif
+// Bifrost lowers SIMD operations directly to BfVec lane code.

@@ -37,6 +37,28 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
+  windows-renderer:
+    runs-on: ubuntu-24.04
+    env:
+      BIFROST_WINDOWS_DEPS: ${{ github.workspace }}/.bifrost/windows-deps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: .bifrost/windows-deps/out
+          key: ${{ runner.os }}-windows-renderer-${{ hashFiles('scripts/build_windows_deps.sh') }}
+      - name: Install cross-build and Wine tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build mingw-w64 \
+            gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
+            gcc-aarch64-linux-gnu \
+            python3 git curl wine64 xvfb mesa-vulkan-drivers
+      - name: Build Windows renderer dependencies
+        run: scripts/build_windows_deps.sh
+      - name: Windows NVN renderer end-to-end
+        run: tests/e2e/windows_renderer.sh
   android-launcher:
     runs-on: ubuntu-latest
     steps:

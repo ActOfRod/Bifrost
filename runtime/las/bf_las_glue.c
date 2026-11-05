@@ -109,10 +109,18 @@ void rt_fatal_message(const char *format, ...) {
     fflush(NULL);
     abort();
 }
+void rt_fatal_trace(void) { rt_fatal_message("renderer fatal"); }
 int rt_reboot_requested(void) { return 0; }
 
 #include <volk.h>
+#ifdef _WIN32
+extern PFN_vkGetInstanceProcAddr __imp_vkGetInstanceProcAddr;
+#endif
 void vk_android_load(void) {
+#ifdef _WIN32
+    volkInitializeCustom(__imp_vkGetInstanceProcAddr);
+#else
     if (volkInitialize() != VK_SUCCESS) rt_fatal_message("no Vulkan loader on this device");
+#endif
 }
 __thread uint64_t g_blocked_ns;  // read by vulkan/exec.c frame pacing; Bifrost does not account blocked time
