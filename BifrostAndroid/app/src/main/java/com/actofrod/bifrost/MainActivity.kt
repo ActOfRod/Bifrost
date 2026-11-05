@@ -523,8 +523,9 @@ class MainActivity : ComponentActivity() {
 
     private fun saveUploadedImage(uri: Uri, target: File, maxDimension: Int): File {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        val boundsStream = contentResolver.openInputStream(uri)
             ?: throw IllegalArgumentException("Could not open image")
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
         require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Selected file is not an image" }
         var sample = 1
         while (maxOf(bounds.outWidth / sample, bounds.outHeight / sample) > maxDimension * 2) sample *= 2

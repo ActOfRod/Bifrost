@@ -140,6 +140,8 @@ class LibraryTest {
             InstalledApp("games.one", "One Game", isGame = true, isBifrostPort = false),
             InstalledApp("tools.two", "Two Tool", isGame = false, isBifrostPort = false),
             InstalledApp("ports.three", "Three Port", isGame = true, isBifrostPort = true),
+            InstalledApp("com.actofrod", "Bifrost", isGame = true, isBifrostPort = false),
+            InstalledApp("com.actofrod.launcher", "Bifrost Launcher", isGame = true, isBifrostPort = false),
         )
 
         assertTrue(defaultGamesOnly(apps))
@@ -153,7 +155,10 @@ class LibraryTest {
             filterInstalledApps(apps, gamesOnly = false, query = "tools", linkedPackages = setOf("games.one"))
                 .map { it.packageName },
         )
+        assertTrue(filterInstalledApps(apps, gamesOnly = false, query = "", linkedPackages = emptySet())
+            .none { it.packageName.startsWith("com.actofrod") })
         assertFalse(defaultGamesOnly(apps.filterNot { it.isGame }))
+        assertFalse(defaultGamesOnly(listOf(InstalledApp("com.actofrod.clone", "Launcher", isGame = true, isBifrostPort = false))))
     }
 
     @Test

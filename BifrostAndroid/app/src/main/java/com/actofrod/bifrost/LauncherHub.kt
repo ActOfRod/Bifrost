@@ -4,16 +4,17 @@ import android.graphics.BitmapFactory
 import android.util.LruCache
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.spring
@@ -26,6 +27,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -38,14 +40,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,9 +65,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -74,10 +77,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -95,13 +104,13 @@ import androidx.compose.ui.window.DialogProperties
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.absoluteValue
+import kotlinx.coroutines.launch
 
 private val HubBackground = Color(0xFF070A12)
 private val HubMuted = Color(0xFFA6B1C2)
 private val HubAccent: Color
     @Composable get() = MaterialTheme.colorScheme.primary
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun HubScreen(activity: MainActivity) {
     BackHandler(enabled = activity.page != Page.HOME || activity.showOptionsFor != null) {
@@ -127,7 +136,7 @@ internal fun HubScreen(activity: MainActivity) {
         }
     }
     activity.showOptionsFor?.let { entry ->
-        EntryOptionsSheet(activity, activity.snapshot.currentEntry(entry))
+        EntryOptionsPanel(activity, activity.snapshot.currentEntry(entry))
     }
     if (activity.showRuntimeInstallDialog) {
         AlertDialog(
@@ -202,7 +211,8 @@ internal fun HubScreen(activity: MainActivity) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GameHubScreen(activity: MainActivity) {
-    val compactLayout = LocalConfiguration.current.screenHeightDp < 500
+    val configuration = LocalConfiguration.current
+    val compactLayout = configuration.screenHeightDp < 500
     val allEntries = activity.snapshot.entries
     val systems = activity.snapshot.systems
     val baseEntries = when {
@@ -221,140 +231,155 @@ private fun GameHubScreen(activity: MainActivity) {
             (query.isEmpty() || entry.title.contains(query, ignoreCase = true))
     }.sortedBy { it.title.lowercase() }
     val selected = activity.selected?.let { activity.snapshot.currentEntry(it) }
+    val mostPlayed = topPlayedGames(allEntries)
+    val headerItemCount = 2 + if (mostPlayed.isEmpty()) 0 else 1
+    val gridState = rememberLazyGridState()
+    val scope = rememberCoroutineScope()
+    val heroHeight = if (compactLayout) {
+        (configuration.screenHeightDp.dp * 0.28f).coerceIn(112.dp, 176.dp)
+    } else {
+        (configuration.screenHeightDp.dp * 0.32f).coerceIn(180.dp, 290.dp)
+    }
     Row(Modifier.fillMaxSize().background(HubBackground)) {
         HubRail(activity, systems, Modifier.fillMaxHeight().width(82.dp))
-        Column(
-            Modifier.fillMaxSize().padding(
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = if (compactLayout) 112.dp else 140.dp),
+            state = gridState,
+            modifier = Modifier.weight(1f).fillMaxHeight().padding(
                 end = 20.dp,
                 top = if (compactLayout) 8.dp else 14.dp,
                 bottom = if (compactLayout) 6.dp else 10.dp,
             ),
+            contentPadding = PaddingValues(bottom = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val heroHeight = if (compactLayout) {
-                    (maxHeight * 0.28f).coerceIn(96.dp, 200.dp)
-                } else {
-                    (maxHeight * 0.34f).coerceIn(170.dp, 300.dp)
-                }
+            item(span = { GridItemSpan(maxLineSpan) }) {
                 HeroBanner(activity, selected, heroHeight)
             }
-            val mostPlayed = topPlayedGames(allEntries)
             if (mostPlayed.isNotEmpty()) {
-                Spacer(Modifier.height(if (compactLayout) 4.dp else 10.dp))
-                Text(
-                    "MOST PLAYED",
-                    Modifier.padding(start = 4.dp, bottom = if (compactLayout) 3.dp else 6.dp),
-                    color = HubMuted,
-                    fontSize = if (compactLayout) 10.sp else 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.4.sp,
-                )
-                Row(
-                    Modifier.fillMaxWidth().height(if (compactLayout) 64.dp else 86.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    mostPlayed.forEachIndexed { index, entry ->
-                        TopPlayedCard(
-                            entry = entry,
-                            rank = index + 1,
-                            compact = compactLayout,
-                            modifier = Modifier.weight(1f).fillMaxHeight(if (index == 0) 1f else 0.88f),
-                            onClick = { activity.selectEntry(entry) },
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Column {
+                        Text(
+                            "MOST PLAYED",
+                            Modifier.padding(start = 4.dp, bottom = if (compactLayout) 3.dp else 2.dp),
+                            color = HubMuted,
+                            fontSize = if (compactLayout) 10.sp else 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.4.sp,
                         )
+                        Row(
+                            Modifier.fillMaxWidth().height(if (compactLayout) 64.dp else 86.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            mostPlayed.forEachIndexed { index, entry ->
+                                TopPlayedCard(
+                                    entry = entry,
+                                    rank = index + 1,
+                                    compact = compactLayout,
+                                    modifier = Modifier.weight(1f).fillMaxHeight(if (index == 0) 1f else 0.88f),
+                                    onClick = { activity.selectEntry(entry) },
+                                )
+                            }
+                        }
                     }
                 }
             }
-            Spacer(Modifier.height(if (compactLayout) 4.dp else 9.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                listOf(Tab.ALL, Tab.NATIVE, Tab.PC).forEach { item ->
-                    val label = when (item) {
-                        Tab.ALL -> "All"
-                        Tab.NATIVE -> "Native"
-                        Tab.PC -> "PC"
-                    }
-                    TextButton(
-                        onClick = { activity.tab = item },
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = if (activity.tab == item) HubAccent else HubMuted,
-                        ),
-                    ) {
-                        Text(label, fontWeight = if (activity.tab == item) FontWeight.Bold else FontWeight.Medium)
-                    }
-                }
-                Spacer(Modifier.weight(1f))
+            item(span = { GridItemSpan(maxLineSpan) }) {
                 Row(
-                    Modifier.width(if (compactLayout) 180.dp else 220.dp).clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFF111827)).padding(horizontal = 12.dp, vertical = 7.dp),
+                    Modifier.fillMaxWidth().padding(bottom = if (compactLayout) 0.dp else 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("⌕", color = HubMuted, fontSize = 18.sp)
-                    Spacer(Modifier.width(8.dp))
-                    BasicTextField(
-                        value = activity.searchQuery,
-                        onValueChange = { activity.searchQuery = it },
-                        singleLine = true,
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
-                        decorationBox = { inner ->
-                            Box {
-                                if (activity.searchQuery.isEmpty()) Text("Search games", color = HubMuted, fontSize = 13.sp)
-                                inner()
+                    listOf(Tab.ALL, Tab.NATIVE, Tab.PC).forEach { tab ->
+                        val label = when (tab) {
+                            Tab.ALL -> "All"
+                            Tab.NATIVE -> "Native"
+                            Tab.PC -> "PC"
+                        }
+                        TextButton(
+                            onClick = { activity.tab = tab },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = if (activity.tab == tab) HubAccent else HubMuted,
+                            ),
+                        ) {
+                            Text(label, fontWeight = if (activity.tab == tab) FontWeight.Bold else FontWeight.Medium)
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Row(
+                        Modifier.width(if (compactLayout) 160.dp else 220.dp).clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF111827)).padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("⌕", color = HubMuted, fontSize = 18.sp)
+                        Spacer(Modifier.width(8.dp))
+                        BasicTextField(
+                            value = activity.searchQuery,
+                            onValueChange = { activity.searchQuery = it },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                            decorationBox = { inner ->
+                                Box {
+                                    if (activity.searchQuery.isEmpty()) Text("Search games", color = HubMuted, fontSize = 13.sp)
+                                    inner()
+                                }
                             }
-                        },
-                    )
+                        )
+                    }
                 }
             }
             if (visible.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            if (allEntries.isEmpty()) "Your library is ready for its first game."
-                            else "Nothing in this collection yet.",
-                            color = Color.White,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        Button(
-                            onClick = { activity.openSettings(SettingsSection.ADD_GAMES) },
-                            colors = ButtonDefaults.buttonColors(containerColor = HubAccent),
-                        ) { Text("Add games") }
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(Modifier.fillMaxWidth().heightIn(min = 170.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                if (allEntries.isEmpty()) "Your library is ready for its first game."
+                                else "Nothing in this collection yet.",
+                                color = Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            Button(
+                                onClick = { activity.openSettings(SettingsSection.ADD_GAMES) },
+                                colors = ButtonDefaults.buttonColors(containerColor = HubAccent),
+                            ) { Text("Add games") }
+                        }
                     }
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = if (compactLayout) 94.dp else 122.dp),
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    items(visible, key = { it.id }) { entry ->
-                        val isSelected = selected?.id == entry.id
-                        var focused by remember(entry.id) { mutableStateOf(false) }
-                        val scale by animateFloatAsState(
-                            if (focused || isSelected) 1.06f else 1f,
-                            spring(dampingRatio = 0.72f, stiffness = 350f),
-                            label = "tile-scale",
-                        )
-                        CoverTile(
-                            activity,
-                            entry,
-                            Modifier.animateItem().graphicsLayer {
-                                scaleX = scale
-                                scaleY = scale
-                                alpha = if (selected != null && !isSelected && !focused) 0.86f else 1f
-                            }.onFocusChanged {
-                                focused = it.isFocused
-                                if (it.isFocused) activity.selectEntry(entry)
-                            },
-                            focused || isSelected,
-                            onClick = {
-                                if (activity.selected?.id == entry.id) activity.play(entry)
-                                else activity.selectEntry(entry)
-                            },
-                            onLongClick = { activity.showOptionsFor = entry },
-                        )
-                    }
+                itemsIndexed(visible, key = { _, entry -> entry.id }) { index, entry ->
+                    val isSelected = selected?.id == entry.id
+                    var focused by remember(entry.id) { mutableStateOf(false) }
+                    val scale by animateFloatAsState(
+                        if (focused || isSelected) 1.06f else 1f,
+                        spring(dampingRatio = 0.72f, stiffness = 350f),
+                        label = "tile-scale",
+                    )
+                    CoverTile(
+                        activity,
+                        entry,
+                        Modifier.animateItem().graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            alpha = if (selected != null && !isSelected && !focused) 0.86f else 1f
+                        }.onFocusChanged {
+                            focused = it.isFocused
+                            if (it.isFocused) {
+                                activity.selectEntry(entry)
+                                scope.launch {
+                                    gridState.animateScrollToItem(headerItemCount + index)
+                                }
+                            }
+                        },
+                        focused || isSelected,
+                        onClick = {
+                            if (activity.selected?.id == entry.id) activity.play(entry)
+                            else activity.selectEntry(entry)
+                        },
+                        onLongClick = { activity.showOptionsFor = entry },
+                    )
                 }
             }
         }
@@ -363,108 +388,125 @@ private fun GameHubScreen(activity: MainActivity) {
 
 @Composable
 private fun HubRail(activity: MainActivity, systems: List<LauncherSystem>, modifier: Modifier = Modifier) {
-    val compactLayout = LocalConfiguration.current.screenHeightDp < 500
-    val itemHeight = if (compactLayout) 38.dp else 52.dp
-    val indicatorHeight = if (compactLayout) 26.dp else 34.dp
-    val items = listOf(
-        "all" to ("⌂" to "All"),
-        "recent" to ("◷" to "Recent"),
-        "native" to ("▣" to "Native"),
-        "pc" to ("▤" to "PC"),
-    ) + systems.map { "system:${it.id}" to ("•" to it.name) }
-    val selectedIndex = items.indexOfFirst { it.first == activity.selectedRail }.coerceAtLeast(0)
-    val indicatorY by animateDpAsState(
-        targetValue = (if (compactLayout) 6.dp else 9.dp) + itemHeight * selectedIndex,
-        animationSpec = spring(dampingRatio = 0.78f, stiffness = 360f),
-        label = "rail-indicator",
-    )
+    val railItems = listOf(
+        RailItem("all", "⌂", "All"),
+        RailItem("recent", "◷", "Recent"),
+        RailItem("native", "▣", "Native"),
+        RailItem("pc", "▤", "PC"),
+    ) + systems.map { RailItem("system:${it.id}", "", it.name, it) }
     Column(
         modifier.clip(RoundedCornerShape(topEnd = 22.dp, bottomEnd = 22.dp))
             .background(Color(0xCC101623))
-            .padding(top = if (compactLayout) 4.dp else 10.dp, bottom = if (compactLayout) 4.dp else 10.dp),
+            .padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("✦", color = HubAccent, fontSize = if (compactLayout) 22.sp else 28.sp, fontWeight = FontWeight.Black)
-        Text("BIFROST", color = Color.White, fontSize = if (compactLayout) 7.sp else 8.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
-        Spacer(Modifier.height(if (compactLayout) 8.dp else 16.dp))
-        Box(Modifier.fillMaxWidth().weight(1f)) {
-            Box(
-                Modifier.offset(y = indicatorY).align(Alignment.TopStart).padding(start = 4.dp)
-                    .width(4.dp).height(indicatorHeight).clip(CircleShape).background(HubAccent),
-            )
-            Column(Modifier.fillMaxWidth()) {
-                items.forEach { (id, info) ->
-                    val system = systems.firstOrNull { "system:${it.id}" == id }
-                    val selected = id == activity.selectedRail
-                    val scale by animateFloatAsState(if (selected) 1.1f else 1f, spring(), label = "rail-scale")
-                    val selectRail = {
-                        activity.selectedRail = id
-                        activity.tab = Tab.ALL
-                        activity.selected = if (id == "recent") {
-                            activity.snapshot.entries.filter { it.lastPlayed != null }.maxByOrNull { it.lastPlayed ?: 0L }
-                        } else {
-                            activity.snapshot.entries.firstOrNull { entry ->
-                                if (id.startsWith("system:")) entry.systemId == id.removePrefix("system:")
-                                else when (id) {
-                                    "native" -> entry.kind == Kind.NATIVE
-                                    "pc" -> entry.kind == Kind.PC
-                                    else -> true
-                                }
-                            }
-                        }
-                    }
-                    Column(
-                        Modifier.fillMaxWidth().height(itemHeight).clickable(onClick = selectRail)
-                            .onFocusChanged { if (it.isFocused) selectRail() }
-                            .padding(horizontal = 4.dp).focusable(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        Box(Modifier.size(if (compactLayout) 24.dp else 34.dp).graphicsLayer { scaleX = scale; scaleY = scale }
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(if (selected) HubAccent.copy(alpha = 0.16f) else Color.Transparent),
-                            contentAlignment = Alignment.Center) {
-                            if (system?.icon != null) {
-                                HubArtwork(system.icon, Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)))
-                            } else if (system != null) {
-                                Text(
-                                    system.name.take(1).uppercase(),
-                                    color = system.accent?.let(::Color) ?: HubAccent,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            } else {
-                                Text(info.first, color = if (selected) HubAccent else HubMuted, fontSize = 21.sp)
-                            }
-                        }
-                        Text(
-                            info.second.take(8),
-                            color = if (selected) Color.White else HubMuted,
-                            fontSize = if (compactLayout) 7.sp else 8.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                Column(
-                    Modifier.fillMaxWidth().height(itemHeight).clickable {
-                        activity.settingsSection = SettingsSection.SYSTEMS
-                        activity.page = Page.SETTINGS
-                    }.focusable(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Text("+", color = HubAccent, fontSize = 24.sp, fontWeight = FontWeight.Light)
-                    Text("System", color = HubMuted, fontSize = 8.sp)
-                }
-            }
-        }
         Column(
-            Modifier.fillMaxWidth().height(if (compactLayout) 44.dp else 56.dp).clickable { activity.openSettings() },
+            Modifier.fillMaxWidth().height(58.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            Text("⚙", color = HubMuted, fontSize = 20.sp)
-            Text("Settings", color = HubMuted, fontSize = 8.sp)
+            Text("✦", color = HubAccent, fontSize = 26.sp, fontWeight = FontWeight.Black)
+            Text("BIFROST", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+        }
+        Spacer(Modifier.height(4.dp))
+        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+            items(railItems, key = { it.id }) { item ->
+                val selected = item.id == activity.selectedRail
+                val selectRail = {
+                    activity.selectedRail = item.id
+                    activity.tab = Tab.ALL
+                    activity.selected = if (item.id == "recent") {
+                        activity.snapshot.entries.filter { it.lastPlayed != null }.maxByOrNull { it.lastPlayed ?: 0L }
+                    } else {
+                        activity.snapshot.entries.firstOrNull { entry ->
+                            if (item.id.startsWith("system:")) entry.systemId == item.id.removePrefix("system:")
+                            else when (item.id) {
+                                "native" -> entry.kind == Kind.NATIVE
+                                "pc" -> entry.kind == Kind.PC
+                                else -> true
+                            }
+                        }
+                    }
+                }
+                RailItemSlot(
+                    icon = item.icon,
+                    label = item.label,
+                    selected = selected,
+                    imagePath = item.system?.icon,
+                    accent = item.system?.accent,
+                    onClick = selectRail,
+                )
+            }
+            item(key = "add-system") {
+                RailItemSlot("+", "Add System", selected = false) {
+                    activity.settingsSection = SettingsSection.SYSTEMS
+                    activity.page = Page.SETTINGS
+                }
+            }
+        }
+        RailItemSlot(
+            icon = "⚙",
+            label = "Settings",
+            selected = activity.page == Page.SETTINGS,
+            onClick = { activity.openSettings() },
+        )
+    }
+}
+
+private data class RailItem(
+    val id: String,
+    val icon: String,
+    val label: String,
+    val system: LauncherSystem? = null,
+)
+
+@Composable
+private fun RailItemSlot(
+    icon: String,
+    label: String,
+    selected: Boolean,
+    imagePath: String? = null,
+    accent: Long? = null,
+    onClick: () -> Unit,
+) {
+    val scale by animateFloatAsState(if (selected) 1.08f else 1f, spring(), label = "rail-scale")
+    Box(Modifier.fillMaxWidth().height(64.dp)) {
+        if (selected) {
+            Box(
+                Modifier.align(Alignment.CenterStart).padding(start = 4.dp)
+                    .width(4.dp).height(34.dp).clip(CircleShape).background(HubAccent),
+            )
+        }
+        Column(
+            Modifier.fillMaxSize().clickable(onClick = onClick).onFocusChanged { if (it.isFocused) onClick() }.focusable(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Box(
+                Modifier.size(36.dp).graphicsLayer { scaleX = scale; scaleY = scale }
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (selected) HubAccent.copy(alpha = 0.16f) else Color.Transparent),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (imagePath != null) {
+                    HubArtwork(imagePath, Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)), ContentScale.Crop)
+                } else {
+                    Text(
+                        if (icon.isEmpty()) label.take(1).uppercase() else icon,
+                        color = accent?.let(::Color) ?: if (selected) HubAccent else HubMuted,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            Text(
+                label,
+                Modifier.padding(horizontal = 1.dp),
+                color = if (selected) Color.White else HubMuted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -472,6 +514,8 @@ private fun HubRail(activity: MainActivity, systems: List<LauncherSystem>, modif
 @Composable
 private fun HeroBanner(activity: MainActivity, entry: LibraryEntry?, height: androidx.compose.ui.unit.Dp) {
     val compactLayout = height < 140.dp
+    val configuration = LocalConfiguration.current
+    val portrait = configuration.screenWidthDp < configuration.screenHeightDp
     var clock by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         while (true) {
@@ -489,15 +533,22 @@ private fun HeroBanner(activity: MainActivity, entry: LibraryEntry?, height: and
     )
     Box(
         Modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(24.dp))
-            .background(Brush.linearGradient(listOf(Color(0xFF19344A), Color(0xFF111322), Color(0xFF372B44))),
-            )
+            .background(Brush.linearGradient(listOf(Color(0xFF19344A), Color(0xFF111322), Color(0xFF372B44))))
     ) {
         Crossfade(bannerPath, animationSpec = tween(260), label = "hero-art") { path ->
-            if (path != null) HubArtwork(
-                path,
-                Modifier.fillMaxSize().graphicsLayer { scaleX = zoom; scaleY = zoom },
-                contentScale = ContentScale.Crop,
-            )
+            if (path != null) {
+                HubArtwork(
+                    path,
+                    Modifier.fillMaxSize().graphicsLayer { scaleX = zoom; scaleY = zoom }.blur(20.dp),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Box(
+                    Modifier.fillMaxSize().background(
+                        Brush.linearGradient(listOf(Color(0xFF19344A), Color(0xFF111322), Color(0xFF372B44))),
+                    ),
+                )
+            }
         }
         Box(
             Modifier.fillMaxSize().background(
@@ -524,61 +575,127 @@ private fun HeroBanner(activity: MainActivity, entry: LibraryEntry?, height: and
                     Text("Add games")
                 }
             }
-        } else {
-            val systemName = activity.snapshot.systems.firstOrNull { it.id == entry.systemId }?.name
-            if (compactLayout) {
-                Row(
-                    Modifier.align(Alignment.CenterStart).fillMaxWidth().padding(start = 28.dp, end = 24.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            HubTag(if (entry.kind == Kind.NATIVE) "NATIVE" else "PC GAME", HubAccent)
-                            systemName?.let { HubTag(it.uppercase(), Color(0xFFB6C8FF)) }
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Text(entry.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            "Played ${entry.playCount} ${if (entry.playCount == 1) "time" else "times"}  ·  ${entry.lastPlayed?.let { DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(it)) } ?: "Never played"}",
-                            color = Color(0xFFD0D7E1),
-                            fontSize = 10.sp,
-                        )
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { activity.play(entry) }, colors = ButtonDefaults.buttonColors(containerColor = HubAccent)) {
-                            Text("▶  Play", color = Color(0xFF08151A), fontWeight = FontWeight.Bold)
-                        }
-                        OutlinedButton(onClick = { activity.showOptionsFor = entry }, border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f))) {
-                            Text("Options", color = Color.White)
-                        }
-                    }
-                }
-            } else {
-                Column(Modifier.align(Alignment.CenterStart).padding(start = 28.dp, end = 24.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        HubTag(if (entry.kind == Kind.NATIVE) "NATIVE" else "PC GAME", HubAccent)
-                        systemName?.let { HubTag(it.uppercase(), Color(0xFFB6C8FF)) }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Text(entry.title, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        "Played ${entry.playCount} ${if (entry.playCount == 1) "time" else "times"}  ·  ${entry.lastPlayed?.let { DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(it)) } ?: "Never played"}",
-                        color = Color(0xFFD0D7E1),
-                        fontSize = 12.sp,
+        } else if (portrait) {
+            Column(
+                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Row(Modifier.fillMaxWidth().weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    HeroPoster(
+                        activity,
+                        entry,
+                        Modifier.fillMaxHeight(0.82f).aspectRatio(2f / 3f),
                     )
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(onClick = { activity.play(entry) }, colors = ButtonDefaults.buttonColors(containerColor = HubAccent)) {
-                            Text("▶  Play", color = Color(0xFF08151A), fontWeight = FontWeight.Bold)
-                        }
-                        OutlinedButton(onClick = { activity.showOptionsFor = entry }, border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f))) {
-                            Text("Options", color = Color.White)
-                        }
-                    }
+                    Spacer(Modifier.width(14.dp))
+                    HeroDetails(activity, entry, compactLayout, Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    HeroActions(activity, entry)
                 }
             }
+        } else {
+            Row(
+                Modifier.align(Alignment.CenterStart).fillMaxSize().padding(
+                    start = if (compactLayout) 20.dp else 28.dp,
+                    end = if (compactLayout) 16.dp else 24.dp,
+                ),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                HeroPoster(
+                    activity,
+                    entry,
+                    Modifier.fillMaxHeight(if (compactLayout) 0.72f else 0.82f).aspectRatio(2f / 3f),
+                )
+                Spacer(Modifier.width(if (compactLayout) 10.dp else 16.dp))
+                HeroDetails(activity, entry, compactLayout, Modifier.weight(1f))
+                Spacer(Modifier.width(if (compactLayout) 8.dp else 14.dp))
+                HeroActions(activity, entry)
+            }
         }
+    }
+}
+
+@Composable
+private fun HeroPoster(activity: MainActivity, entry: LibraryEntry, modifier: Modifier = Modifier) {
+    Box(modifier.shadow(12.dp, RoundedCornerShape(13.dp)).clip(RoundedCornerShape(13.dp))) {
+        HubArtwork(
+            entry.cover,
+            Modifier.fillMaxSize(),
+            ContentScale.Crop,
+            entry.title,
+        )
+    }
+}
+
+@Composable
+private fun HeroDetails(
+    activity: MainActivity,
+    entry: LibraryEntry,
+    compact: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val systemName = activity.snapshot.systems.firstOrNull { it.id == entry.systemId }?.name
+    Column(modifier) {
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+            HubTag(if (entry.kind == Kind.NATIVE) "NATIVE" else "PC GAME", HubAccent)
+            systemName?.let { HubTag(it.uppercase(), Color(0xFFB6C8FF)) }
+        }
+        Spacer(Modifier.height(if (compact) 3.dp else 8.dp))
+        Text(
+            entry.title,
+            color = Color.White,
+            fontSize = if (compact) 22.sp else 30.sp,
+            fontWeight = FontWeight.Black,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            playSummary(entry),
+            color = Color(0xFFD0D7E1),
+            fontSize = if (compact) 10.sp else 12.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun HeroActions(activity: MainActivity, entry: LibraryEntry) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Button(
+            onClick = { activity.play(entry) },
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = HubAccent),
+        ) {
+            Text("▶  Play", color = Color(0xFF08151A), fontWeight = FontWeight.Bold)
+        }
+        OutlinedButton(
+            onClick = { activity.showOptionsFor = entry },
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f)),
+        ) {
+            Text("Options", color = Color.White)
+        }
+    }
+}
+
+private fun playSummary(entry: LibraryEntry): String = if (entry.playCount == 0) {
+    "Not played yet"
+} else {
+    "Played ${entry.playCount} times · Last played ${relativeLastPlayed(entry.lastPlayed)}"
+}
+
+private fun relativeLastPlayed(timestamp: Long?): String {
+    if (timestamp == null) return "unknown"
+    val seconds = ((System.currentTimeMillis() - timestamp) / 1_000L).coerceAtLeast(0L)
+    return when {
+        seconds < 60 -> "just now"
+        seconds < 3_600 -> "${seconds / 60}m ago"
+        seconds < 86_400 -> "${seconds / 3_600}h ago"
+        seconds < 604_800 -> "${seconds / 86_400}d ago"
+        seconds < 2_592_000 -> "${seconds / 604_800}w ago"
+        seconds < 31_536_000 -> "${seconds / 2_592_000}mo ago"
+        else -> "${seconds / 31_536_000}y ago"
     }
 }
 
@@ -603,7 +720,11 @@ private fun TopPlayedCard(entry: LibraryEntry, rank: Int, compact: Boolean, modi
         border = BorderStroke(if (rank == 1) 1.5.dp else 1.dp, if (rank == 1) HubAccent.copy(alpha = 0.6f) else Color(0x334D6577)),
     ) {
         Row(Modifier.fillMaxSize().padding(if (compact) 6.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            HubArtwork(entry.cover, Modifier.size(if (compact) 36.dp else 48.dp).clip(RoundedCornerShape(9.dp)))
+            HubArtwork(
+                entry.cover,
+                Modifier.size(if (compact) 36.dp else 48.dp).clip(RoundedCornerShape(9.dp)),
+                title = entry.title,
+            )
             Spacer(Modifier.width(if (compact) 6.dp else 9.dp))
             Column(Modifier.weight(1f)) {
                 Text("#$rank  MOST PLAYED", color = if (rank == 1) HubAccent else HubMuted, fontSize = if (compact) 8.sp else 9.sp, fontWeight = FontWeight.Bold)
@@ -642,10 +763,14 @@ private fun CoverTile(
                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF0070A12))))
                     .padding(horizontal = 10.dp, vertical = 9.dp),
             ) {
-                Column {
-                    Text(entry.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(if (entry.kind == Kind.NATIVE) "NATIVE" else "PC GAME", color = HubAccent, fontSize = 9.sp, letterSpacing = 0.8.sp)
-                }
+                Text(
+                    entry.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -658,13 +783,19 @@ private fun HubArtwork(path: String?, modifier: Modifier = Modifier, contentScal
         Image(bitmap, null, modifier, contentScale = contentScale)
     } else {
         val hue = (title.hashCode().toLong().absoluteValue % 360).toFloat()
-        Box(modifier.background(Brush.linearGradient(listOf(Color.hsv(hue, 0.7f, 0.48f), Color.hsv((hue + 42) % 360, 0.72f, 0.18f))))) {
+        BoxWithConstraints(
+            modifier.background(
+                Brush.linearGradient(
+                    listOf(Color.hsv(hue, 0.7f, 0.48f), Color.hsv((hue + 42) % 360, 0.72f, 0.18f)),
+                ),
+            ),
+        ) {
             if (title.isNotEmpty()) {
                 Text(
                     title.take(1).uppercase(),
                     Modifier.align(Alignment.Center),
-                    color = Color(0xBFFFFFFF),
-                    fontSize = 46.sp,
+                    color = Color.White.copy(alpha = 0.4f),
+                    fontSize = (maxWidth * 0.3f).coerceIn(12.dp, 48.dp).value.sp,
                     fontWeight = FontWeight.Black,
                 )
             }
@@ -672,58 +803,128 @@ private fun HubArtwork(path: String?, modifier: Modifier = Modifier, contentScal
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EntryOptionsSheet(activity: MainActivity, entry: LibraryEntry) {
+private fun EntryOptionsPanel(activity: MainActivity, entry: LibraryEntry) {
     var renameDialog by remember(entry.id) { mutableStateOf(false) }
     var rename by remember(entry.id) { mutableStateOf(entry.title) }
     var systemMenu by remember { mutableStateOf(false) }
     var splitConfirm by remember { mutableStateOf(false) }
-    ModalBottomSheet(
-        onDismissRequest = { activity.showOptionsFor = null },
-        containerColor = Color(0xFF141B28),
-        contentColor = Color.White,
-    ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 28.dp)) {
-            Text(entry.title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { activity.showOptionsFor = null; activity.play(entry) }) { Text("Play") }
-                if (entry.kind == Kind.PC) OutlinedButton(onClick = {
-                    activity.showOptionsFor = null
-                    activity.openControls(entry)
-                }) { Text("Controls") }
-            }
-            if (entry.kind == Kind.PC) {
-                Text("Controller mode", color = HubMuted, fontSize = 12.sp, modifier = Modifier.padding(top = 10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = {
-                        activity.updateEntry(entry.id) { it.copy(controllerMode = ControllerMode.OVERLAY) }
-                    }) { Text(if (entry.controllerMode == ControllerMode.OVERLAY) "✓ Overlay" else "Overlay") }
-                    TextButton(onClick = {
-                        if (entry.controllerMode == ControllerMode.OVERLAY) splitConfirm = true
-                        else activity.updateEntry(entry.id) { it.copy(controllerMode = ControllerMode.SPLIT) }
-                    }) { Text(if (entry.controllerMode == ControllerMode.SPLIT) "✓ Split-Controller" else "Split-Controller") }
-                }
-            }
-            Box {
-                TextButton(onClick = { systemMenu = true }) { Text("Move to System") }
-                DropdownMenu(expanded = systemMenu, onDismissRequest = { systemMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("No System") },
-                        onClick = { activity.updateEntry(entry.id) { it.copy(systemId = null) }; systemMenu = false },
+    val configuration = LocalConfiguration.current
+    val visibility = remember(entry.id) { MutableTransitionState(false) }
+    val firstActionFocusRequester = remember(entry.id) { FocusRequester() }
+    LaunchedEffect(entry.id) {
+        visibility.targetState = true
+        withFrameNanos { }
+        firstActionFocusRequester.requestFocus()
+    }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val panelWidth = if (configuration.screenWidthDp < configuration.screenHeightDp) maxWidth else maxWidth * 0.4f
+        AnimatedVisibility(
+            visibleState = visibility,
+            enter = fadeIn(tween(180)),
+        ) {
+            Box(
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.58f))
+                    .clickable { activity.showOptionsFor = null },
+            )
+        }
+        AnimatedVisibility(
+            visibleState = visibility,
+            enter = slideInHorizontally(tween(240)) { it } + fadeIn(tween(200)),
+            modifier = Modifier.align(Alignment.CenterEnd),
+        ) {
+            Column(
+                Modifier.width(panelWidth).fillMaxHeight()
+                    .background(Color(0xFF141B28))
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { activity.showOptionsFor = null }) {
+                        Text("←", color = HubAccent, fontSize = 22.sp)
+                    }
+                    Text(
+                        entry.title,
+                        Modifier.weight(1f),
+                        color = Color.White,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                    activity.snapshot.systems.forEach { system ->
-                        DropdownMenuItem(
-                            text = { Text(system.name) },
-                            onClick = { activity.updateEntry(entry.id) { it.copy(systemId = system.id) }; systemMenu = false },
-                        )
+                }
+                Text("GAME OPTIONS", color = HubMuted, fontSize = 10.sp, letterSpacing = 1.3.sp)
+                Spacer(Modifier.height(10.dp))
+                LazyColumn(
+                    Modifier.weight(1f).fillMaxWidth().focusGroup(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item {
+                        OptionActionRow("▶", "Play", modifier = Modifier.focusRequester(firstActionFocusRequester)) {
+                            activity.showOptionsFor = null
+                            activity.play(entry)
+                        }
+                    }
+                    if (entry.kind == Kind.PC) {
+                        item {
+                            OptionActionRow("▣", "Controls") {
+                                activity.showOptionsFor = null
+                                activity.openControls(entry)
+                            }
+                        }
+                        item {
+                            Column(Modifier.fillMaxWidth().padding(top = 5.dp)) {
+                                Text("Controller mode", color = HubMuted, fontSize = 12.sp)
+                                Spacer(Modifier.height(7.dp))
+                                ControllerModeSelector(
+                                    selected = entry.controllerMode,
+                                    onOverlay = {
+                                        activity.updateEntry(entry.id) { it.copy(controllerMode = ControllerMode.OVERLAY) }
+                                    },
+                                    onSplit = {
+                                        if (entry.controllerMode == ControllerMode.OVERLAY) splitConfirm = true
+                                        else activity.updateEntry(entry.id) { it.copy(controllerMode = ControllerMode.SPLIT) }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    item {
+                        Box {
+                            OptionActionRow("▤", "Move to System") { systemMenu = true }
+                            DropdownMenu(expanded = systemMenu, onDismissRequest = { systemMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("No System") },
+                                    onClick = { activity.updateEntry(entry.id) { it.copy(systemId = null) }; systemMenu = false },
+                                )
+                                activity.snapshot.systems.forEach { system ->
+                                    DropdownMenuItem(
+                                        text = { Text(system.name) },
+                                        onClick = { activity.updateEntry(entry.id) { it.copy(systemId = system.id) }; systemMenu = false },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        OptionActionRow("▧", "Change cover") {
+                            activity.pickImage(ImageAction.COVER, entry.id)
+                            activity.showOptionsFor = null
+                        }
+                    }
+                    item {
+                        OptionActionRow("✎", "Rename") {
+                            rename = entry.title
+                            renameDialog = true
+                        }
+                    }
+                    item {
+                        OptionActionRow("⌫", "Remove from library", destructive = true) {
+                            activity.showOptionsFor = null
+                            activity.requestRemove(entry)
+                        }
                     }
                 }
             }
-            TextButton(onClick = { activity.pickImage(ImageAction.COVER, entry.id); activity.showOptionsFor = null }) { Text("Change cover") }
-            TextButton(onClick = { rename = entry.title; renameDialog = true }) { Text("Rename") }
-            TextButton(onClick = { activity.showOptionsFor = null; activity.requestRemove(entry) }) { Text("Remove from library", color = Color(0xFFFF9C9C)) }
         }
     }
     if (renameDialog) {
@@ -765,6 +966,100 @@ private fun EntryOptionsSheet(activity: MainActivity, entry: LibraryEntry) {
 }
 
 @Composable
+private fun OptionActionRow(
+    icon: String,
+    label: String,
+    destructive: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val accent = if (destructive) Color(0xFFFF9C9C) else HubAccent
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
+            .background(if (focused) Color(0xFF2A3D50) else Color(0xFF1B2534))
+            .border(
+                width = if (focused) 1.dp else 0.dp,
+                color = if (focused) HubAccent else Color.Transparent,
+                shape = RoundedCornerShape(13.dp),
+            )
+            .clickable(onClick = onClick)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .padding(horizontal = 11.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(34.dp).clip(CircleShape).background(accent.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(icon, color = accent, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.width(11.dp))
+        Text(label, color = if (destructive) accent else Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun ControllerModeSelector(
+    selected: ControllerMode,
+    onOverlay: () -> Unit,
+    onSplit: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF0F1622)).padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        ControllerModeSegment(
+            "Overlay",
+            selected == ControllerMode.OVERLAY,
+            Modifier.weight(1f),
+            onOverlay,
+        )
+        ControllerModeSegment(
+            "Split-Controller",
+            selected == ControllerMode.SPLIT,
+            Modifier.weight(1f),
+            onSplit,
+        )
+    }
+}
+
+@Composable
+private fun ControllerModeSegment(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        modifier.clip(RoundedCornerShape(9.dp))
+            .background(if (selected) HubAccent else Color.Transparent)
+            .border(
+                width = if (focused) 1.dp else 0.dp,
+                color = if (focused) if (selected) Color.White else HubAccent else Color.Transparent,
+                shape = RoundedCornerShape(9.dp),
+            )
+            .clickable(onClick = onClick)
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .padding(horizontal = 4.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = if (selected) Color(0xFF08151A) else HubMuted,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
 private fun SettingsScreen(activity: MainActivity) {
     val sections = listOf(
         SettingsSection.ADD_GAMES to "Add games",
@@ -778,6 +1073,8 @@ private fun SettingsScreen(activity: MainActivity) {
             Modifier.width(190.dp).fillMaxHeight().clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF111824)).padding(12.dp),
         ) {
+            TextButton(onClick = { activity.page = Page.HOME }) { Text("←  Library", color = Color.White) }
+            Spacer(Modifier.height(6.dp))
             Text("SETTINGS", color = HubMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
             Spacer(Modifier.height(12.dp))
             sections.forEach { (section, title) ->
@@ -792,7 +1089,6 @@ private fun SettingsScreen(activity: MainActivity) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = { activity.page = Page.HOME }) { Text("←  Back to hub") }
         }
         Spacer(Modifier.width(20.dp))
         Column(Modifier.weight(1f).fillMaxHeight().padding(8.dp)) {
@@ -840,8 +1136,13 @@ private fun AddGameAction(title: String, subtitle: String, glyph: String, onClic
             .background(Color(0xFF141D2C)).clickable(onClick = onClick).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(glyph, color = HubAccent, fontSize = 24.sp, modifier = Modifier.width(46.dp))
-        Column {
+        Box(
+            Modifier.size(52.dp).clip(CircleShape).background(HubAccent.copy(alpha = 0.16f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(glyph, color = HubAccent, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Column(Modifier.padding(start = 14.dp)) {
             Text(title, color = Color.White, fontWeight = FontWeight.SemiBold)
             Text(subtitle, color = HubMuted, fontSize = 12.sp)
         }
@@ -1006,51 +1307,69 @@ private fun InstalledAppsScreen(activity: MainActivity) {
     val apps = activity.installedApps.orEmpty()
     val linked = activity.snapshot.entries.mapNotNull { it.packageName }.toSet()
     val visible = filterInstalledApps(apps, activity.installedGamesOnly, activity.installedSearch, emptySet())
-    Row(Modifier.fillMaxSize().background(HubBackground).padding(20.dp)) {
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Link installed games", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                    Text("Add apps to Bifrost without copying or reinstalling them.", color = HubMuted, fontSize = 12.sp)
-                }
-                TextButton(onClick = { activity.page = Page.SETTINGS; activity.installedApps = null }) { Text("Close") }
+    Column(Modifier.fillMaxSize().background(HubBackground).padding(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { activity.page = Page.SETTINGS; activity.installedApps = null }) {
+                Text("←", color = HubAccent, fontSize = 24.sp)
             }
-            Spacer(Modifier.height(14.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Row(
-                    Modifier.weight(1f).clip(RoundedCornerShape(13.dp)).background(Color(0xFF141D2C)).padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("⌕", color = HubMuted, fontSize = 19.sp)
-                    Spacer(Modifier.width(8.dp))
-                    androidx.compose.foundation.text.BasicTextField(
-                        activity.installedSearch,
-                        { activity.installedSearch = it },
-                        singleLine = true,
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
-                        decorationBox = { inner ->
-                            Box {
-                                if (activity.installedSearch.isEmpty()) Text("Search apps", color = HubMuted, fontSize = 14.sp)
-                                inner()
-                            }
-                        },
-                    )
-                }
-                Spacer(Modifier.width(18.dp))
-                Text("Games only", color = Color.White)
-                Switch(checked = activity.installedGamesOnly, onCheckedChange = { activity.installedGamesOnly = it })
+            Column {
+                Text("Link installed games", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Text("Add apps to Bifrost without copying or reinstalling them.", color = HubMuted, fontSize = 12.sp)
             }
-            Spacer(Modifier.height(10.dp))
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
+                .background(Color(0xFF141D2C)).padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("⌕", color = HubMuted, fontSize = 19.sp)
+            Spacer(Modifier.width(8.dp))
+            androidx.compose.foundation.text.BasicTextField(
+                activity.installedSearch,
+                { activity.installedSearch = it },
+                Modifier.weight(1f),
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                decorationBox = { inner ->
+                    Box {
+                        if (activity.installedSearch.isEmpty()) Text("Search apps", color = HubMuted, fontSize = 14.sp)
+                        inner()
+                    }
+                },
+            )
+        }
+        Spacer(Modifier.height(9.dp))
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
+                .background(Color(0xFF141D2C)).padding(start = 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Games only", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text("Show apps Android identifies as games", color = HubMuted, fontSize = 11.sp)
+            }
+            Switch(checked = activity.installedGamesOnly, onCheckedChange = { activity.installedGamesOnly = it })
+        }
+        Spacer(Modifier.height(10.dp))
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
             if (visible.isEmpty()) {
-                Text(
-                    if (activity.installedGamesOnly) "No games match. Turn off Games only to browse all apps."
-                    else "No launchable apps match your search.",
-                    color = HubMuted,
-                    modifier = Modifier.padding(16.dp),
-                )
-                if (activity.installedGamesOnly) TextButton(onClick = { activity.installedGamesOnly = false }) { Text("Show all apps") }
-            }
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                item(key = "empty") {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            if (activity.installedGamesOnly) "No games match. Turn off Games only to browse all apps."
+                            else "No launchable apps match your search.",
+                            color = HubMuted,
+                        )
+                        if (activity.installedGamesOnly) {
+                            TextButton(onClick = { activity.installedGamesOnly = false }) { Text("Show all apps") }
+                        }
+                    }
+                }
+            } else {
                 items(visible, key = { it.packageName }) { app ->
                     val isLinked = app.packageName in linked
                     val checked = app.packageName in activity.selectedInstalledPackages
@@ -1084,9 +1403,13 @@ private fun InstalledAppsScreen(activity: MainActivity) {
                 }
             }
         }
-        Column(Modifier.width(130.dp).fillMaxHeight().padding(start = 12.dp), verticalArrangement = Arrangement.Bottom) {
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF111824)).padding(12.dp),
+        ) {
             Button(
                 onClick = { activity.addInstalledApps(activity.selectedInstalledPackages) },
+                modifier = Modifier.fillMaxWidth().height(50.dp),
                 enabled = activity.selectedInstalledPackages.isNotEmpty(),
             ) { Text("Add ${activity.selectedInstalledPackages.size}") }
         }

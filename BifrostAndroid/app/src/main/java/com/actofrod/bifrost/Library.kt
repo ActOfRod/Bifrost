@@ -89,7 +89,8 @@ internal data class InstalledApp(
     val cover: String? = null,
 )
 
-internal fun defaultGamesOnly(apps: List<InstalledApp>): Boolean = apps.any { it.isGame }
+internal fun defaultGamesOnly(apps: List<InstalledApp>): Boolean =
+    apps.any { it.isGame && !it.packageName.startsWith("com.actofrod", ignoreCase = true) }
 
 internal fun filterInstalledApps(
     apps: List<InstalledApp>,
@@ -99,7 +100,8 @@ internal fun filterInstalledApps(
 ): List<InstalledApp> {
     val normalizedQuery = query.trim().lowercase()
     return apps.filter { app ->
-        (!gamesOnly || app.isGame) &&
+        !app.packageName.startsWith("com.actofrod", ignoreCase = true) &&
+            (!gamesOnly || app.isGame) &&
             app.packageName !in linkedPackages &&
             (normalizedQuery.isEmpty() ||
                 app.label.lowercase().contains(normalizedQuery) ||
