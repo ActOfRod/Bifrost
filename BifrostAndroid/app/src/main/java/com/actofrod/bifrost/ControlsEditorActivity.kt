@@ -18,7 +18,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,14 +29,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -54,6 +51,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -63,7 +61,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -84,6 +84,7 @@ class ControlsEditorActivity : ComponentActivity() {
     internal var document by mutableStateOf<ControlsDocument?>(null)
     internal var savedContents by mutableStateOf("")
     internal var selectedIndex by mutableStateOf(-1)
+    internal var canvasWidthPx by mutableStateOf(1)
     internal var snapEnabled by mutableStateOf(true)
     internal var showSettings by mutableStateOf(false)
     internal var showControllerMap by mutableStateOf(false)
@@ -197,13 +198,29 @@ private fun ErrorScreen(message: String, onBack: () -> Unit) {
 @Composable
 private fun ControlsEditorScreen(activity: ControlsEditorActivity, document: ControlsDocument) {
     BackHandler { activity.requestClose() }
-    Row(Modifier.fillMaxSize().background(EditorBackground)) {
-        Column(Modifier.weight(1f).fillMaxHeight().padding(12.dp)) {
-            EditorToolbar(activity)
-            Spacer(Modifier.height(10.dp))
-            ControlsCanvas(activity, document, Modifier.fillMaxSize().weight(1f))
+    Box(Modifier.fillMaxSize().background(EditorBackground)) {
+        ControlsCanvas(activity, document, Modifier.fillMaxSize())
+        document.elements.getOrNull(activity.selectedIndex)?.let { selected ->
+            val canvasWidth = activity.canvasWidthPx.coerceAtLeast(1)
+            val halfWidth = elementBounds(selected, max(1, canvasWidth / 100).toFloat()).first
+            val centerX = selected.x * canvasWidth
+            val leftSpace = (centerX - halfWidth).coerceAtLeast(0f)
+            val rightSpace = (canvasWidth - centerX - halfWidth).coerceAtLeast(0f)
+            val panelOnLeft = leftSpace >= rightSpace
+            val availableSpace = if (panelOnLeft) leftSpace else rightSpace
+            val availableWidth = with(LocalDensity.current) { availableSpace.toDp() }
+            val panelWidth = (availableWidth - 16.dp).coerceAtLeast(1.dp).coerceAtMost(380.dp)
+            ElementPanel(
+                activity,
+                document,
+                Modifier
+                    .align(if (panelOnLeft) Alignment.CenterStart else Alignment.CenterEnd)
+                    .width(panelWidth)
+                    .fillMaxHeight()
+                    .padding(start = 8.dp, end = 8.dp, top = 64.dp, bottom = 8.dp),
+            )
         }
-        ElementPanel(activity, document, Modifier.width(300.dp).fillMaxHeight())
+        EditorToolbar(activity, Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp))
     }
     activity.presetConfirmation?.let { name ->
         AlertDialog(
@@ -240,17 +257,21 @@ private fun ControlsEditorScreen(activity: ControlsEditorActivity, document: Con
 }
 
 @Composable
-private fun EditorToolbar(activity: ControlsEditorActivity) {
+private fun EditorToolbar(activity: ControlsEditorActivity, modifier: Modifier) {
     var addMenu by remember { mutableStateOf(false) }
     var presetMenu by remember { mutableStateOf(false) }
     Row(
-        Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(EditorPanel.copy(alpha = 0.82f))
+            .clickable { }
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        EditorMenuButton("Back", onClick = activity::requestClose)
-        Box {
-            EditorMenuButton("Add", onClick = { addMenu = true })
+        EditorActionButton("Back", "←", Modifier.weight(1f), onClick = activity::requestClose)
+        Box(Modifier.weight(1f)) {
+            EditorActionButton("Add", "+", Modifier.fillMaxWidth()) { addMenu = true }
             DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
                 listOf("BUTTON" to "Button", "D_PAD" to "D-pad", "STICK" to "Stick", "TRACKPAD" to "Trackpad")
                     .forEach { (type, label) ->
@@ -263,11 +284,11 @@ private fun EditorToolbar(activity: ControlsEditorActivity) {
                                 addMenu = false
                             },
                         )
-                    }
+                }
             }
         }
-        Box {
-            EditorMenuButton("Preset", onClick = { presetMenu = true })
+        Box(Modifier.weight(1f)) {
+            EditorActionButton("Preset", "▤", Modifier.fillMaxWidth()) { presetMenu = true }
             DropdownMenu(expanded = presetMenu, onDismissRequest = { presetMenu = false }) {
                 listOf("Gamepad", "Keyboard + mouse", "RTS").forEach { name ->
                     DropdownMenuItem(
@@ -280,30 +301,54 @@ private fun EditorToolbar(activity: ControlsEditorActivity) {
                 }
             }
         }
-        EditorMenuButton(if (activity.snapEnabled) "Snap: On" else "Snap: Off") {
+        EditorActionButton("Snap", if (activity.snapEnabled) "✓" else "□", Modifier.weight(1f)) {
             activity.snapEnabled = !activity.snapEnabled
         }
-        EditorMenuButton("Settings", onClick = { activity.showSettings = true })
-        EditorMenuButton("Controller", onClick = { activity.showControllerMap = true })
-        Spacer(Modifier.width(8.dp))
-        Button(
-            onClick = activity::saveDocument,
-            colors = ButtonDefaults.buttonColors(containerColor = EditorAccent, contentColor = Color(0xFF082117)),
-        ) { Text("Save", fontWeight = FontWeight.Bold) }
+        EditorActionButton("Settings", "⚙", Modifier.weight(1f)) { activity.showSettings = true }
+        EditorActionButton("Controller", "🎮", Modifier.weight(1f)) { activity.showControllerMap = true }
+        EditorActionButton("Save", "✓", Modifier.weight(1f), primary = true, onClick = activity::saveDocument)
     }
 }
 
 @Composable
-private fun EditorMenuButton(label: String, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 11.dp, vertical = 8.dp)) {
-        Text(label, maxLines = 1)
+private fun EditorActionButton(
+    label: String,
+    icon: String,
+    modifier: Modifier = Modifier,
+    primary: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (primary) EditorAccent else Color(0x667C8BA0))
+            .clickable(onClick = onClick)
+        .padding(horizontal = 2.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(icon, color = if (primary) Color(0xFF082117) else EditorAccent, fontSize = 12.sp, maxLines = 1)
+        Spacer(Modifier.width(2.dp))
+        Text(
+            label,
+            color = if (primary) Color(0xFF082117) else Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+        )
     }
 }
 
 @Composable
 private fun ControlsCanvas(activity: ControlsEditorActivity, document: ControlsDocument, modifier: Modifier) {
     Canvas(
-        modifier.clip(RoundedCornerShape(12.dp)).background(Color(0xFF070A12))
+        modifier.onSizeChanged { canvasSize ->
+            if (activity.canvasWidthPx != canvasSize.width) activity.canvasWidthPx = canvasSize.width
+        }
             .pointerInput(activity.snapEnabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
@@ -389,19 +434,52 @@ private fun ControlsCanvas(activity: ControlsEditorActivity, document: ControlsD
             if (activity.selectedIndex == index) {
                 drawRoundRect(EditorAccent, topLeft, boxSize, androidx.compose.ui.geometry.CornerRadius(snappingSize), style = Stroke(2f))
             }
-            val label = element.text.ifBlank { bindingLabel(element.bindings.firstOrNull().orEmpty()) }
-            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                this.color = Color.White.copy(alpha = if (element.hidden) 0.25f else 0.95f).toArgb()
-                textAlign = android.graphics.Paint.Align.CENTER
-                textSize = max(11f, snappingSize * 1.25f)
-                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+            val label = canvasLabel(element)
+            if (label.isNotEmpty()) {
+                val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    this.color = Color.White.copy(alpha = if (element.hidden) 0.25f else 0.95f).toArgb()
+                    textAlign = android.graphics.Paint.Align.CENTER
+                    textSize = (snappingSize * 1.1f).coerceIn(8f, 18f)
+                    typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                }
+                val maxTextWidth = (boxSize.width - snappingSize * 0.8f).coerceAtLeast(1f)
+                while (paint.textSize > 7f && paint.measureText(label) > maxTextWidth) {
+                    paint.textSize -= 1f
+                }
+                val fittedLabel = ellipsizeLabel(label, paint, maxTextWidth)
+                if (fittedLabel.isNotEmpty()) {
+                    drawContext.canvas.nativeCanvas.drawText(
+                        fittedLabel,
+                        centerX,
+                        centerY + paint.textSize * 0.35f,
+                        paint,
+                    )
+                }
             }
-            drawContext.canvas.nativeCanvas.drawText(label, centerX, centerY + paint.textSize * 0.35f, paint)
             if (element.hidden) {
                 drawLine(Color(0xFFE57373).copy(alpha = 0.8f), Offset(centerX - halfWidth, centerY + halfHeight), Offset(centerX + halfWidth, centerY - halfHeight), 2f)
             }
         }
     }
+}
+
+private fun canvasLabel(element: ControlsElement): String = when (element.type) {
+    "D_PAD" -> ""
+    "STICK" -> element.text.ifBlank {
+        if (element.bindings.any { it.startsWith("GAMEPAD_RIGHT_THUMB_") }) "R-stick" else "L-stick"
+    }
+    "TRACKPAD" -> element.text.ifBlank { "Mouse" }
+    else -> element.text.ifBlank {
+        element.bindings.firstOrNull { it != "NONE" }?.let(::bindingLabel).orEmpty()
+    }
+}
+
+private fun ellipsizeLabel(label: String, paint: android.graphics.Paint, maxWidth: Float): String {
+    if (paint.measureText(label) <= maxWidth) return label
+    val ellipsis = "…"
+    var end = label.length
+    while (end > 0 && paint.measureText(label.substring(0, end) + ellipsis) > maxWidth) end--
+    return if (end == 0) "" else label.substring(0, end) + ellipsis
 }
 
 private fun elementBounds(element: ControlsElement, snappingSize: Float): Pair<Float, Float> = when (element.type) {
@@ -429,104 +507,176 @@ private fun hitTest(elements: List<ControlsElement>, x: Float, y: Float, width: 
 }
 
 private fun bindingLabel(name: String): String {
-    if (name.isEmpty() || name == "NONE") return "—"
     return when (name) {
-        "MOUSE_LEFT_BUTTON" -> "LMB"
-        "MOUSE_RIGHT_BUTTON" -> "RMB"
-        "MOUSE_MIDDLE_BUTTON" -> "MMB"
-        "GAMEPAD_BUTTON_A", "GAMEPAD_BUTTON_B", "GAMEPAD_BUTTON_X", "GAMEPAD_BUTTON_Y" -> name.substringAfterLast('_')
-        else -> runCatching { Binding.valueOf(name).toString() }.getOrDefault(name)
+        "", "NONE" -> "None"
+        "MOUSE_LEFT_BUTTON" -> "Left click"
+        "MOUSE_RIGHT_BUTTON" -> "Right click"
+        "MOUSE_MIDDLE_BUTTON" -> "Middle click"
+        "MOUSE_SCROLL_UP" -> "Scroll up"
+        "MOUSE_SCROLL_DOWN" -> "Scroll down"
+        "MOUSE_MOVE_UP", "MOUSE_MOVE_RIGHT", "MOUSE_MOVE_DOWN", "MOUSE_MOVE_LEFT" -> "Move mouse"
+        "GAMEPAD_BUTTON_A" -> "A"
+        "GAMEPAD_BUTTON_B" -> "B"
+        "GAMEPAD_BUTTON_X" -> "X"
+        "GAMEPAD_BUTTON_Y" -> "Y"
+        "GAMEPAD_BUTTON_L1" -> "L1"
+        "GAMEPAD_BUTTON_R1" -> "R1"
+        "GAMEPAD_BUTTON_L2" -> "L2"
+        "GAMEPAD_BUTTON_R2" -> "R2"
+        "GAMEPAD_BUTTON_L3" -> "L3"
+        "GAMEPAD_BUTTON_R3" -> "R3"
+        "GAMEPAD_BUTTON_SELECT" -> "Select"
+        "GAMEPAD_BUTTON_START" -> "Start"
+        "GAMEPAD_DPAD_UP" -> "D-pad Up"
+        "GAMEPAD_DPAD_RIGHT" -> "D-pad Right"
+        "GAMEPAD_DPAD_DOWN" -> "D-pad Down"
+        "GAMEPAD_DPAD_LEFT" -> "D-pad Left"
+        "GAMEPAD_LEFT_THUMB_UP" -> "Left stick Up"
+        "GAMEPAD_LEFT_THUMB_RIGHT" -> "Left stick Right"
+        "GAMEPAD_LEFT_THUMB_DOWN" -> "Left stick Down"
+        "GAMEPAD_LEFT_THUMB_LEFT" -> "Left stick Left"
+        "GAMEPAD_RIGHT_THUMB_UP" -> "Right stick Up"
+        "GAMEPAD_RIGHT_THUMB_RIGHT" -> "Right stick Right"
+        "GAMEPAD_RIGHT_THUMB_DOWN" -> "Right stick Down"
+        "GAMEPAD_RIGHT_THUMB_LEFT" -> "Right stick Left"
+        "KEY_UP" -> "Up arrow"
+        "KEY_RIGHT" -> "Right arrow"
+        "KEY_DOWN" -> "Down arrow"
+        "KEY_LEFT" -> "Left arrow"
+        "KEY_ENTER" -> "Enter"
+        "KEY_ESC" -> "Esc"
+        "KEY_BKSP" -> "Backspace"
+        "KEY_DEL" -> "Delete"
+        "KEY_INSERT" -> "Insert"
+        "KEY_TAB" -> "Tab"
+        "KEY_SPACE" -> "Space"
+        "KEY_CTRL_L", "KEY_CTRL_R" -> "Ctrl"
+        "KEY_SHIFT_L", "KEY_SHIFT_R" -> "Shift"
+        "KEY_ALT_L", "KEY_ALT_R" -> "Alt"
+        "KEY_HOME" -> "Home"
+        "KEY_PRTSCN" -> "Print Screen"
+        "KEY_PG_UP" -> "Page Up"
+        "KEY_PG_DOWN" -> "Page Down"
+        "KEY_END" -> "End"
+        "KEY_CAPS_LOCK" -> "Caps Lock"
+        "KEY_NUM_LOCK" -> "Num Lock"
+        "KEY_VOL_UP" -> "Volume Up"
+        "KEY_VOL_DOWN" -> "Volume Down"
+        "KEY_BRACKET_LEFT" -> "["
+        "KEY_BRACKET_RIGHT" -> "]"
+        "KEY_BACKSLASH" -> "\\"
+        "KEY_SLASH" -> "/"
+        "KEY_SEMICOLON" -> ";"
+        "KEY_COMMA" -> ","
+        "KEY_PERIOD" -> "."
+        "KEY_APOSTROPHE" -> "'"
+        "KEY_KP_ADD" -> "Numpad +"
+        else -> when {
+            name.startsWith("KEY_KP_") -> "Numpad ${name.removePrefix("KEY_KP_")}"
+            name.startsWith("KEY_") && name.length == 5 -> name.last().toString()
+            name.startsWith("KEY_") -> name.removePrefix("KEY_").split('_')
+                .joinToString(" ") { it.lowercase().replaceFirstChar(Char::uppercase) }
+            else -> name
+        }
     }
 }
 
 @Composable
 private fun ElementPanel(activity: ControlsEditorActivity, document: ControlsDocument, modifier: Modifier) {
     val selected = document.elements.getOrNull(activity.selectedIndex)
-    Column(
-        modifier.background(EditorPanel).verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("Selected control", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        if (selected == null) {
-            Text("Select a control on the canvas to edit it.", color = EditorMuted)
-            return@Column
+    Column(modifier.clip(RoundedCornerShape(16.dp)).background(EditorPanel.copy(alpha = 0.96f)).clickable { }) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Selected control", Modifier.weight(1f), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            TextButton(onClick = { activity.selectedIndex = -1 }) { Text("Close") }
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(selected.type.replace('_', ' '), color = Color.White, fontWeight = FontWeight.SemiBold)
-                Text("Show on screen", color = EditorMuted, fontSize = 12.sp)
+        Column(
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (selected == null) {
+                Text("Select a control on the canvas to edit it.", color = EditorMuted)
+                return@Column
             }
-            Switch(
-                checked = !selected.hidden,
-                onCheckedChange = { checked ->
-                    val index = activity.selectedIndex
-                    activity.updateDocument { it.updateElement(index) { item -> item.update(hidden = !checked) } }
-                },
-            )
-        }
-        if (selected.type == "BUTTON") {
-            Text("Shape", color = EditorMuted)
-            EnumPicker(
-                selected = selected.shape,
-                options = listOf("CIRCLE", "RECT", "ROUND_RECT", "SQUARE"),
-                onSelected = { shape ->
-                    val index = activity.selectedIndex
-                    activity.updateDocument { it.updateElement(index) { item -> item.update(shape = shape) } }
-                },
-            )
-        }
-        if (selected.type in listOf("BUTTON", "D_PAD", "STICK", "TRACKPAD")) {
-            val labels = if (selected.type == "BUTTON") listOf("Slot 1", "Slot 2", "Slot 3", "Slot 4")
-            else listOf("Up", "Right", "Down", "Left")
-            repeat(4) { slot ->
-                BindingPicker(
-                    label = labels[slot],
-                    value = selected.bindings.getOrElse(slot) { "NONE" },
-                    groups = setOf("Gamepad", "Keyboard", "Mouse"),
-                    onSelected = { binding ->
-                        val index = activity.selectedIndex
-                        activity.updateDocument { profile ->
-                            profile.updateElement(index) { item ->
-                                val next = item.bindings.toMutableList().also {
-                                    while (it.size < 4) it += "NONE"
-                                    it[slot] = binding
-                                }
-                                item.update(bindings = next)
-                            }
-                        }
-                    },
-                )
-            }
-        }
-        Text("Size · ${"%.1f".format(selected.scale)}×", color = EditorMuted)
-        Slider(value = selected.scale.coerceIn(0.5f, 3f), onValueChange = { value ->
-            val index = activity.selectedIndex
-            activity.updateDocument { it.updateElement(index) { item -> item.update(scale = value) } }
-        }, valueRange = 0.5f..3f)
-        Text("Opacity · ${(selected.opacity * 100).toInt()}%", color = EditorMuted)
-        Slider(value = selected.opacity.coerceIn(0.1f, 1f), onValueChange = { value ->
-            val index = activity.selectedIndex
-            activity.updateDocument { it.updateElement(index) { item -> item.update(opacity = value) } }
-        }, valueRange = 0.1f..1f)
-        if (selected.type == "BUTTON") {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Toggle mode", Modifier.weight(1f), color = Color.White)
+                Column(Modifier.weight(1f)) {
+                    Text(elementTypeLabel(selected.type), color = Color.White, fontWeight = FontWeight.SemiBold)
+                    Text("Show on screen", color = EditorMuted, fontSize = 12.sp)
+                }
                 Switch(
-                    checked = selected.toggleSwitch,
-                    onCheckedChange = { enabled ->
+                    checked = !selected.hidden,
+                    onCheckedChange = { checked ->
                         val index = activity.selectedIndex
-                        activity.updateDocument { it.updateElement(index) { item -> item.update(toggleSwitch = enabled) } }
+                        activity.updateDocument { it.updateElement(index) { item -> item.update(hidden = !checked) } }
                     },
                 )
             }
+            if (selected.type == "BUTTON") {
+                Text("Shape", color = EditorMuted)
+                EnumPicker(
+                    selected = selected.shape,
+                    options = listOf("CIRCLE", "RECT", "ROUND_RECT", "SQUARE"),
+                    onSelected = { shape ->
+                        val index = activity.selectedIndex
+                        activity.updateDocument { it.updateElement(index) { item -> item.update(shape = shape) } }
+                    },
+                )
+            }
+            if (selected.type in listOf("BUTTON", "D_PAD", "STICK", "TRACKPAD")) {
+                val labels = if (selected.type == "BUTTON") listOf("Slot 1", "Slot 2", "Slot 3", "Slot 4")
+                else listOf("Up", "Right", "Down", "Left")
+                repeat(4) { slot ->
+                    BindingPicker(
+                        label = labels[slot],
+                        value = selected.bindings.getOrElse(slot) { "NONE" },
+                        groups = setOf("Gamepad", "Keyboard", "Mouse"),
+                        onSelected = { binding ->
+                            val index = activity.selectedIndex
+                            activity.updateDocument { profile ->
+                                profile.updateElement(index) { item ->
+                                    val next = item.bindings.toMutableList().also {
+                                        while (it.size < 4) it += "NONE"
+                                        it[slot] = binding
+                                    }
+                                    item.update(bindings = next)
+                                }
+                            }
+                        },
+                    )
+                }
+            }
+            Text("Size · ${"%.1f".format(selected.scale)}×", color = EditorMuted)
+            Slider(value = selected.scale.coerceIn(0.5f, 3f), onValueChange = { value ->
+                val index = activity.selectedIndex
+                activity.updateDocument { it.updateElement(index) { item -> item.update(scale = value) } }
+            }, valueRange = 0.5f..3f)
+            Text("Opacity · ${(selected.opacity * 100).toInt()}%", color = EditorMuted)
+            Slider(value = selected.opacity.coerceIn(0.1f, 1f), onValueChange = { value ->
+                val index = activity.selectedIndex
+                activity.updateDocument { it.updateElement(index) { item -> item.update(opacity = value) } }
+            }, valueRange = 0.1f..1f)
+            if (selected.type == "BUTTON") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Toggle mode", Modifier.weight(1f), color = Color.White)
+                    Switch(
+                        checked = selected.toggleSwitch,
+                        onCheckedChange = { enabled ->
+                            val index = activity.selectedIndex
+                            activity.updateDocument { it.updateElement(index) { item -> item.update(toggleSwitch = enabled) } }
+                        },
+                    )
+                }
+            }
+            OutlinedButton(
+                onClick = {
+                    activity.updateDocument { it.deleteElement(activity.selectedIndex) }
+                    activity.selectedIndex = -1
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Delete control") }
         }
-        OutlinedButton(
-            onClick = {
-                activity.updateDocument { it.deleteElement(activity.selectedIndex) }
-                activity.selectedIndex = -1
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Delete control") }
     }
 }
 
@@ -580,7 +730,7 @@ private fun BindingPicker(
                         Text(group, Modifier.padding(horizontal = 14.dp, vertical = 6.dp), color = EditorAccent, fontWeight = FontWeight.Bold)
                         values.filter { bindingGroup(it) == group }.forEach { binding ->
                             DropdownMenuItem(
-                                text = { Text(if (binding.name == "NONE") "None" else binding.toString()) },
+                                text = { Text(bindingLabel(binding.name)) },
                                 onClick = {
                                     onSelected(binding.name)
                                     expanded = false
@@ -598,6 +748,14 @@ private fun bindingGroup(binding: Binding): String = when {
     binding.isGamepad -> "Gamepad"
     binding.isMouse -> "Mouse"
     else -> "Keyboard"
+}
+
+private fun elementTypeLabel(type: String): String = when (type) {
+    "BUTTON" -> "Button"
+    "D_PAD" -> "D-pad"
+    "STICK" -> "Stick"
+    "TRACKPAD" -> "Trackpad"
+    else -> type
 }
 
 @Composable
@@ -649,18 +807,18 @@ private val controllerRows = listOf(
     ControllerRow("Select", KeyEvent.KEYCODE_BUTTON_SELECT),
     ControllerRow("L3", KeyEvent.KEYCODE_BUTTON_THUMBL),
     ControllerRow("R3", KeyEvent.KEYCODE_BUTTON_THUMBR),
-    ControllerRow("D-pad up", KeyEvent.KEYCODE_DPAD_UP),
-    ControllerRow("D-pad right", KeyEvent.KEYCODE_DPAD_RIGHT),
-    ControllerRow("D-pad down", KeyEvent.KEYCODE_DPAD_DOWN),
-    ControllerRow("D-pad left", KeyEvent.KEYCODE_DPAD_LEFT),
-    ControllerRow("Left stick up", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Y, (-1).toByte())),
-    ControllerRow("Left stick right", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_X, 1.toByte())),
-    ControllerRow("Left stick down", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Y, 1.toByte())),
-    ControllerRow("Left stick left", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_X, (-1).toByte())),
-    ControllerRow("Right stick up", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_RZ, (-1).toByte())),
-    ControllerRow("Right stick right", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Z, 1.toByte())),
-    ControllerRow("Right stick down", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_RZ, 1.toByte())),
-    ControllerRow("Right stick left", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Z, (-1).toByte())),
+    ControllerRow("D-pad Up", KeyEvent.KEYCODE_DPAD_UP),
+    ControllerRow("D-pad Right", KeyEvent.KEYCODE_DPAD_RIGHT),
+    ControllerRow("D-pad Down", KeyEvent.KEYCODE_DPAD_DOWN),
+    ControllerRow("D-pad Left", KeyEvent.KEYCODE_DPAD_LEFT),
+    ControllerRow("Left stick Up", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Y, (-1).toByte())),
+    ControllerRow("Left stick Right", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_X, 1.toByte())),
+    ControllerRow("Left stick Down", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Y, 1.toByte())),
+    ControllerRow("Left stick Left", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_X, (-1).toByte())),
+    ControllerRow("Right stick Up", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_RZ, (-1).toByte())),
+    ControllerRow("Right stick Right", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Z, 1.toByte())),
+    ControllerRow("Right stick Down", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_RZ, 1.toByte())),
+    ControllerRow("Right stick Left", ExternalControllerBinding.getKeyCodeForAxis(MotionEvent.AXIS_Z, (-1).toByte())),
 )
 
 @Composable
