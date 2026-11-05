@@ -9,6 +9,16 @@ on:
 permissions:
   contents: write
 jobs:
+  dsoal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build DSOAL and OpenAL Soft
+        run: scripts/build_dsoal.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsoal-binaries
+          path: target/dsoal
   fsr-layer:
     runs-on: ubuntu-latest
     steps:
@@ -26,7 +36,7 @@ jobs:
             target/fsr-layer/x86
             target/fsr-layer/x64
   windows:
-    needs: fsr-layer
+    needs: [fsr-layer, dsoal]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +45,10 @@ jobs:
         with:
           name: fsr-layer-binaries
           path: fsr-layer
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsoal-binaries
+          path: dsoal-build
       - run: cargo build --release --workspace --locked
       - name: Smoke test
         run: target/release/bifrost.exe --help
@@ -44,10 +58,14 @@ jobs:
           $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
           $d = "Bifrost-Windows-$v"
           New-Item -ItemType Directory $d | Out-Null
-          Copy-Item target/release/bifrost.exe, target/release/bifrost-gui.exe, README.md $d
+          Copy-Item target/release/bifrost.exe, target/release/bifrost-gui.exe, target/release/bifrost-play.exe, README.md $d
           New-Item -ItemType Directory "$d/fsr-layer/x86", "$d/fsr-layer/x64" -Force | Out-Null
           Copy-Item fsr-layer/x86/bifrost_fsr.dll, fsr-layer/x86/bifrost_fsr.json "$d/fsr-layer/x86"
           Copy-Item fsr-layer/x64/bifrost_fsr.dll, fsr-layer/x64/bifrost_fsr.json "$d/fsr-layer/x64"
+          New-Item -ItemType Directory "$d/dsoal/x86", "$d/dsoal/x64" -Force | Out-Null
+          Copy-Item dsoal-build/x86/* "$d/dsoal/x86"
+          Copy-Item dsoal-build/x64/* "$d/dsoal/x64"
+          Copy-Item dsoal-build/DSOAL_LICENSE.txt, dsoal-build/OpenAL_LICENSE.txt, dsoal-build/SOURCE.txt "$d/dsoal"
           Compress-Archive -Path $d -DestinationPath "$d.zip"
           "PKG=$d" >> $env:GITHUB_ENV
       - uses: actions/upload-artifact@v4

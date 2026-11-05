@@ -25,6 +25,56 @@ cat > "$W/game64.c" <<'C'
 #include <d3d11.h>
 int main(void) { return D3D11CreateDevice(0, 0, 0, 0, 0, 0, D3D11_SDK_VERSION, 0, 0, 0) ? 1 : 0; }
 C
+cat > "$W/dsound_test.c" <<'C'
+#include <windows.h>
+#define COBJMACROS
+#include <dsound.h>
+#include <string.h>
+static const GUID iid_dsound3d_buffer = {
+    0x279afa86, 0x4981, 0x11ce, {0xa5, 0x21, 0x00, 0x20, 0xaf, 0x0b, 0xe5, 0x60}
+};
+int main(int argc, char **argv) {
+    char path[MAX_PATH];
+    HMODULE module = GetModuleHandleA("dsound.dll");
+    if (argc != 2 || !module || !GetModuleFileNameA(module, path, sizeof(path)) ||
+        !strstr(path, argv[1]))
+        return 10;
+    IDirectSound8 *sound = 0;
+    if (FAILED(DirectSoundCreate8(0, &sound, 0))) return 11;
+    if (FAILED(IDirectSound8_SetCooperativeLevel(sound, GetDesktopWindow(), DSSCL_PRIORITY))) return 12;
+    WAVEFORMATEX format = {WAVE_FORMAT_PCM, 1, 44100, 88200, 2, 16, 0};
+    DSBUFFERDESC desc = {0};
+    desc.dwSize = sizeof(desc);
+    desc.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY;
+    desc.dwBufferBytes = 44100 * 2;
+    desc.lpwfxFormat = &format;
+    IDirectSoundBuffer *buffer = 0;
+    if (FAILED(IDirectSound8_CreateSoundBuffer(sound, &desc, &buffer, 0))) return 13;
+    IDirectSound3DBuffer *spatial = 0;
+    HRESULT result = IDirectSoundBuffer_QueryInterface(buffer, &iid_dsound3d_buffer, (void **)&spatial);
+    if (FAILED(result)) {
+        IDirectSoundBuffer_Release(buffer);
+        IDirectSound8_Release(sound);
+        return 14;
+    }
+    IDirectSound3DBuffer_Release(spatial);
+    IDirectSoundBuffer_Release(buffer);
+    IDirectSound8_Release(sound);
+    return 0;
+}
+C
+cat > "$W/launcher_test.c" <<'C'
+#include <windows.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+    char *value = getenv("BIFROST_TEST_VALUE");
+    DWORD_PTR process_mask = 0, system_mask = 0;
+    if (!value || strcmp(value, "from-ini") != 0) return 41;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask) || process_mask != 1) return 42;
+    return 37;
+}
+C
 cat > "$W/gdd.c" <<'C'
 #include <windows.h>
 #include <ddraw.h>
@@ -56,6 +106,8 @@ i686-w64-mingw32-gcc -shared -O2 -o "$W/g32/System/Engine.dll" "$W/engine.c" -ld
 i686-w64-mingw32-gcc -O2 -mwindows -o "$W/g32/System/Game.exe" "$W/game.c" -L"$W" -lengine
 i686-w64-mingw32-gcc -O2 -o "$W/g32/unins000.exe" "$W/unins.c"
 x86_64-w64-mingw32-gcc -O2 -mwindows -o "$W/g64/Game64.exe" "$W/game64.c" -ld3d11
+x86_64-w64-mingw32-gcc -O2 -o "$W/dsound_test.exe" "$W/dsound_test.c" -ldsound -lole32 -luuid
+x86_64-w64-mingw32-gcc -O2 -o "$W/launcher_test.exe" "$W/launcher_test.c"
 i686-w64-mingw32-gcc -shared -O2 -o "$W/ddraw.dll" "$W/ddraw_stub.c"
 i686-w64-mingw32-gcc -O2 -mwindows -o "$W/gdd/Game.exe" "$W/gdd.c" -lddraw
 i686-w64-mingw32-gcc -O2 -mwindows -o "$W/gd7/Game.exe" "$W/gd7.c" -lddraw
@@ -72,6 +124,7 @@ with ZipFile(sys.argv[1], "w", ZIP_DEFLATED) as archive:
     archive.writestr("Shaders/interpolation/fsr.glsl.pass1", "pass1")
 PY
 mkdir -p "$W/fsr-layer/x86" "$W/fsr-layer/x64"
+printf 'test launcher binary' > "$W/bifrost-play.exe"
 printf 'x86-fsr-layer' > "$W/fsr-layer/x86/bifrost_fsr.dll"
 printf 'x64-fsr-layer' > "$W/fsr-layer/x64/bifrost_fsr.dll"
 printf '{"layer":"x86"}\n' > "$W/fsr-layer/x86/bifrost_fsr.json"
@@ -132,7 +185,7 @@ grep -q 'fullscreen=true' "$W/odd/ddraw.ini" || fail "FSR fullscreen setting"
 grep -q 'windowed=true' "$W/odd/ddraw.ini" || fail "FSR windowed setting"
 grep -q 'maxfps=60' "$W/odd/ddraw.ini" || fail "FSR frame-rate setting"
 grep -q 'FSR 1' "$W/odd/bifrost_modernize.txt" || fail "FSR report"
-[ ! -e "$W/odd/bifrost_fsr.dll" ] && [ ! -e "$W/odd/Play with FSR.bat" ] || fail "Vulkan FSR layer installed for DirectDraw"
+[ ! -e "$W/odd/bifrost_fsr.dll" ] && [ ! -e "$W/odd/Play with Bifrost.exe" ] || fail "Vulkan FSR layer installed for DirectDraw"
 $BF modernize "$W/gdd" -o "$W/odd" --no-dxvk --ddraw "$W/cnc-ddraw.zip" > "$W/gdd-bicubic.txt" 2>&1 || fail "DirectDraw bicubic re-run"
 grep -q 'shader=Bicubic' "$W/odd/ddraw.ini" || fail "default DirectDraw shader setting"
 grep -q 'renderer=auto' "$W/odd/ddraw.ini" || fail "default DirectDraw renderer setting"
@@ -146,41 +199,84 @@ $BF modernize "$W/gown" -o "$W/ogown" --no-dxvk --ddraw "$W/cnc-ddraw.zip" > "$W
 cmp -s "$W/gown/ddraw.dll" "$W/ogown/ddraw.dll" || fail "game's own ddraw.dll changed"
 grep -q 'ships its own ddraw.dll' "$W/ogown/bifrost_modernize.txt" || fail "own DirectDraw wrapper warning"
 $BF modernize "$W/g32" -o "$W/ofsr8" --no-dxvk --fsr > "$W/g32-fsr.txt" 2>&1 || fail "FSR on Direct3D 8 game"
-grep -q 'FSR 1 was requested, but neither the DirectDraw/cnc-ddraw nor Direct3D 8–11/DXVK path applies' "$W/ofsr8/bifrost_modernize.txt" || fail "FSR-on-Direct3D warning"
+grep -q 'FSR 1 was requested, but no supported rendering path applies; it was skipped' "$W/ofsr8/bifrost_modernize.txt" || fail "FSR-on-Direct3D warning"
 if $BF modernize "$W/gdd" -o "$W/omissing" --no-dxvk --ddraw "$W/missing.zip" > "$W/gdd-missing.txt" 2>&1; then fail "missing cnc-ddraw accepted"; fi
 [ ! -e "$W/omissing" ] || fail "missing cnc-ddraw created output"
 echo "ok   DirectDraw game"
+if $BF modernize "$W/gdd" -o "$W/onis-ddraw" --no-dxvk --ddraw "$W/cnc-ddraw.zip" --upscale nis > "$W/nis-ddraw.txt" 2>&1; then
+    fail "NIS accepted for a DirectDraw-only game"
+fi
+grep -Fq 'NVIDIA Image Scaling is available for Direct3D 8–11 games; use AMD FSR 1 for DirectDraw games' "$W/nis-ddraw.txt" || fail "DirectDraw NIS error"
 
-$BF modernize "$W/g32" -o "$W/ofsr32" --fsr --fsr-layer "$W/fsr-layer" > "$W/fsr32.txt" 2>&1 || fail "32-bit Direct3D FSR run"
+$BF modernize "$W/g32" -o "$W/ofsr32" --fsr --fsr-layer "$W/fsr-layer" --play-exe "$W/bifrost-play.exe" > "$W/fsr32.txt" 2>&1 || fail "32-bit Direct3D FSR run"
 cmp -s "$W/fsr-layer/x86/bifrost_fsr.dll" "$W/ofsr32/System/bifrost_fsr.dll" || fail "32-bit FSR layer architecture"
 cmp -s "$W/fsr-layer/x86/bifrost_fsr.json" "$W/ofsr32/System/bifrost_fsr.json" || fail "32-bit FSR layer manifest"
-for f in bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat"; do [ -f "$W/ofsr32/System/$f" ] || fail "missing Direct3D FSR file $f"; done
-grep -q 'AMD FSR 1 upscales Direct3D to the display: launch with "Play with FSR.bat"' "$W/ofsr32/bifrost_modernize.txt" || fail "Direct3D FSR report"
-python3 - "$W/ofsr32/System/Play with FSR.bat" <<'PY' || fail "FSR launcher contents or CRLF"
-import pathlib, sys
-data = pathlib.Path(sys.argv[1]).read_bytes()
-expected = (
-    b'@echo off\r\nsetlocal DisableDelayedExpansion\r\n'
-    b'rem Written by the Bifrost Modernizer: starts the game with AMD FSR 1 upscaling.\r\n'
-    b'set "VK_LAYER_PATH=%~dp0"\r\nset "VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1"\r\n'
-    b'set "BIFROST_FSR_CONFIG_DIR=%~dp0"\r\ncd /d "%~dp0"\r\nstart "" "%~dp0Game.exe"\r\n'
-)
-sys.exit(0 if data == expected else 1)
-PY
+for f in bifrost_fsr.ini FSR_LICENSE.txt "Play with Bifrost.exe" bifrost_play.ini; do [ -f "$W/ofsr32/System/$f" ] || fail "missing Direct3D FSR file $f"; done
+cmp -s "$W/bifrost-play.exe" "$W/ofsr32/System/Play with Bifrost.exe" || fail "launcher template was not copied"
+grep -q 'AMD FSR 1 upscales Direct3D to the display' "$W/ofsr32/bifrost_modernize.txt" || fail "Direct3D FSR report"
+grep -q 'VK_INSTANCE_LAYERS=VK_LAYER_BIFROST_fsr1' "$W/ofsr32/System/bifrost_play.ini" || fail "FSR launcher environment"
 before_missing=$(cd "$W/ofsr32" && find . -type f -exec sha256sum {} + | sort)
 if $BF modernize "$W/g32" -o "$W/ofsr32" --fsr --fsr-layer "$W/missing-layer" > "$W/fsr-missing.txt" 2>&1; then fail "missing FSR layer accepted"; fi
 grep -q -- '--fsr-layer' "$W/fsr-missing.txt" || fail "missing layer error does not identify --fsr-layer"
 after_missing=$(cd "$W/ofsr32" && find . -type f -exec sha256sum {} + | sort)
 [ "$before_missing" = "$after_missing" ] || fail "missing FSR layer changed existing output"
+touch "$W/ofsr32/System/Play with FSR.bat"
 $BF modernize "$W/g32" -o "$W/ofsr32" > "$W/fsr32-off.txt" 2>&1 || fail "rerun without Direct3D FSR"
-for f in bifrost_fsr.dll bifrost_fsr.json bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat"; do
+for f in bifrost_fsr.dll bifrost_fsr.json bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat" "Play with Bifrost.exe" bifrost_play.ini; do
     [ ! -e "$W/ofsr32/System/$f" ] || fail "stale Direct3D FSR file $f"
 done
-$BF modernize "$W/g64/Game64.exe" -o "$W/ofsr64" --fsr --fsr-layer "$W/fsr-layer" > "$W/fsr64.txt" 2>&1 || fail "64-bit Direct3D FSR run"
+$BF modernize "$W/g64/Game64.exe" -o "$W/ofsr64" --upscale nis --fsr-layer "$W/fsr-layer" --play-exe "$W/bifrost-play.exe" > "$W/fsr64.txt" 2>&1 || fail "64-bit Direct3D NIS run"
 cmp -s "$W/fsr-layer/x64/bifrost_fsr.dll" "$W/ofsr64/bifrost_fsr.dll" || fail "64-bit FSR layer architecture"
 cmp -s "$W/fsr-layer/x64/bifrost_fsr.json" "$W/ofsr64/bifrost_fsr.json" || fail "64-bit FSR layer manifest"
-for f in bifrost_fsr.ini FSR_LICENSE.txt "Play with FSR.bat"; do [ -f "$W/ofsr64/$f" ] || fail "missing 64-bit Direct3D FSR file $f"; done
+for f in bifrost_fsr.ini FSR_LICENSE.txt "Play with Bifrost.exe" bifrost_play.ini; do [ -f "$W/ofsr64/$f" ] || fail "missing 64-bit Direct3D NIS file $f"; done
+grep -q '^mode=nis$' "$W/ofsr64/bifrost_fsr.ini" || fail "NIS layer mode"
 echo "ok   Direct3D FSR layer"
+
+mkdir -p "$W/gdsoal" && cp "$W/dsound_test.exe" "$W/gdsoal/Game.exe"
+if $BF modernize "$W/gdsoal" -o "$W/odsoal" --no-dxvk --no-ddraw --dsoal-dir "$PWD/target/dsoal" > "$W/dsoal.txt" 2>&1; then
+    for f in dsound.dll dsoal-aldrv.dll libc++.dll libunwind.dll DSOAL_LICENSE.txt OpenAL_LICENSE.txt DSOAL_SOURCE.txt; do
+        [ -f "$W/odsoal/$f" ] || fail "missing DSOAL file $f"
+    done
+    grep -q 'Installed DSOAL' "$W/odsoal/bifrost_modernize.txt" || fail "DSOAL report"
+else
+    cat "$W/dsoal.txt"
+    fail "DSOAL modernization"
+fi
+if $BF modernize "$W/gdsoal" -o "$W/odsoal-missing" --no-dxvk --no-ddraw --dsoal-dir "$W/missing-dsoal" > "$W/dsoal-missing.txt" 2>&1; then
+    fail "missing DSOAL binaries accepted"
+fi
+grep -Fq 'DSOAL files not found; use --dsoal-dir' "$W/dsoal-missing.txt" || fail "DSOAL missing-files error"
+if command -v wine >/dev/null && command -v xvfb-run >/dev/null; then
+    WINE_LAUNCHER="$PWD/target/x86_64-pc-windows-gnu/debug/bifrost-play.exe"
+    cargo build --quiet --target x86_64-pc-windows-gnu --bin bifrost-play
+    WINEPREFIX="$W/wineprefix" timeout 90 xvfb-run -a wineboot -i > "$W/wineboot.txt" 2>&1 || fail "Wine prefix initialization"
+    WINEPREFIX="$W/wineprefix" WINEDLLOVERRIDES=dsound=n ALSOFT_DRIVERS=null timeout 90 xvfb-run -a \
+        wine "$W/odsoal/Game.exe" odsoal > "$W/dsoal-wine.txt" 2>&1 || fail "DSOAL DirectSound Wine test (see $W/dsoal-wine.txt)"
+    echo "ok   DSOAL DirectSound Wine test"
+
+    mkdir -p "$W/glauncher" && cp "$W/launcher_test.exe" "$W/glauncher/Game.exe"
+    $BF modernize "$W/glauncher" -o "$W/olauncher" --no-dxvk --no-ddraw --single-core --play-exe "$WINE_LAUNCHER" > "$W/launcher.txt" 2>&1 || fail "launcher modernization"
+    python3 - "$W/olauncher/bifrost_play.ini" <<'PY' || fail "launcher test environment setup"
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text().replace("[env]\n", "[env]\nBIFROST_TEST_VALUE=from-ini\n")
+path.write_text(text)
+PY
+    set +e
+    WINEPREFIX="$W/wineprefix" timeout 90 xvfb-run -a wine "$W/olauncher/Play with Bifrost.exe" > "$W/launcher-wine.txt" 2>&1
+    launcher_status=$?
+    set -e
+    if [ "$launcher_status" -eq 37 ]; then
+        echo "ok   bifrost-play Wine test"
+    elif grep -Fq 'Library bcryptprimitives.dll' "$W/launcher-wine.txt" && grep -Fq 'not found' "$W/launcher-wine.txt"; then
+        echo "skip bifrost-play Wine test (Wine lacks bcryptprimitives.dll)"
+    else
+        fail "launcher exit code $launcher_status, expected 37 (see $W/launcher-wine.txt)"
+    fi
+else
+    echo "skip DSOAL and launcher runtime checks (Wine or xvfb-run unavailable)"
+fi
 
 mkdir -p "$W/o32/Saves" && echo slot1 > "$W/o32/Saves/slot1.sav"
 echo "volume=10" > "$W/o32/System/Engine.dll.ini"
@@ -195,7 +291,7 @@ grep -q keep "$W/forged/notes.txt" || fail "forged output touched"
 mkdir -p "$W/forged/System" && cp "$W/g64/Game64.exe" "$W/forged/System/Game.exe"
 if $BF modernize "$W/g32" -o "$W/forged" >/dev/null 2>&1; then fail "folder with a different exe accepted"; fi
 cmp -s "$W/g64/Game64.exe" "$W/forged/System/Game.exe" || fail "unrelated exe overwritten"
-grep -q bifrost- <(ls -a "$W") && fail "staging folder left behind"
+find "$W" -maxdepth 1 -type d -name '.*.bifrost-staging' -print -quit | grep -q . && fail "staging folder left behind"
 if $BF modernize "$W/g32" -o "$W/o32" --dxvk "$W/missing.tar.gz" >/dev/null 2>&1; then fail "missing DXVK accepted"; fi
 [ -f "$W/o32/Saves/slot1.sav" ] && [ -f "$W/o32/System/Game.exe" ] || fail "failed re-run damaged the previous output"
 (cd "$W/g64" && $BF modernize Game64.exe -o "$W/o64cwd" --no-dxvk >/dev/null 2>&1) || fail "exe in the current directory"

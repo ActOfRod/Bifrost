@@ -62,6 +62,9 @@ struct Modern {
     apply_compat: bool,
     ddraw: bool,
     upscale: Upscale,
+    dsoal: bool,
+    controller: bool,
+    single_core: bool,
     out_dir: String,
 }
 
@@ -84,6 +87,9 @@ impl Default for Modern {
             apply_compat: false,
             ddraw: true,
             upscale: Upscale::Off,
+            dsoal: true,
+            controller: false,
+            single_core: false,
             out_dir: out.display().to_string(),
         }
     }
@@ -326,7 +332,12 @@ impl App {
             apply_compat: m.apply_compat,
             ddraw: m.ddraw.then_some(DxvkSource::Download),
             upscale: if m.ddraw || m.dxvk { m.upscale } else { Upscale::Off },
+            dsoal: m.dsoal,
+            dsoal_dir: None,
             fsr_layer: None,
+            play_exe: None,
+            controller: m.controller,
+            single_core: m.single_core,
         };
         self.spawn(ctx, move |sink| {
             let out = modernize::run(&opts, sink)?;
@@ -644,8 +655,31 @@ impl App {
                     ui.radio_value(&mut m.upscale, Upscale::Fsr1, "AMD FSR 1")
                         .on_hover_text("Upscales DirectDraw through cnc-ddraw or Direct3D 8–11 through the Bifrost Vulkan layer. Direct3D requires the packaged fsr-layer.")
                 });
-                ui.add_enabled(false, egui::RadioButton::new(false, "NVIDIA DLSS"))
-                    .on_disabled_hover_text("Coming later: DLSS needs depth, motion vectors and camera jitter, which older games don't provide.");
+                let ddraw_only = m.apis.apis.contains_key(&bifrost::modernize::Api::DirectDraw)
+                    && ![
+                        bifrost::modernize::Api::Direct3D8,
+                        bifrost::modernize::Api::Direct3D9,
+                        bifrost::modernize::Api::Direct3D10,
+                        bifrost::modernize::Api::Direct3D11,
+                    ]
+                    .into_iter()
+                    .any(|api| m.apis.apis.contains_key(&api));
+                ui.add_enabled_ui(!ddraw_only && (m.ddraw || m.dxvk), |ui| {
+                    ui.radio_value(&mut m.upscale, Upscale::Nis, "NVIDIA Image Scaling")
+                        .on_hover_text("Upscales Direct3D 8–11 games through the Bifrost Vulkan layer.");
+                })
+                .on_disabled_hover_text("NVIDIA Image Scaling is available for Direct3D 8–11 games; use AMD FSR 1 for DirectDraw games");
+            });
+            ui.label("Input");
+            ui.vertical(|ui| {
+                ui.checkbox(&mut m.controller, "Controller support (for keyboard-only games)")
+                    .on_hover_text("Map gamepad buttons and sticks to keyboard and mouse input.");
+                ui.checkbox(&mut m.single_core, "Run on one CPU core")
+                    .on_hover_text("Can fix games that run too fast or stutter.");
+                if m.apis.apis.contains_key(&bifrost::modernize::Api::DirectSound) {
+                    ui.checkbox(&mut m.dsoal, "Restore 3D sound and EAX (DSOAL)")
+                        .on_hover_text("Restores positional audio and EAX for games using DirectSound.");
+                }
             });
             ui.end_row();
             ui.strong("Memory");

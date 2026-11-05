@@ -98,12 +98,33 @@ enum Cmd {
         /// Leave DirectDraw alone (no cnc-ddraw)
         #[arg(long)]
         no_ddraw: bool,
-        /// Upscale DirectDraw games through cnc-ddraw or Direct3D 8–11 games through the Bifrost Vulkan layer
+        /// Legacy alias for --upscale fsr
         #[arg(long)]
         fsr: bool,
+        /// Upscaling mode: off, fsr, or nis
+        #[arg(long, value_parser = ["off", "fsr", "nis"])]
+        upscale: Option<String>,
         /// Directory containing the x86/ and x64/ Bifrost FSR Vulkan layer builds
         #[arg(long, value_name = "DIR")]
         fsr_layer: Option<PathBuf>,
+        /// Enable DSOAL when the game imports DirectSound (the default)
+        #[arg(long, conflicts_with = "no_dsoal")]
+        dsoal: bool,
+        /// Leave DirectSound unchanged
+        #[arg(long)]
+        no_dsoal: bool,
+        /// Directory containing DSOAL x86/ and x64/ files
+        #[arg(long, value_name = "DIR")]
+        dsoal_dir: Option<PathBuf>,
+        /// Enable controller-to-keyboard/mouse input
+        #[arg(long)]
+        controller: bool,
+        /// Run the game on one CPU core
+        #[arg(long)]
+        single_core: bool,
+        /// Path to bifrost-play.exe
+        #[arg(long, value_name = "EXE")]
+        play_exe: Option<PathBuf>,
     },
     /// Developer aid: print the C that each hex instruction word lifts to (used by tests/diff).
     #[command(hide = true)]
@@ -219,7 +240,14 @@ fn run() -> anyhow::Result<()> {
             ddraw,
             no_ddraw,
             fsr,
+            upscale,
             fsr_layer,
+            dsoal,
+            no_dsoal,
+            dsoal_dir,
+            controller,
+            single_core,
+            play_exe,
         } => {
             use bifrost::modernize::{Compat, DxvkSource, ModernizeOptions, Upscale};
             if scan {
@@ -248,8 +276,21 @@ fn run() -> anyhow::Result<()> {
                     (false, Some(p)) => Some(DxvkSource::Local(p)),
                     (false, None) => Some(DxvkSource::Download),
                 },
-                upscale: if fsr { Upscale::Fsr1 } else { Upscale::Off },
+                upscale: if fsr {
+                    Upscale::Fsr1
+                } else {
+                    match upscale.as_deref() {
+                        Some("fsr") => Upscale::Fsr1,
+                        Some("nis") => Upscale::Nis,
+                        _ => Upscale::Off,
+                    }
+                },
+                dsoal: !no_dsoal || dsoal,
+                dsoal_dir,
                 fsr_layer,
+                play_exe,
+                controller,
+                single_core,
             };
             modernize(&opts)
         }
