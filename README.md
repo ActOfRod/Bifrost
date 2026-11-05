@@ -54,7 +54,7 @@ The launcher is a landscape Big Picture-style Android library for native apps an
 |---|---|
 | Launcher app with Big Picture-style library | ✅ |
 | Native port library (install APK / installed apps / auto-detect Bifrost ports) | ✅ |
-| `.bifrost` packaging on PC (`bifrost pack`, GUI checkbox) | ✅ |
+| `.bifrost` packaging on PC (`bifrost pack` or Recomp → Windows PC game in the GUI) | ✅ |
 | Import `.bifrost` into the launcher | ✅ |
 | Windows runtime (Wine + Box64 + Mesa + DXVK) | ✅ Implemented; not tested on a device |
 | Controller/touch input mapping for PC games | ⬜ |
