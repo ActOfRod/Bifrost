@@ -13,12 +13,12 @@ diff --git a/java/com/winlator/widget/InputControlsView.java b/java/com/winlator
 -                if (controllerBinding != null) handleInputEvent(controllerBinding.getBinding(), state.isPressed(ExternalController.IDX_BUTTON_L2));
 +                ExternalControllerBinding controllerBinding = controller.getControllerBinding(KeyEvent.KEYCODE_BUTTON_L2);
 +                if (controllerBinding != null && controllerBinding.getBinding() != Binding.NONE)
-+                    handleInputEvent(controllerBinding.getBinding(), state.isPressed(ExternalController.IDX_BUTTON_L2));
++                    handleInputEvent(controllerBinding.getBinding(), state.triggerL > 0.0f);
  
                  controllerBinding = controller.getControllerBinding(KeyEvent.KEYCODE_BUTTON_R2);
 -                if (controllerBinding != null) handleInputEvent(controllerBinding.getBinding(), state.isPressed(ExternalController.IDX_BUTTON_R2));
 +                if (controllerBinding != null && controllerBinding.getBinding() != Binding.NONE)
-+                    handleInputEvent(controllerBinding.getBinding(), state.isPressed(ExternalController.IDX_BUTTON_R2));
++                    handleInputEvent(controllerBinding.getBinding(), state.triggerR > 0.0f);
  
                  processJoystickInput(controller);
 -                return true;
@@ -58,8 +58,8 @@ diff --git a/java/com/winlator/widget/InputControlsView.java b/java/com/winlator
 +            if (Math.abs(values[i]) > ControlElement.STICK_DEAD_ZONE &&
 +                    hasControllerBinding(controller, ExternalControllerBinding.getKeyCodeForAxis(axes[i], Mathf.sign(values[i])))) return true;
 +        }
-+        return (hasControllerBinding(controller, KeyEvent.KEYCODE_BUTTON_L2) && state.isPressed(ExternalController.IDX_BUTTON_L2)) ||
-+                (hasControllerBinding(controller, KeyEvent.KEYCODE_BUTTON_R2) && state.isPressed(ExternalController.IDX_BUTTON_R2));
++        return (hasControllerBinding(controller, KeyEvent.KEYCODE_BUTTON_L2) && state.triggerL > 0.0f) ||
++                (hasControllerBinding(controller, KeyEvent.KEYCODE_BUTTON_R2) && state.triggerR > 0.0f);
      }
  
      @Override

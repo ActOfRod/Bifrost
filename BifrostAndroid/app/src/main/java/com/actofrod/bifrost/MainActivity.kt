@@ -784,21 +784,26 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun ensureControlsProfile(entry: LibraryEntry): LibraryEntry {
-        if (entry.kind != Kind.PC) return entry
-        if (entry.controlsProfileId != null) return entry
+        val currentEntry = snapshot.currentEntry(entry)
+        if (currentEntry.kind != Kind.PC) return currentEntry
+        if (currentEntry.controlsProfileId != null) {
+            if (selected?.id == currentEntry.id && selected != currentEntry) selected = currentEntry
+            return currentEntry
+        }
         val manager = InputControlsManager(this)
         manager.getProfiles()
-        val profile = manager.createProfile(entry.title)
+        val profile = manager.createProfile(currentEntry.title)
         val file = ControlsProfile.getProfileFile(this, profile.id)
         try {
-            val current = if (file.isFile) ControlsDocument.parse(file.readText()) else ControlsDocument.create(profile.id, entry.title)
+            val current = if (file.isFile) ControlsDocument.parse(file.readText()) else ControlsDocument.create(profile.id, currentEntry.title)
             val gamepad = assets.open("inputcontrols/profiles/controls-3.icp").bufferedReader().use {
                 ControlsDocument.parse(it.readText())
             }
-            file.writeText(current.applyPreset(gamepad).encode())
-            val profiledEntry = entry.copy(controlsProfileId = profile.id)
-            val next = snapshot.copy(entries = snapshot.entries.map { if (it.id == entry.id) profiledEntry else it })
+            writeAtomically(file, File(filesDir, "controls-tmp"), current.applyPreset(gamepad).encode())
+            val profiledEntry = currentEntry.copy(controlsProfileId = profile.id)
+            val next = snapshot.copy(entries = snapshot.entries.map { if (it.id == currentEntry.id) profiledEntry else it })
             if (!persist(next)) throw IllegalStateException("Could not save controls profile for this game")
+            if (selected?.id == profiledEntry.id) selected = profiledEntry
             return profiledEntry
         } catch (error: Throwable) {
             manager.removeProfile(profile)

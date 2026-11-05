@@ -148,9 +148,10 @@ class ControlsEditorActivity : ComponentActivity() {
     internal fun saveDocument() {
         val current = document ?: return
         try {
-            profileFile?.parentFile?.mkdirs()
-            profileFile?.writeText(current.encode())
-            savedContents = current.encode()
+            val file = profileFile ?: throw IllegalStateException("Controls profile is missing")
+            val contents = current.encode()
+            writeAtomically(file, File(filesDir, "controls-tmp"), contents)
+            savedContents = contents
             error = null
         } catch (exception: Exception) {
             error = exception.message ?: "Could not save controls"
@@ -349,20 +350,27 @@ private fun ControlsCanvas(activity: ControlsEditorActivity, document: ControlsD
         modifier.onSizeChanged { canvasSize ->
             if (activity.canvasWidthPx != canvasSize.width) activity.canvasWidthPx = canvasSize.width
         }
-            .pointerInput(activity.snapEnabled) {
+            .pointerInput(activity, activity.snapEnabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     var previous = down.position
                     val canvasWidth = size.width.toInt().coerceAtLeast(1)
                     val canvasHeight = size.height.toInt().coerceAtLeast(1)
-                    val hit = hitTest(document.elements, down.position.x, down.position.y, canvasWidth, canvasHeight)
+                    val hit = hitTest(
+                        activity.document?.elements.orEmpty(),
+                        down.position.x,
+                        down.position.y,
+                        canvasWidth,
+                        canvasHeight,
+                    )
                     activity.selectedIndex = hit
                     var pointer = down
                     while (pointer.pressed) {
                         val event = awaitPointerEvent()
                         pointer = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (pointer.pressed && activity.selectedIndex >= 0) {
-                            val current = activity.document?.elements?.getOrNull(activity.selectedIndex)
+                            val currentDocument = activity.document
+                            val current = currentDocument?.elements?.getOrNull(activity.selectedIndex)
                             if (current != null) {
                                 var x = (current.x + (pointer.position.x - previous.x) / size.width).coerceIn(0.02f, 0.98f)
                                 var y = (current.y + (pointer.position.y - previous.y) / size.height).coerceIn(0.02f, 0.98f)

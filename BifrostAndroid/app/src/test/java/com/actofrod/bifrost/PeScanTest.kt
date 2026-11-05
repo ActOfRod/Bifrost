@@ -34,6 +34,22 @@ class PeScanTest {
     }
 
     @Test
+    fun detectsDirect3d12AndSelectsVkd3d() {
+        val root = Files.createTempDirectory("bifrost-pe-d3d12").toFile()
+        try {
+            File(root, "Game.exe").writeBytes(tinyPe(0x014c, listOf("d3d12.dll")))
+            File(root, "Launcher.exe").writeBytes(tinyPe(0x014c).copyOf(0x4000))
+
+            val apis = PeScan.detectApis(root, "Game.exe")
+            assertEquals(listOf("Direct3D 12"), apis)
+            assertEquals("vkd3d", dxwrapperFor(apis))
+            assertEquals("Game.exe", PeScan.scan(root).main.path)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun detectsLegacyDirect3dInterfaceGuid() {
         val root = Files.createTempDirectory("bifrost-pe-guid").toFile()
         try {

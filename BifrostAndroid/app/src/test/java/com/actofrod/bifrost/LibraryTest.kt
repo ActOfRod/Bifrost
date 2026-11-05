@@ -74,6 +74,20 @@ class LibraryTest {
     }
 
     @Test
+    fun resolvesStaleEntryFromCurrentLibrarySnapshot() {
+        val current = LibraryEntry(
+            id = "game",
+            kind = Kind.PC,
+            title = "Game",
+            addedAt = 1,
+            controlsProfileId = 7,
+        )
+        val stale = current.copy(controlsProfileId = null)
+
+        assertEquals(current, LibrarySnapshot(entries = listOf(current)).currentEntry(stale))
+    }
+
+    @Test
     fun zipSlipFailureRemovesPartialImport() {
         val temp = createTempDir(prefix = "bifrost-zip-slip")
         try {

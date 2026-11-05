@@ -118,7 +118,7 @@
 +                                    vibrated = true;
 +                                }
 +                            }
-+                            if (element.getBindingAt(0) == Binding.MOUSE_LEFT_BUTTON && element.getLastBindingIndex() == 0) {
++                            if (!element.isHidden() && element.getBindingAt(0) == Binding.MOUSE_LEFT_BUTTON && element.getLastBindingIndex() == 0) {
 +                                touchpadView.setPointerButtonLeftEnabled(false);
 +                            }
                          }

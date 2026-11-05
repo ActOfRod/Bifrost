@@ -35,6 +35,7 @@ object PeScan {
         "Direct3D 9",
         "Direct3D 10",
         "Direct3D 11",
+        "Direct3D 12",
         "DXGI",
         "OpenGL",
         "3dfx Glide",
@@ -68,7 +69,7 @@ object PeScan {
         require(executables.isNotEmpty()) { "No Windows game executable found in ${root.path}" }
         fun score(index: Int): Long {
             val executable = executables[index]
-            val usesGraphics = executable.imports.any { apiForDll(it)?.let { label -> apiOrder.indexOf(label) <= 8 } == true }
+            val usesGraphics = executable.imports.any { apiForDll(it)?.let { label -> apiOrder.indexOf(label) <= 9 } == true }
             return (if (usesGraphics) 1L shl 40 else 0L) +
                 (if (executable.gui) 1L shl 39 else 0L) + executable.size
         }
@@ -189,6 +190,7 @@ object PeScan {
         "d3d9.dll" -> "Direct3D 9"
         "d3d10.dll", "d3d10_1.dll", "d3d10core.dll" -> "Direct3D 10"
         "d3d11.dll" -> "Direct3D 11"
+        "d3d12.dll" -> "Direct3D 12"
         "dxgi.dll" -> "DXGI"
         "opengl32.dll" -> "OpenGL"
         "glide.dll", "glide2x.dll", "glide3x.dll" -> "3dfx Glide"

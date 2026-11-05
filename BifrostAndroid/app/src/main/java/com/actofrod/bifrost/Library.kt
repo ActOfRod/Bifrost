@@ -41,6 +41,9 @@ data class LibrarySnapshot(
     val dismissed: Set<String> = emptySet(),
 )
 
+internal fun LibrarySnapshot.currentEntry(entry: LibraryEntry): LibraryEntry =
+    entries.firstOrNull { it.id == entry.id } ?: entry
+
 @Serializable
 data class BifrostManifest(
     val format: Int,

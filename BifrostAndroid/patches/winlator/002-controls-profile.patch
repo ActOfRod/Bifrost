@@ -1,5 +1,8 @@
 --- a/java/com/winlator/inputcontrols/ControlsProfile.java
 +++ b/java/com/winlator/inputcontrols/ControlsProfile.java
+@@ -3,1 +3,2 @@
+ import android.content.Context;
++import android.view.InputDevice;
 @@ -22,6 +22,9 @@
      private String name;
      private float cursorSpeed = 1.0f;
@@ -42,11 +45,13 @@
      public boolean isVirtualGamepad() {
          return virtualGamepad;
      }
-@@ -109,6 +136,7 @@
+@@ -109,6 +136,9 @@
      public ExternalController getController(int deviceId) {
          if (!controllersLoaded) loadControllers();
          for (ExternalController controller : controllers) if (controller.getDeviceId() == deviceId) return controller;
-+        for (ExternalController controller : controllers) if (controller.getId().equals("*")) return controller;
++        if (ExternalController.isGameController(InputDevice.getDevice(deviceId))) {
++            for (ExternalController controller : controllers) if (controller.getId().equals("*")) return controller;
++        }
          return null;
      }
  
