@@ -26,6 +26,7 @@ if $BF build "$W/fx/game_encrypted.nsp" -o "$W/enc" 2>"$W/enc.txt"; then echo "F
 grep -q "encrypted" "$W/enc.txt" && echo "ok   encrypted NSP rejected"
 if command -v x86_64-w64-mingw32-gcc >/dev/null && command -v wine >/dev/null; then
     $BF build "$W/fx/game.nsp" -o "$W/win" --compile windows >/dev/null
-    WINEDEBUG=-all check windows "$W/win" "wine BifrostTest.exe"
+    WINEPREFIX="$W/wineprefix" WINEDEBUG=-all timeout 90 xvfb-run -a wineboot -i > "$W/wineboot.txt" 2>&1
+    WINEPREFIX="$W/wineprefix" WINEDEBUG=-all check windows "$W/win" "wine BifrostTest.exe"
 fi
 echo "all e2e checks passed"
