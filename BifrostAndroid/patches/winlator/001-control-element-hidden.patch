@@ -1,0 +1,57 @@
+--- a/java/com/winlator/inputcontrols/ControlElement.java
++++ b/java/com/winlator/inputcontrols/ControlElement.java
+@@ -40,6 +40,7 @@
+     public static final int FLAG_TOGGLE_SWITCH = 1<<3;
+     public static final int FLAG_BOUNDING_BOX_NEEDS_UPDATE = 1<<4;
+     public static final int FLAG_MOUSE_MOVE_MODE = 1<<5;
++    public static final int FLAG_HIDDEN = 1<<6;
+     public enum Type {
+         BUTTON, D_PAD, RANGE_BUTTON, STICK, TRACKPAD, MIDI_KEY, RADIAL_MENU;
+ 
+@@ -211,6 +212,14 @@
+         propertyFlags.set(FLAG_MOUSE_MOVE_MODE, mouseMoveMode);
+     }
+ 
++    public boolean isHidden() {
++        return propertyFlags.isSet(FLAG_HIDDEN);
++    }
++
++    public void setHidden(boolean hidden) {
++        propertyFlags.set(FLAG_HIDDEN, hidden);
++    }
++
+     public Binding getBindingAt(int index) {
+         return index < bindings.length ? bindings[index] : Binding.NONE;
+     }
+@@ -424,6 +433,7 @@
+     }
+ 
+     public void draw(Canvas canvas) {
++        if (isHidden() && !inputControlsView.isEditMode()) return;
+         int snappingSize = inputControlsView.getSnappingSize();
+         Paint paint = inputControlsView.getPaint();
+         int lightColor = getLightColor();
+@@ -785,6 +795,7 @@
+             elementJSONObject.put("toggleSwitch", propertyFlags.isSet(FLAG_TOGGLE_SWITCH));
+             elementJSONObject.put("text", text);
+             elementJSONObject.put("iconId", iconId);
++            if (isHidden()) elementJSONObject.put("hidden", true);
+ 
+             if (type == Type.RANGE_BUTTON && range != null) {
+                 elementJSONObject.put("range", range.name());
+@@ -800,6 +811,7 @@
+     }
+ 
+     public boolean containsPoint(float x, float y) {
++        if (isHidden() && !inputControlsView.isEditMode()) return false;
+         if (type == Type.RADIAL_MENU && propertyFlags.isSet(FLAG_VISIBLE)) {
+             float outerRadius = boundingBox.width() + inputControlsView.getSnappingSize() * scale;
+             return Mathf.distance(boundingBox.centerX(), boundingBox.centerY(), x, y) < outerRadius;
+@@ -813,6 +825,7 @@
+     }
+ 
+     public boolean handleTouchDown(int pointerId, float x, float y) {
++        if (isHidden() && !inputControlsView.isEditMode()) return false;
+         if (currentPointerId == -1 && containsPoint(x, y)) {
+             currentPointerId = pointerId;
+             if (type == Type.BUTTON) {

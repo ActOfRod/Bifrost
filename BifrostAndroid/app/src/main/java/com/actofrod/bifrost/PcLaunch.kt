@@ -29,3 +29,14 @@ internal fun resolveGameDirectory(filesDirectory: File, gameDir: String): File {
     val path = File(gameDir)
     return (if (path.isAbsolute) path else File(File(filesDirectory, "games"), gameDir)).canonicalFile
 }
+
+internal fun resolvePrimaryStoragePath(documentId: String, externalStorageRoot: File): File? {
+    if (!documentId.startsWith("primary:")) return null
+    val relativePath = documentId.removePrefix("primary:")
+    if (relativePath.startsWith('/') || relativePath.contains('\\')) return null
+    val root = externalStorageRoot.canonicalFile
+    val candidate = File(root, relativePath).canonicalFile
+    return candidate.takeIf {
+        it == root || it.path.startsWith(root.path + File.separator)
+    }
+}

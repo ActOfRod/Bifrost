@@ -1,0 +1,116 @@
+diff --git a/java/com/winlator/inputcontrols/ExternalController.java b/java/com/winlator/inputcontrols/ExternalController.java
+--- a/java/com/winlator/inputcontrols/ExternalController.java
++++ b/java/com/winlator/inputcontrols/ExternalController.java
+@@ -18,1 +18,6 @@
+ public class ExternalController implements GamepadSlot {
++    public interface MotionEventMask {
++        boolean isAxisMapped(int deviceId, int axis, float value);
++        boolean isTriggerMapped(int deviceId, boolean left);
++    }
++
+@@ -158,12 +163,12 @@
+-    private void processJoystickInput(MotionEvent event, int historyPos) {
+-        state.thumbLX = getCenteredAxis(event, MotionEvent.AXIS_X, historyPos);
+-        state.thumbLY = getCenteredAxis(event, MotionEvent.AXIS_Y, historyPos);
+-        state.thumbRX = getCenteredAxis(event, MotionEvent.AXIS_Z, historyPos);
+-        state.thumbRY = getCenteredAxis(event, MotionEvent.AXIS_RZ, historyPos);
++    private void processJoystickInput(MotionEvent event, int historyPos, MotionEventMask mask) {
++        state.thumbLX = getCenteredAxis(event, MotionEvent.AXIS_X, historyPos, mask);
++        state.thumbLY = getCenteredAxis(event, MotionEvent.AXIS_Y, historyPos, mask);
++        state.thumbRX = getCenteredAxis(event, MotionEvent.AXIS_Z, historyPos, mask);
++        state.thumbRY = getCenteredAxis(event, MotionEvent.AXIS_RZ, historyPos, mask);
+ 
+         if (historyPos == -1) {
+-            float axisX = getCenteredAxis(event, MotionEvent.AXIS_HAT_X, historyPos);
+-            float axisY = getCenteredAxis(event, MotionEvent.AXIS_HAT_Y, historyPos);
++            float axisX = getCenteredAxis(event, MotionEvent.AXIS_HAT_X, historyPos, mask);
++            float axisY = getCenteredAxis(event, MotionEvent.AXIS_HAT_Y, historyPos, mask);
+ 
+             state.dpad[0] = axisY == -1.0f && Math.abs(state.thumbLY) < ControlElement.STICK_DEAD_ZONE;
+             state.dpad[1] = axisX ==  1.0f && Math.abs(state.thumbLX) < ControlElement.STICK_DEAD_ZONE;
+@@ -175,4 +180,13 @@
+-    private void processTriggerButton(MotionEvent event) {
+-        state.triggerL = Mathf.clamp(Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE)) - Mathf.EPSILON, 0.0f, 1.0f);
+-        state.triggerR = Mathf.clamp(Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS)) - Mathf.EPSILON, 0.0f, 1.0f);
+-    }
++    private float getCenteredAxis(MotionEvent event, int axis, int historyPos, MotionEventMask mask) {
++        float value = getCenteredAxis(event, axis, historyPos);
++        return mask != null && mask.isAxisMapped(event.getDeviceId(), axis, value) ? 0.0f : value;
++    }
++
++    private void processTriggerButton(MotionEvent event, MotionEventMask mask) {
++        float triggerL = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE));
++        float triggerR = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS));
++        if (mask != null && mask.isTriggerMapped(event.getDeviceId(), true)) triggerL = 0.0f;
++        if (mask != null && mask.isTriggerMapped(event.getDeviceId(), false)) triggerR = 0.0f;
++        state.triggerL = Mathf.clamp(triggerL - Mathf.EPSILON, 0.0f, 1.0f);
++        state.triggerR = Mathf.clamp(triggerR - Mathf.EPSILON, 0.0f, 1.0f);
++    }
+@@ -180,9 +194,13 @@
+     public boolean updateStateFromMotionEvent(MotionEvent event) {
++        return updateStateFromMotionEvent(event, null);
++    }
++
++    public boolean updateStateFromMotionEvent(MotionEvent event, MotionEventMask mask) {
+         if (isJoystickDevice(event)) {
+-            if (processTriggerButtonOnMotionEvent) processTriggerButton(event);
++            if (processTriggerButtonOnMotionEvent) processTriggerButton(event, mask);
+             int historySize = event.getHistorySize();
+-            for (int i = 0; i < historySize; i++) processJoystickInput(event, i);
+-            processJoystickInput(event, -1);
++            for (int i = 0; i < historySize; i++) processJoystickInput(event, i, mask);
++            processJoystickInput(event, -1, mask);
+             return true;
+         }
+         return false;
+diff --git a/java/com/winlator/widget/InputControlsView.java b/java/com/winlator/widget/InputControlsView.java
+--- a/java/com/winlator/widget/InputControlsView.java
++++ b/java/com/winlator/widget/InputControlsView.java
+@@ -44,1 +44,1 @@
+-public class InputControlsView extends View {
++public class InputControlsView extends View implements ExternalController.MotionEventMask {
+@@ -393,0 +394,13 @@
++    @Override
++    public boolean isAxisMapped(int deviceId, int axis, float value) {
++        if (editMode || value == 0.0f) return false;
++        ExternalController controller = profile != null ? profile.getController(deviceId) : null;
++        byte direction = (byte)Math.signum(value);
++        return controller != null && hasControllerBinding(controller, ExternalControllerBinding.getKeyCodeForAxis(axis, direction));
++    }
++
++    @Override
++    public boolean isTriggerMapped(int deviceId, boolean left) {
++        ExternalController controller = profile != null ? profile.getController(deviceId) : null;
++        return !editMode && controller != null && hasControllerBinding(controller, left ? KeyEvent.KEYCODE_BUTTON_L2 : KeyEvent.KEYCODE_BUTTON_R2);
++    }
+diff --git a/java/com/winlator/winhandler/GamepadHandler.java b/java/com/winlator/winhandler/GamepadHandler.java
+--- a/java/com/winlator/winhandler/GamepadHandler.java
++++ b/java/com/winlator/winhandler/GamepadHandler.java
+@@ -274,9 +274,13 @@
+     protected boolean onGenericMotionEvent(MotionEvent event) {
++        return onGenericMotionEvent(event, null);
++    }
++
++    protected boolean onGenericMotionEvent(MotionEvent event, ExternalController.MotionEventMask motionEventMask) {
+         boolean handled = false;
+         ExternalController controller = getConnectedControllerById(event.getDeviceId());
+         if (controller != null) {
+-            handled = controller.updateStateFromMotionEvent(event);
++            handled = controller.updateStateFromMotionEvent(event, motionEventMask);
+             if (handled) sendGamepadState(controller);
+         }
+         return handled;
+     }
+diff --git a/java/com/winlator/winhandler/WinHandler.java b/java/com/winlator/winhandler/WinHandler.java
+--- a/java/com/winlator/winhandler/WinHandler.java
++++ b/java/com/winlator/winhandler/WinHandler.java
+@@ -10,3 +10,4 @@
+ import com.winlator.core.GeneralComponents;
+ import com.winlator.core.StringUtils;
++import com.winlator.inputcontrols.ExternalController;
+ import com.winlator.xserver.XServer;
+@@ -458,0 +460,4 @@
++
++    public boolean onGenericMotionEvent(MotionEvent event, ExternalController.MotionEventMask motionEventMask) {
++        return gamepadHandler.onGenericMotionEvent(event, motionEventMask);
++    }
