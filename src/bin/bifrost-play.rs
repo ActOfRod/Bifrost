@@ -158,6 +158,26 @@ fn active_inputs(pad: PadState) -> BTreeSet<&'static str> {
 }
 
 #[cfg(any(windows, test))]
+fn active_bindings(active: &BTreeSet<&'static str>, buttons: &BTreeMap<String, String>) -> BTreeSet<String> {
+    active
+        .iter()
+        .filter_map(|input| buttons.get(*input))
+        .filter(|binding| !binding.eq_ignore_ascii_case("none"))
+        .map(|binding| binding.to_ascii_lowercase())
+        .collect()
+}
+
+#[cfg(any(windows, test))]
+fn binding_transitions(held: &BTreeSet<String>, now: &BTreeSet<String>) -> (BTreeSet<String>, BTreeSet<String>) {
+    (held.difference(now).cloned().collect(), now.difference(held).cloned().collect())
+}
+
+#[cfg(any(windows, test))]
+fn lowest_affinity_bit(mask: usize) -> Option<usize> {
+    (mask != 0).then(|| 1usize << mask.trailing_zeros())
+}
+
+#[cfg(any(windows, test))]
 fn scale_mouse_axis(value: i16, mouse_speed: u32) -> i32 {
     let value = i64::from(value);
     let deadzone = i64::from(STICK_DEADZONE);
@@ -180,7 +200,10 @@ fn main() {
 
 #[cfg(windows)]
 mod windows {
-    use super::{active_inputs, expand_bifrost_dir, merge_environment, parse_ini, scale_mouse_axis, Config, PadState};
+    use super::{
+        active_bindings, active_inputs, binding_transitions, expand_bifrost_dir, lowest_affinity_bit,
+        merge_environment, parse_ini, scale_mouse_axis, Config, PadState,
+    };
     use std::collections::BTreeSet;
     use std::ffi::{c_void, OsStr};
     use std::mem::zeroed;
@@ -282,6 +305,7 @@ mod windows {
         fn CreateProcessW(application: *const u16, command: *mut u16, process_attrs: *const c_void, thread_attrs: *const c_void,
             inherit: Bool, flags: Dword, environment: *const c_void, directory: *const u16, startup: *mut StartupInfo,
             process_info: *mut ProcessInfo) -> Bool;
+        fn GetProcessAffinityMask(process: Handle, process_mask: *mut usize, system_mask: *mut usize) -> Bool;
         fn SetProcessAffinityMask(process: Handle, mask: usize) -> Bool;
         fn SetPriorityClass(process: Handle, priority: Dword) -> Bool;
         fn ResumeThread(thread: Handle) -> Dword;
@@ -414,6 +438,31 @@ mod windows {
         unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), 0x10); }
     }
 
+    fn apply_single_core(process: Handle) -> Result<(), Dword> {
+        let mut process_mask = 0usize;
+        let mut system_mask = 0usize;
+        if unsafe { GetProcessAffinityMask(process, &mut process_mask, &mut system_mask) } == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        let Some(mask) = lowest_affinity_bit(process_mask) else {
+            return Err(87);
+        };
+        if unsafe { SetProcessAffinityMask(process, mask) } == 0 {
+            return Err(unsafe { GetLastError() });
+        }
+        Ok(())
+    }
+
+    fn show_affinity_warning(error: Dword) {
+        let message = format!(
+            "Bifrost could not apply the single-core setting (Windows error {error}: {}). The game will start normally.",
+            std::io::Error::from_raw_os_error(error as i32)
+        );
+        let text = wide(OsStr::new(&message));
+        let title = wide(OsStr::new("Bifrost"));
+        unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), 0x30); }
+    }
+
     pub(super) fn run() {
         match run_inner() {
             Ok(code) => std::process::exit(code),
@@ -452,8 +501,12 @@ mod windows {
                 std::io::Error::from_raw_os_error(error as i32)
             ));
         }
+        if config.single_core {
+            if let Err(error) = apply_single_core(process.process) {
+                show_affinity_warning(error);
+            }
+        }
         unsafe {
-            if config.single_core { SetProcessAffinityMask(process.process, 1); }
             SetPriorityClass(process.process, if config.high_priority { 0x00000080 } else { 0x00000020 });
             ResumeThread(process.thread);
             CloseHandle(process.thread);
@@ -475,15 +528,10 @@ mod windows {
                 buttons: state.gamepad.buttons, left_trigger: state.gamepad.left_trigger, right_trigger: state.gamepad.right_trigger,
                 left_x: state.gamepad.left_x, left_y: state.gamepad.left_y, right_x: state.gamepad.right_x, right_y: state.gamepad.right_y,
             }) } else { BTreeSet::new() };
-            let now: BTreeSet<String> = active.iter().filter(|name| {
-                config.buttons.get(**name).is_some_and(|b| !b.eq_ignore_ascii_case("none"))
-            }).map(|name| (*name).to_string()).collect();
-            for name in held.difference(&now) {
-                if let Some(binding) = config.buttons.get(name) { send_binding(binding, false); }
-            }
-            for name in now.difference(&held) {
-                if let Some(binding) = config.buttons.get(name) { send_binding(binding, true); }
-            }
+            let now = active_bindings(&active, &config.buttons);
+            let (released, pressed) = binding_transitions(&held, &now);
+            for binding in released { send_binding(&binding, false); }
+            for binding in pressed { send_binding(&binding, true); }
             held = now;
             if in_focus && available {
                 send_mouse_move(
@@ -492,9 +540,7 @@ mod windows {
                 );
             }
         }
-        for name in held {
-            if let Some(binding) = config.buttons.get(&name) { send_binding(binding, false); }
-        }
+        for binding in held { send_binding(&binding, false); }
         unsafe { CloseHandle(process.process); }
         Ok(exit_code as i32)
     }
@@ -502,7 +548,10 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
-    use super::{active_inputs, expand_bifrost_dir, merge_environment, parse_ini, scale_mouse_axis, PadState};
+    use super::{
+        active_bindings, active_inputs, binding_transitions, expand_bifrost_dir, lowest_affinity_bit,
+        merge_environment, parse_ini, scale_mouse_axis, PadState,
+    };
 
     #[test]
     fn parses_ini_sections_and_defaults() {
@@ -553,6 +602,33 @@ mod tests {
         assert!(!active.contains("left_right"));
         let active = active_inputs(PadState { left_x: 9000, ..PadState::default() });
         assert!(active.contains("left_right"));
+    }
+
+    #[test]
+    fn shared_output_bindings_release_after_the_last_input() {
+        let config = parse_ini("[game]\nexe=Game.exe\n[buttons]\ndpad_up=Up\nleft_up=uP\n").unwrap();
+        let both = active_inputs(PadState { buttons: 0x0001, left_y: 9000, ..PadState::default() });
+        let mut held = active_bindings(&both, &config.buttons);
+        assert_eq!(held.len(), 1);
+        assert!(held.contains("up"));
+
+        let left_only = active_inputs(PadState { left_y: 9000, ..PadState::default() });
+        let (released, pressed) = binding_transitions(&held, &active_bindings(&left_only, &config.buttons));
+        assert!(released.is_empty());
+        assert!(pressed.is_empty());
+        held = active_bindings(&left_only, &config.buttons);
+
+        let none = active_inputs(PadState::default());
+        let (released, pressed) = binding_transitions(&held, &active_bindings(&none, &config.buttons));
+        assert_eq!(released.len(), 1);
+        assert!(released.contains("up"));
+        assert!(pressed.is_empty());
+    }
+
+    #[test]
+    fn affinity_uses_lowest_available_processor_bit() {
+        assert_eq!(lowest_affinity_bit(0b10100), Some(0b00100));
+        assert_eq!(lowest_affinity_bit(0), None);
     }
 
     #[test]

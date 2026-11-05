@@ -323,7 +323,7 @@ struct Swapchain {
     VkBuffer nis_config_buffer; VkDeviceMemory nis_config_memory;
     VkImage coef_scale_image, coef_usm_image; VkDeviceMemory coef_scale_memory, coef_usm_memory;
     VkImageView coef_scale_view, coef_usm_view; VkSampler nis_sampler;
-    int nis_mode, nis_textures_initialized;
+    int nis_mode;
     Swapchain *next;
 };
 static InstanceState *instances;
@@ -539,6 +539,51 @@ static int make_coeff_image(DeviceState *d, const float *pixels, VkImage *image,
     vi.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
     return d->CreateImageView(d->handle,&vi,NULL,view)==VK_SUCCESS;
 }
+static int initialize_coeff_images(Swapchain *s) {
+    DeviceState *d=s->device;
+    if(!s->pool||!d->GetDeviceQueue||!d->QueueSubmit||!d->CreateFence||!d->WaitForFences)return 0;
+    VkQueue queue=VK_NULL_HANDLE;
+    d->GetDeviceQueue(d->handle,s->pool_family,0,&queue);
+    if(!queue)return 0;
+    VkCommandBuffer command=VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo cai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool=s->pool;cai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cai.commandBufferCount=1;
+    if(d->AllocateCommandBuffers(d->handle,&cai,&command)!=VK_SUCCESS)return 0;
+    if(d->set_loader_data&&d->set_loader_data(d->handle,(void *)command)!=VK_SUCCESS){
+        d->FreeCommandBuffers(d->handle,s->pool,1,&command);return 0;
+    }
+    VkCommandBufferBeginInfo bi={VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VkResult result=d->BeginCommandBuffer(command,&bi);
+    if(result!=VK_SUCCESS){d->FreeCommandBuffers(d->handle,s->pool,1,&command);return 0;}
+    VkImageMemoryBarrier coeffs[2]={{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
+    coeffs[0].srcAccessMask=coeffs[1].srcAccessMask=VK_ACCESS_HOST_WRITE_BIT;
+    coeffs[0].dstAccessMask=coeffs[1].dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+    coeffs[0].oldLayout=coeffs[1].oldLayout=VK_IMAGE_LAYOUT_PREINITIALIZED;
+    coeffs[0].newLayout=coeffs[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    coeffs[0].srcQueueFamilyIndex=coeffs[0].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    coeffs[1].srcQueueFamilyIndex=coeffs[1].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    coeffs[0].image=s->coef_scale_image;coeffs[1].image=s->coef_usm_image;
+    coeffs[0].subresourceRange=coeffs[1].subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    d->CmdPipelineBarrier(command,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                          0,0,NULL,0,NULL,2,coeffs);
+    result=d->EndCommandBuffer(command);
+    if(result!=VK_SUCCESS){d->FreeCommandBuffers(d->handle,s->pool,1,&command);return 0;}
+    VkFence fence=VK_NULL_HANDLE;
+    VkFenceCreateInfo fci={VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    result=d->CreateFence(d->handle,&fci,NULL,&fence);
+    if(result!=VK_SUCCESS){d->FreeCommandBuffers(d->handle,s->pool,1,&command);return 0;}
+    VkSubmitInfo submit={VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount=1;submit.pCommandBuffers=&command;
+    result=d->QueueSubmit(queue,1,&submit,fence);
+    if(result==VK_SUCCESS){
+        result=d->WaitForFences(d->handle,1,&fence,VK_TRUE,UINT64_MAX);
+        if(result!=VK_SUCCESS&&d->QueueWaitIdle)d->QueueWaitIdle(queue);
+    }
+    d->DestroyFence(d->handle,fence,NULL);
+    d->FreeCommandBuffers(d->handle,s->pool,1,&command);
+    return result==VK_SUCCESS;
+}
 static int make_uniform_buffer(DeviceState *d, const void *data, VkDeviceSize size,
                                VkBuffer *buffer, VkDeviceMemory *memory) {
     VkBufferCreateInfo ci={VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};ci.size=size;ci.usage=VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -633,6 +678,7 @@ static int setup_nis(Swapchain *s) {
     float scale[64*8],usm[64*8];bifrost_nis_get_coefficients(scale,usm);
     if(!make_coeff_image(d,scale,&s->coef_scale_image,&s->coef_scale_memory,&s->coef_scale_view) ||
        !make_coeff_image(d,usm,&s->coef_usm_image,&s->coef_usm_memory,&s->coef_usm_view))return 0;
+    if(!initialize_coeff_images(s))return 0;
     VkSamplerCreateInfo si={VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};si.magFilter=si.minFilter=VK_FILTER_LINEAR;
     si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;si.maxLod=0.0f;
@@ -1167,19 +1213,6 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
         output.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;output.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
         output.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;output.newLayout=VK_IMAGE_LAYOUT_GENERAL;
         d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,1,&output);
-        if(!s->nis_textures_initialized){
-            VkImageMemoryBarrier coeffs[2]={{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
-            coeffs[0].srcAccessMask=coeffs[1].srcAccessMask=VK_ACCESS_HOST_WRITE_BIT;
-            coeffs[0].dstAccessMask=coeffs[1].dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
-            coeffs[0].oldLayout=coeffs[1].oldLayout=VK_IMAGE_LAYOUT_PREINITIALIZED;
-            coeffs[0].newLayout=coeffs[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            coeffs[0].srcQueueFamilyIndex=coeffs[0].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-            coeffs[1].srcQueueFamilyIndex=coeffs[1].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-            coeffs[0].image=s->coef_scale_image;coeffs[1].image=s->coef_usm_image;
-            coeffs[0].subresourceRange=coeffs[1].subresourceRange=range;
-            d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,NULL,0,NULL,2,coeffs);
-            s->nis_textures_initialized=1;
-        }
         d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_COMPUTE,s->nis_pipeline);
         d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_COMPUTE,s->nis_pipeline_layout,0,1,&f->nis_set,0,NULL);
         d->CmdDispatch(f->command,(fitw+31)/32,(fith+23)/24,1);
