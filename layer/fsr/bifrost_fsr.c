@@ -323,7 +323,8 @@ struct Swapchain {
     VkBuffer nis_config_buffer; VkDeviceMemory nis_config_memory;
     VkImage coef_scale_image, coef_usm_image; VkDeviceMemory coef_scale_memory, coef_usm_memory;
     VkImageView coef_scale_view, coef_usm_view; VkSampler nis_sampler;
-    int nis_mode;
+    VkCommandBuffer coeff_command; VkFence coeff_fence;
+    int nis_mode, coeffs_ready, coeff_init_failed;
     Swapchain *next;
 };
 static InstanceState *instances;
@@ -539,12 +540,9 @@ static int make_coeff_image(DeviceState *d, const float *pixels, VkImage *image,
     vi.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
     return d->CreateImageView(d->handle,&vi,NULL,view)==VK_SUCCESS;
 }
-static int initialize_coeff_images(Swapchain *s) {
+static int record_coeff_image_init(Swapchain *s) {
     DeviceState *d=s->device;
-    if(!s->pool||!d->GetDeviceQueue||!d->QueueSubmit||!d->CreateFence||!d->WaitForFences)return 0;
-    VkQueue queue=VK_NULL_HANDLE;
-    d->GetDeviceQueue(d->handle,s->pool_family,0,&queue);
-    if(!queue)return 0;
+    if(!s->pool)return 0;
     VkCommandBuffer command=VK_NULL_HANDLE;
     VkCommandBufferAllocateInfo cai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cai.commandPool=s->pool;cai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cai.commandBufferCount=1;
@@ -569,20 +567,36 @@ static int initialize_coeff_images(Swapchain *s) {
                           0,0,NULL,0,NULL,2,coeffs);
     result=d->EndCommandBuffer(command);
     if(result!=VK_SUCCESS){d->FreeCommandBuffers(d->handle,s->pool,1,&command);return 0;}
+    s->coeff_command=command;
+    return 1;
+}
+static int submit_coeff_init_locked(Swapchain *s,VkQueue queue) {
+    if(s->coeffs_ready)return 1;
+    if(s->coeff_init_failed||!s->coeff_command||!queue)return 0;
+    DeviceState *d=s->device;
+    if(!d->QueueSubmit||!d->CreateFence||!d->WaitForFences)return 0;
     VkFence fence=VK_NULL_HANDLE;
     VkFenceCreateInfo fci={VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    result=d->CreateFence(d->handle,&fci,NULL,&fence);
-    if(result!=VK_SUCCESS){d->FreeCommandBuffers(d->handle,s->pool,1,&command);return 0;}
+    VkResult result=d->CreateFence(d->handle,&fci,NULL,&fence);
+    if(result!=VK_SUCCESS)return 0;
     VkSubmitInfo submit={VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount=1;submit.pCommandBuffers=&command;
+    submit.commandBufferCount=1;submit.pCommandBuffers=&s->coeff_command;
     result=d->QueueSubmit(queue,1,&submit,fence);
-    if(result==VK_SUCCESS){
-        result=d->WaitForFences(d->handle,1,&fence,VK_TRUE,UINT64_MAX);
-        if(result!=VK_SUCCESS&&d->QueueWaitIdle)d->QueueWaitIdle(queue);
+    if(result!=VK_SUCCESS){
+        d->DestroyFence(d->handle,fence,NULL);
+        return 0;
+    }
+    result=d->WaitForFences(d->handle,1,&fence,VK_TRUE,UINT64_MAX);
+    if(result!=VK_SUCCESS){
+        s->coeff_fence=fence;
+        s->coeff_init_failed=1;
+        return 0;
     }
     d->DestroyFence(d->handle,fence,NULL);
-    d->FreeCommandBuffers(d->handle,s->pool,1,&command);
-    return result==VK_SUCCESS;
+    d->FreeCommandBuffers(d->handle,s->pool,1,&s->coeff_command);
+    s->coeff_command=VK_NULL_HANDLE;
+    s->coeffs_ready=1;
+    return 1;
 }
 static int make_uniform_buffer(DeviceState *d, const void *data, VkDeviceSize size,
                                VkBuffer *buffer, VkDeviceMemory *memory) {
@@ -678,7 +692,7 @@ static int setup_nis(Swapchain *s) {
     float scale[64*8],usm[64*8];bifrost_nis_get_coefficients(scale,usm);
     if(!make_coeff_image(d,scale,&s->coef_scale_image,&s->coef_scale_memory,&s->coef_scale_view) ||
        !make_coeff_image(d,usm,&s->coef_usm_image,&s->coef_usm_memory,&s->coef_usm_view))return 0;
-    if(!initialize_coeff_images(s))return 0;
+    if(!record_coeff_image_init(s))return 0;
     VkSamplerCreateInfo si={VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};si.magFilter=si.minFilter=VK_FILTER_LINEAR;
     si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;si.maxLod=0.0f;
@@ -755,6 +769,8 @@ static int setup_nis(Swapchain *s) {
 static void destroy_swapchain_resources(Swapchain *s) {
     DeviceState *d = s->device;
     if (s->pool) d->DeviceWaitIdle(d->handle);
+    if (s->coeff_fence) d->DestroyFence(d->handle,s->coeff_fence,NULL);
+    if (s->coeff_command && s->pool) d->FreeCommandBuffers(d->handle,s->pool,1,&s->coeff_command);
     for (uint32_t i = 0; s->frames && i < s->count; ++i) {
         Frame *f = &s->frames[i];
         if (f->command && s->pool) d->FreeCommandBuffers(d->handle,s->pool,1,&f->command);
@@ -1175,6 +1191,7 @@ static VkResult VKAPI_CALL layerReleaseImages(VkDevice dev,const VkReleaseSwapch
 static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
                                   uint32_t wait_count,const VkSemaphore *waits) {
     DeviceState *d=s->device;Frame *f=&s->frames[index];
+    int use_nis=s->nis_mode&&s->coeffs_ready;
     if(d->WaitForFences(d->handle,1,&f->fence,VK_TRUE,UINT64_MAX)!=VK_SUCCESS)return VK_ERROR_DEVICE_LOST;
     if(d->ResetFences(d->handle,1,&f->fence)!=VK_SUCCESS)return VK_ERROR_DEVICE_LOST;
     VkCommandBufferBeginInfo bi={VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};bi.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1185,7 +1202,7 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     app.oldLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;app.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     app.srcQueueFamilyIndex=app.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;app.image=f->app;
     app.subresourceRange=(VkImageSubresourceRange){VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-    VkPipelineStageFlags app_read_stage=s->nis_mode?
+    VkPipelineStageFlags app_read_stage=use_nis?
         (VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT):VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,app_read_stage,0,0,NULL,0,NULL,1,&app);
 
@@ -1197,7 +1214,7 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     VkRenderPassBeginInfo rp={VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     VkViewport viewport;
     VkRect2D scissor;
-    if(s->nis_mode){
+    if(use_nis){
         VkImageMemoryBarrier output={VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         output.srcAccessMask=f->nis_initialized?VK_ACCESS_SHADER_READ_BIT:0;
         output.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1220,7 +1237,7 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
         output.oldLayout=VK_IMAGE_LAYOUT_GENERAL;output.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         d->CmdPipelineBarrier(f->command,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,NULL,0,NULL,1,&output);
         f->nis_initialized=1;
-    }else{
+    }else if(!s->nis_mode){
         uint32_t c0[4],c1[4],c2[4],c3[4];
         FsrEasuCon(c0,c1,c2,c3,(float)s->app_extent.width,(float)s->app_extent.height,
                    (float)s->app_extent.width,(float)s->app_extent.height,(float)fitw,(float)fith);
@@ -1251,7 +1268,8 @@ static VkResult record_and_submit(Swapchain *s,uint32_t index,VkQueue queue,
     viewport=(VkViewport){0,0,(float)rw,(float)rh,0,1};scissor=(VkRect2D){{0,0},{rw,rh}};
     d->CmdSetViewport(f->command,0,1,&viewport);d->CmdSetScissor(f->command,0,1,&scissor);
     d->CmdBindPipeline(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->nis_mode?s->copy_pipeline:s->rcas_pipeline);
-    d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->pipeline_layout,0,1,&f->rcas_set,0,NULL);
+    VkDescriptorSet final_set=s->nis_mode&&!use_nis?f->easu_set:f->rcas_set;
+    d->CmdBindDescriptorSets(f->command,VK_PIPELINE_BIND_POINT_GRAPHICS,s->pipeline_layout,0,1,&final_set,0,NULL);
     if(!s->nis_mode){
         uint32_t rcas[4];FsrRcasCon(rcas,config.sharpness);
         d->CmdPushConstants(f->command,s->pipeline_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,16,rcas);
@@ -1303,6 +1321,10 @@ static VkResult VKAPI_CALL layerPresent(VkQueue queue,const VkPresentInfoKHR *in
         uint32_t index=info->pImageIndices[i];if(index>=mapped[i]->count){result=VK_ERROR_OUT_OF_DATE_KHR;break;}
         uint32_t wc=first?info->waitSemaphoreCount:(previous?1:0);
         const VkSemaphore *ws=first?info->pWaitSemaphores:(previous?&previous:NULL);
+        /* The app externally synchronizes this queue for the duration of vkQueuePresentKHR. */
+        if(mapped[i]->nis_mode&&!mapped[i]->coeffs_ready&&!mapped[i]->coeff_init_failed&&
+           !submit_coeff_init_locked(mapped[i],queue))
+            log_message("NIS coefficient initialization failed; using copy fallback for this frame");
         result=record_and_submit(mapped[i],index,queue,wc,ws);
         if(result!=VK_SUCCESS)break;
         previous=mapped[i]->frames[index].done;first=0;
