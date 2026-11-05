@@ -1,0 +1,80 @@
+--- a/java/com/winlator/inputcontrols/ControlsProfile.java
++++ b/java/com/winlator/inputcontrols/ControlsProfile.java
+@@ -22,6 +22,9 @@
+     private String name;
+     private float cursorSpeed = 1.0f;
+     private boolean disableMouseInput = false;
++    private boolean haptics = false;
++    private int hapticStrength = 50;
++    private boolean autoHideWithController = true;
+     private final ArrayList<ControlElement> elements = new ArrayList<>();
+     private final ArrayList<ExternalController> controllers = new ArrayList<>();
+     private final List<ControlElement> immutableElements = Collections.unmodifiableList(elements);
+@@ -72,7 +75,31 @@
+     public void setDisableMouseInput(boolean disableMouseInput) {
+         this.disableMouseInput = disableMouseInput;
+     }
+ 
++    public boolean isHapticsEnabled() {
++        return haptics;
++    }
++
++    public void setHapticsEnabled(boolean haptics) {
++        this.haptics = haptics;
++    }
++
++    public int getHapticStrength() {
++        return hapticStrength;
++    }
++
++    public void setHapticStrength(int hapticStrength) {
++        this.hapticStrength = Math.max(1, Math.min(100, hapticStrength));
++    }
++
++    public boolean isAutoHideWithController() {
++        return autoHideWithController;
++    }
++
++    public void setAutoHideWithController(boolean autoHideWithController) {
++        this.autoHideWithController = autoHideWithController;
++    }
++
+     public boolean isVirtualGamepad() {
+         return virtualGamepad;
+     }
+@@ -109,6 +136,7 @@
+     public ExternalController getController(int deviceId) {
+         if (!controllersLoaded) loadControllers();
+         for (ExternalController controller : controllers) if (controller.getDeviceId() == deviceId) return controller;
++        for (ExternalController controller : controllers) if (controller.getId().equals("*")) return controller;
+         return null;
+     }
+ 
+@@ -136,6 +164,9 @@
+             data.put("name", name);
+             data.put("cursorSpeed", Float.valueOf(cursorSpeed));
+             if (disableMouseInput) data.put("disableMouseInput", disableMouseInput);
++            data.put("haptics", haptics);
++            data.put("hapticStrength", hapticStrength);
++            data.put("autoHideWithController", autoHideWithController);
+ 
+             JSONArray elementsJSONArray = new JSONArray();
+             if (!elementsLoaded && file.isFile()) {
+@@ -231,6 +262,9 @@
+ 
+         try {
+             JSONObject profileJSONObject = new JSONObject(FileUtils.readString(file));
++            haptics = profileJSONObject.optBoolean("haptics", false);
++            setHapticStrength(profileJSONObject.optInt("hapticStrength", 50));
++            autoHideWithController = profileJSONObject.optBoolean("autoHideWithController", true);
+             JSONArray elementsJSONArray = profileJSONObject.getJSONArray("elements");
+             for (int i = 0; i < elementsJSONArray.length(); i++) {
+                 JSONObject elementJSONObject = elementsJSONArray.getJSONObject(i);
+@@ -250,6 +284,7 @@
+                     if (elementJSONObject.has("orientation")) element.setOrientation((byte)elementJSONObject.getInt("orientation"));
+                     if (elementJSONObject.has("mouseMoveMode")) element.setMouseMoveMode(true);
+                     if (elementJSONObject.has("opacity")) element.setOpacity((float)elementJSONObject.getDouble("opacity"));
++                    element.setHidden(elementJSONObject.optBoolean("hidden", false));
+                 }
+ 
+                 boolean hasGamepadBinding = true;

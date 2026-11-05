@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -22,7 +24,15 @@ val winlatorRevision = winlatorRevisionProcess.inputStream.bufferedReader().read
 if (winlatorRevisionProcess.waitFor() != 0) {
     throw GradleException("Unable to read the Winlator submodule revision")
 }
-if (!winlatorStamp.isFile || winlatorStamp.readText().trim() != winlatorRevision) {
+val winlatorPatches = file("../patches/winlator")
+val winlatorPatchDigest = MessageDigest.getInstance("SHA-256")
+winlatorPatches.listFiles()
+    ?.filter { it.isFile && it.extension == "patch" }
+    ?.sortedBy { it.name }
+    ?.forEach { winlatorPatchDigest.update(it.readBytes()) }
+val winlatorPatchHash = winlatorPatchDigest.digest()
+    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+if (!winlatorStamp.isFile || winlatorStamp.readText().trim() != "$winlatorRevision+$winlatorPatchHash") {
     throw GradleException("Prepared Winlator sources are missing or stale; run python3 scripts/prepare_winlator.py from BifrostAndroid")
 }
 
@@ -107,6 +117,7 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.compose.ui:ui")
