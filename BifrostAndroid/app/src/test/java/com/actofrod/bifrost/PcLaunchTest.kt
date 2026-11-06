@@ -45,14 +45,126 @@ class PcLaunchTest {
     }
 
     @Test
-    fun resolvesOnlyPrimaryExternalStorageDocumentIds() {
-        val root = Files.createTempDirectory("bifrost-primary-storage").toFile()
+    fun resolvesExternalStorageDocumentIdSchemesSafely() {
+        val temp = Files.createTempDirectory("bifrost-external-storage").toFile()
         try {
-            assertEquals(File(root, "Android/data/game").canonicalFile, resolvePrimaryStoragePath("primary:Android/data/game", root))
-            assertEquals(null, resolvePrimaryStoragePath("0123-4567:game", root))
-            assertEquals(null, resolvePrimaryStoragePath("primary:../../outside", root))
+            val externalRoot = File(temp, "emulated/0").apply { mkdirs() }
+            val storageRoot = File(temp, "storage").apply { mkdirs() }
+            val primaryGame = File(externalRoot, "Android/data/game").canonicalFile
+            val homeGame = File(externalRoot, "Documents/Games/game").canonicalFile
+            val removableGame = File(storageRoot, "0123-4567/Games/game").canonicalFile
+
+            assertEquals(
+                primaryGame,
+                resolveDocumentPath("com.android.externalstorage.documents", "primary:Android/data/game", externalRoot, storageRoot),
+            )
+            assertEquals(
+                homeGame,
+                resolveDocumentPath("com.android.externalstorage.documents", "home:Games/game", externalRoot, storageRoot),
+            )
+            assertEquals(
+                removableGame,
+                resolveDocumentPath("com.android.externalstorage.documents", "0123-4567:Games/game", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.externalstorage.documents", "primary:../../outside", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.externalstorage.documents", "home:../../outside", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.externalstorage.documents", "0123-4567:../../outside", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.externalstorage.documents", "primary:Games\\game", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.externalstorage.documents", "primary:/absolute/path", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.unknown.documents", "primary:Games/game", externalRoot, storageRoot),
+            )
         } finally {
-            root.deleteRecursively()
+            temp.deleteRecursively()
         }
+    }
+
+    @Test
+    fun resolvesDownloadsDocumentIdsOnlyInsideStorageRoots() {
+        val temp = Files.createTempDirectory("bifrost-downloads").toFile()
+        try {
+            val externalRoot = File(temp, "emulated/0").apply { mkdirs() }
+            val storageRoot = File(temp, "storage").apply { mkdirs() }
+            val rawPath = File(externalRoot, "Download/Game.exe").canonicalFile
+            val mediaPath = File(storageRoot, "0123-4567/Game.exe").canonicalFile
+            val outsidePath = File(temp, "outside/Game.exe").canonicalPath
+            var lookedUpId: String? = null
+
+            assertEquals(
+                rawPath,
+                resolveDocumentPath(
+                    "com.android.providers.downloads.documents",
+                    "raw:${rawPath.path}",
+                    externalRoot,
+                    storageRoot,
+                ),
+            )
+            assertEquals(
+                mediaPath,
+                resolveDocumentPath(
+                    "com.android.providers.downloads.documents",
+                    "msf:42",
+                    externalRoot,
+                    storageRoot,
+                ) { id ->
+                    lookedUpId = id
+                    mediaPath.path
+                },
+            )
+            assertEquals("42", lookedUpId)
+            assertEquals(
+                null,
+                resolveDocumentPath(
+                    "com.android.providers.downloads.documents",
+                    "msf:43",
+                    externalRoot,
+                    storageRoot,
+                ) { outsidePath },
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath(
+                    "com.android.providers.downloads.documents",
+                    "raw:$outsidePath",
+                    externalRoot,
+                    storageRoot,
+                ),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.providers.downloads.documents", "raw:relative/path", externalRoot, storageRoot),
+            )
+            assertEquals(
+                null,
+                resolveDocumentPath("com.android.providers.downloads.documents", "1234", externalRoot, storageRoot),
+            )
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun matchesPickedExecutablePathCaseInsensitivelyAndFallsBackToMain() {
+        val executables = listOf("Game.exe", "bin/Launcher.exe")
+
+        assertEquals(1, executableIndexForPath(executables, "BIN/launcher.EXE", fallbackIndex = 0))
+        assertEquals(0, executableIndexForPath(executables, "other.exe", fallbackIndex = 0))
+        assertEquals(1, executableIndexForPath(executables, null, fallbackIndex = 1))
     }
 }

@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
@@ -104,6 +105,7 @@ import com.winlator.inputcontrols.ControlsProfile
 import com.winlator.inputcontrols.InputControlsManager
 import java.io.File
 import java.io.FileOutputStream
+import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.Dispatchers
@@ -135,7 +137,14 @@ internal enum class Tab { ALL, NATIVE, PC }
 internal enum class SettingsSection { ADD_GAMES, SYSTEMS, APPEARANCE, WINDOWS_RUNTIME, ABOUT }
 internal enum class ImageAction { BANNER, SYSTEM_ICON, COVER }
 
-internal data class FolderSelection(val uri: Uri, val inPlaceRoot: File?, val folderName: String)
+internal data class FolderSelection(
+    val uri: Uri,
+    val inPlaceRoot: File?,
+    val folderName: String,
+    val pickedExecutablePath: File? = null,
+    val folderSizeBytes: Long? = null,
+    val availableBytes: Long? = null,
+)
 internal data class FolderCandidate(
     val id: String,
     val gameDir: String,
@@ -145,10 +154,20 @@ internal data class FolderCandidate(
     val defaultTitle: String,
 )
 
+private enum class StoragePicker { GAME_EXE, GAME_FOLDER }
+
+internal fun formatStorageBytes(bytes: Long): String =
+    when {
+        bytes >= 1024L * 1024 * 1024 -> String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024))
+        bytes >= 1024L * 1024 -> String.format("%.0f MB", bytes / (1024.0 * 1024))
+        else -> String.format("%.0f KB", bytes / 1024.0)
+    }
+
 class MainActivity : ComponentActivity() {
     private lateinit var store: LibraryStore
     private lateinit var apkPicker: ActivityResultLauncher<Array<String>>
     private lateinit var packagePicker: ActivityResultLauncher<Array<String>>
+    private lateinit var gameExePicker: ActivityResultLauncher<Array<String>>
     private lateinit var imagePicker: ActivityResultLauncher<String>
     private lateinit var folderPicker: ActivityResultLauncher<Uri?>
     private lateinit var storagePermissionRequest: ActivityResultLauncher<Array<String>>
@@ -160,9 +179,14 @@ class MainActivity : ComponentActivity() {
     internal var selectedRail by mutableStateOf("all")
     internal var searchQuery by mutableStateOf("")
     internal var settingsSection by mutableStateOf(SettingsSection.ADD_GAMES)
+    internal var settingsDetailOpen by mutableStateOf<SettingsSection?>(null)
     internal var targetSystemId by mutableStateOf<String?>(null)
+    internal var focusEntryId by mutableStateOf<String?>(null)
     internal var showOptionsFor by mutableStateOf<LibraryEntry?>(null)
     internal var showAddMenu by mutableStateOf(false)
+    internal var showAddWindowsGameChooser by mutableStateOf(false)
+    internal var showUnresolvedExeDialog by mutableStateOf(false)
+    internal var packageTypeDialogMessage by mutableStateOf<String?>(null)
     internal var installedApps by mutableStateOf<List<InstalledApp>?>(null)
     internal var installedSearch by mutableStateOf("")
     internal var installedGamesOnly by mutableStateOf(true)
@@ -187,6 +211,8 @@ class MainActivity : ComponentActivity() {
     private var pendingApk by mutableStateOf<File?>(null)
     private var pendingPcEntry: LibraryEntry? = null
     private var pendingInstallSystemId: String? = null
+    private var pendingStoragePicker: StoragePicker? = null
+    internal var installedAppsReturnPage = Page.SETTINGS
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -215,6 +241,9 @@ class MainActivity : ComponentActivity() {
         packagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) importPackage(uri)
         }
+        gameExePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) onGameExePicked(uri)
+        }
         imagePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             if (uri != null) savePickedImage(uri)
         }
@@ -222,7 +251,10 @@ class MainActivity : ComponentActivity() {
             if (uri != null) onGameFolderPicked(uri)
         }
         storagePermissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            folderPicker.launch(null)
+            pendingStoragePicker?.let { picker ->
+                pendingStoragePicker = null
+                launchStoragePicker(picker)
+            }
         }
         unknownAppsSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             installPendingApk()
@@ -327,9 +359,16 @@ class MainActivity : ComponentActivity() {
                 }
                 KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_ESCAPE -> {
                     when {
+                        showUnresolvedExeDialog -> showUnresolvedExeDialog = false
+                        showAddWindowsGameChooser -> showAddWindowsGameChooser = false
+                        packageTypeDialogMessage != null -> packageTypeDialogMessage = null
+                        folderCandidate != null && !folderAddInProgress -> cancelFolderCandidate()
+                        folderChoice != null -> cancelFolderCandidate()
                         showOptionsFor != null -> showOptionsFor = null
-                        page == Page.LINK_APPS -> { page = Page.SETTINGS; installedApps = null }
-                        page == Page.SETTINGS -> page = Page.HOME
+                        page == Page.LINK_APPS -> { page = installedAppsReturnPage; installedApps = null }
+                        page == Page.SETTINGS -> {
+                            if (settingsDetailOpen != null) settingsDetailOpen = null else page = Page.HOME
+                        }
                         page == Page.DETAIL -> { page = Page.HOME; selected = null }
                         else -> super.onBackPressed()
                     }
@@ -396,7 +435,7 @@ class MainActivity : ComponentActivity() {
         return resolved
             .mapNotNull { it.activityInfo?.applicationInfo }
             .distinctBy { it.packageName }
-            .filterNot { it.packageName == packageName }
+            .filterNot { it.packageName.startsWith("com.actofrod", ignoreCase = true) }
             .map { app ->
                 @Suppress("DEPRECATION")
                 val label = packageManager.getApplicationLabel(app).toString()
@@ -425,8 +464,9 @@ class MainActivity : ComponentActivity() {
         return bitmap.asImageBitmap()
     }
 
-    internal fun openSettings(section: SettingsSection = SettingsSection.ADD_GAMES) {
-        settingsSection = section
+    internal fun openSettings(section: SettingsSection? = null) {
+        settingsSection = section ?: SettingsSection.ADD_GAMES
+        settingsDetailOpen = section
         targetSystemId = selectedRail.removePrefix("system:").takeIf { selectedRail.startsWith("system:") }
         page = Page.SETTINGS
     }
@@ -435,25 +475,45 @@ class MainActivity : ComponentActivity() {
 
     fun pickApk() { apkPicker.launch(arrayOf("application/vnd.android.package-archive")) }
     fun pickPackage() { packagePicker.launch(arrayOf("*/*")) }
+    internal fun beginAddWindowsGame() { showAddWindowsGameChooser = true }
+    internal fun pickGameExe() {
+        showAddWindowsGameChooser = false
+        requestStoragePermission(StoragePicker.GAME_EXE)
+    }
     fun pickGameFolder() {
+        showAddWindowsGameChooser = false
+        requestStoragePermission(StoragePicker.GAME_FOLDER)
+    }
+
+    private fun requestStoragePermission(picker: StoragePicker) {
         if (Build.VERSION.SDK_INT >= 23 &&
             (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
                 ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
         ) {
+            pendingStoragePicker = picker
             storagePermissionRequest.launch(arrayOf(
                 Manifest.permission.READ_EXTERNAL_STORAGE,
                 Manifest.permission.WRITE_EXTERNAL_STORAGE,
             ))
         } else {
-            folderPicker.launch(null)
+            launchStoragePicker(picker)
+        }
+    }
+
+    private fun launchStoragePicker(picker: StoragePicker) {
+        when (picker) {
+            StoragePicker.GAME_EXE -> gameExePicker.launch(arrayOf("*/*"))
+            StoragePicker.GAME_FOLDER -> folderPicker.launch(null)
         }
     }
     fun showInstalledApps() {
         val apps = listInstalledApps()
+        installedAppsReturnPage = page
         installedApps = apps
         installedGamesOnly = defaultGamesOnly(apps)
         installedSearch = ""
         selectedInstalledPackages = emptySet()
+        showAddMenu = false
         page = Page.LINK_APPS
     }
 
@@ -665,7 +725,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Suppress("DEPRECATION")
     private fun onGameFolderPicked(uri: Uri) {
         runCatching {
             contentResolver.takePersistableUriPermission(
@@ -673,19 +732,123 @@ class MainActivity : ComponentActivity() {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
         }
-        val root = runCatching {
-            resolvePrimaryStoragePath(
-                DocumentsContract.getTreeDocumentId(uri),
-                Environment.getExternalStorageDirectory(),
+        lifecycleScope.launch {
+            val root = withContext(Dispatchers.IO) {
+                runCatching { resolvePickedDocument(uri, tree = true) }.getOrNull()
+            }?.takeIf {
+                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+                    it.isDirectory && it.canRead()
+            }
+            val folderName = root?.name
+                ?: withContext(Dispatchers.IO) {
+                    runCatching { DocumentFile.fromTreeUri(this@MainActivity, uri)?.name }.getOrNull().orEmpty()
+                }
+            folderCopyChoice = root == null
+            val choice = FolderSelection(
+                uri = uri,
+                inPlaceRoot = root,
+                folderName = folderName.ifBlank { "Windows game" },
+                availableBytes = File(filesDir, "games").usableSpace.takeIf { it > 0L },
             )
-        }.getOrNull()?.takeIf {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
-                it.isDirectory && it.canRead()
+            folderChoice = choice
+            if (root == null) {
+                val size = withContext(Dispatchers.IO) { estimateFolderSize(uri) }
+                folderChoice?.takeIf { it.uri == uri }?.let { folderChoice = it.copy(folderSizeBytes = size) }
+            }
         }
-        folderCopyChoice = root == null
-        val folderName = root?.name
-            ?: runCatching { DocumentFile.fromTreeUri(this, uri)?.name }.getOrNull().orEmpty()
-        folderChoice = FolderSelection(uri, root, folderName.ifBlank { "Windows game" })
+    }
+
+    internal fun onGameExePicked(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        lifecycleScope.launch {
+            val resolvedFile = withContext(Dispatchers.IO) { resolvePickedDocument(uri, tree = false) }
+            val executable = resolvedFile?.let { runCatching { it.canonicalFile }.getOrNull() }
+            if (executable == null) {
+                showUnresolvedExeDialog = true
+                return@launch
+            }
+            if (!executable.extension.equals("exe", ignoreCase = true)) {
+                message = "Choose a Windows .exe file."
+                return@launch
+            }
+            if (!executable.isFile || !executable.canRead()) {
+                showUnresolvedExeDialog = true
+                return@launch
+            }
+            val root = executable.parentFile
+            if (root == null) {
+                message = "Could not find the selected game's folder."
+                return@launch
+            }
+            if (':' in root.absolutePath) {
+                message = "This folder path contains ':', which Winlator cannot map as a game drive. Choose a folder without ':' in its path."
+                return@launch
+            }
+            folderChoice = FolderSelection(
+                uri = uri,
+                inPlaceRoot = root,
+                folderName = root.name.ifBlank { "Windows game" },
+                pickedExecutablePath = executable,
+            )
+            folderCopyChoice = false
+            playFromSelectedFolder()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun resolvePickedDocument(uri: Uri, tree: Boolean): File? {
+        val authority = uri.authority ?: return null
+        val documentId = runCatching {
+            if (tree) DocumentsContract.getTreeDocumentId(uri) else DocumentsContract.getDocumentId(uri)
+        }.getOrNull() ?: return null
+        return resolveDocumentPath(
+            authority = authority,
+            documentId = documentId,
+            externalStorageRoot = Environment.getExternalStorageDirectory(),
+            storageRoot = File("/storage"),
+            mediaLookup = ::lookupMediaStorePath,
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun lookupMediaStorePath(id: String): String? =
+        contentResolver.query(
+            MediaStore.Files.getContentUri("external"),
+            arrayOf(MediaStore.Files.FileColumns.DATA),
+            "_id = ?",
+            arrayOf(id),
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+
+    private fun openableDisplayName(uri: Uri): String? =
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+
+    private fun estimateFolderSize(uri: Uri): Long? {
+        val root = DocumentFile.fromTreeUri(this, uri) ?: return null
+        val pending = ArrayDeque<DocumentFile>()
+        pending.add(root)
+        var visited = 0
+        var total = 0L
+        while (pending.isNotEmpty()) {
+            if (++visited > 2_048) return null
+            val document = pending.removeFirst()
+            if (document.isDirectory) {
+                val children = runCatching { document.listFiles() }.getOrNull() ?: return null
+                if (children.size > 2_048 - visited) return null
+                children.forEach(pending::addLast)
+            } else {
+                val length = runCatching { document.length() }.getOrNull() ?: return null
+                if (length < 0L) return null
+                total = if (Long.MAX_VALUE - total < length) Long.MAX_VALUE else total + length
+            }
+        }
+        return total.takeIf { it > 0L }
     }
 
     internal fun playFromSelectedFolder() {
@@ -700,7 +863,17 @@ class MainActivity : ComponentActivity() {
                 val scan = withContext(Dispatchers.IO) { PeScan.scan(root) }
                 val id = UUID.randomUUID().toString()
                 folderTitle = selection.folderName
-                folderExeIndex = scan.mainIndex
+                val pickedRelativePath = selection.pickedExecutablePath?.let { picked ->
+                    runCatching {
+                        root.canonicalFile.toPath().relativize(picked.canonicalFile.toPath())
+                            .toString().replace(File.separatorChar, '/')
+                    }.getOrNull()
+                }
+                folderExeIndex = executableIndexForPath(
+                    scan.executables.map { it.path },
+                    pickedRelativePath,
+                    scan.mainIndex,
+                )
                 folderCandidate = FolderCandidate(
                     id,
                     root.canonicalPath,
@@ -776,9 +949,13 @@ class MainActivity : ComponentActivity() {
                 )
                 if (persist(snapshot.copy(entries = snapshot.entries + entry))) {
                     folderCandidate = null
+                    selectedRail = entry.systemId?.let { "system:$it" } ?: "all"
+                    tab = Tab.ALL
+                    searchQuery = ""
+                    selected = entry
+                    focusEntryId = entry.id
                     page = Page.HOME
-                    selected = null
-                    message = "Added ${entry.title}"
+                    message = "Added ${entry.title} — tap it to play"
                 } else {
                     if (candidate.copied) candidate.root.deleteRecursively()
                     folderCandidate = null
@@ -835,7 +1012,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         selectedInstalledPackages = emptySet()
-        page = Page.SETTINGS
+        page = installedAppsReturnPage
         installedApps = null
         message = "Added ${added.size} app${if (added.size == 1) "" else "s"}"
     }
@@ -988,10 +1165,19 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             importBytes = 0L
             try {
-                val displayName = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
-                    ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
-                    ?: uri.lastPathSegment?.substringAfterLast('/')
-                require(displayName?.endsWith(".bifrost", ignoreCase = true) == true) { "Choose a .bifrost package" }
+                val displayName = withContext(Dispatchers.IO) { openableDisplayName(uri) }
+                val resolvedFile = withContext(Dispatchers.IO) { resolvePickedDocument(uri, tree = false) }
+                if (displayName?.endsWith(".exe", ignoreCase = true) == true ||
+                    resolvedFile?.extension.equals("exe", ignoreCase = true)
+                ) {
+                    onGameExePicked(uri)
+                    return@launch
+                }
+                if (displayName?.endsWith(".bifrost", ignoreCase = true) != true) {
+                    packageTypeDialogMessage =
+                        "Bifrost .bifrost packages are made on PC with Bifrost's Recomp → Windows PC game. To add a Windows game that's already on this phone, use Add Windows game."
+                    return@launch
+                }
                 val id = UUID.randomUUID().toString()
                 val imported = withContext(Dispatchers.IO) {
                     val input = contentResolver.openInputStream(uri)
@@ -1015,9 +1201,13 @@ class MainActivity : ComponentActivity() {
                     systemId = targetSystemId,
                 )
                 if (persist(snapshot.copy(entries = snapshot.entries + entry))) {
+                    selectedRail = entry.systemId?.let { "system:$it" } ?: "all"
+                    tab = Tab.ALL
+                    searchQuery = ""
+                    selected = entry
+                    focusEntryId = entry.id
                     page = Page.HOME
-                    selected = null
-                    message = "Imported ${entry.title}"
+                    message = "Added ${entry.title} — tap it to play"
                 } else {
                     File(filesDir, "games/${entry.id}").deleteRecursively()
                     imported.cover?.delete()
