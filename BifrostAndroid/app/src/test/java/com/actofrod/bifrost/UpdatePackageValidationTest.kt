@@ -31,4 +31,16 @@ class UpdatePackageValidationTest {
             updatePackageDecision(setOf("installed-cert"), setOf("installed-cert"), 130L, 130L),
         )
     }
+
+    @Test
+    fun unreadableSignersFallBackToVersionCheck() {
+        assertEquals(
+            UpdatePackageDecision.INSTALL,
+            updatePackageDecision(setOf("installed-cert"), emptySet(), 130L, 131L),
+        )
+        assertEquals(
+            UpdatePackageDecision.NOT_NEWER,
+            updatePackageDecision(emptySet(), setOf("installed-cert"), 130L, 130L),
+        )
+    }
 }

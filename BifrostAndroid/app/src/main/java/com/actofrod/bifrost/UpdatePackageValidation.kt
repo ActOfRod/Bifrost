@@ -12,10 +12,8 @@ internal fun updatePackageDecision(
     installedVersionCode: Long,
     updateVersionCode: Long,
 ): UpdatePackageDecision {
-    if (installedSigningCertificates.isEmpty() ||
-        updateSigningCertificates.isEmpty() ||
-        installedSigningCertificates != updateSigningCertificates
-    ) {
+    val signersKnown = installedSigningCertificates.isNotEmpty() && updateSigningCertificates.isNotEmpty()
+    if (signersKnown && installedSigningCertificates != updateSigningCertificates) {
         return UpdatePackageDecision.SIGNER_MISMATCH
     }
     return if (updateVersionCode > installedVersionCode) {
