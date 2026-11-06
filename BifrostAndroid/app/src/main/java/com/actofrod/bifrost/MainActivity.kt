@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -107,8 +108,10 @@ import com.winlator.inputcontrols.ControlsProfile
 import com.winlator.inputcontrols.InputControlsManager
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.ArrayDeque
 import java.util.UUID
+import java.util.concurrent.Executors
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -118,6 +121,17 @@ import org.json.JSONObject
 
 private const val PORT_META = "com.actofrod.bifrost.PORT"
 private const val INSTALL_ACTION = "com.actofrod.INSTALL_RESULT"
+private const val PENDING_UPDATE_PATH = "pendingUpdatePath"
+private const val PENDING_UPDATE_TAG = "pendingUpdateTag"
+private const val PENDING_UPDATE_SIZE = "pendingUpdateSize"
+private const val CACHED_UPDATE_PATH = "cachedUpdatePath"
+private const val CACHED_UPDATE_TAG = "cachedUpdateTag"
+private const val CACHED_UPDATE_SIZE = "cachedUpdateSize"
+private enum class UnknownAppsRequest {
+    UPDATE,
+    GAME_APK,
+}
+private val UPDATE_LOG_WRITER = Executors.newSingleThreadExecutor()
 private val GAME_COVER_ID_PATTERN =
     Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 private val VERSIONED_ARTWORK_PATTERN = Regex("(.+)-(\\d+)")
@@ -223,7 +237,7 @@ class MainActivity : ComponentActivity() {
     internal var runtimeInstallProgress by mutableStateOf<Int?>(null)
     internal var runtimeInstallError by mutableStateOf<String?>(null)
     private var pendingApk by mutableStateOf<File?>(null)
-    private var pendingUpdateApk: File? = null
+    private var unknownAppsRequest: UnknownAppsRequest? = null
     private var pendingPcEntry: LibraryEntry? = null
     private var pendingInstallSystemId: String? = null
     private var pendingAfterStoragePermission: (() -> Unit)? = null
@@ -274,15 +288,24 @@ class MainActivity : ComponentActivity() {
             }
         }
         unknownAppsSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (pendingUpdateApk != null) {
-                if (Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()) {
-                    launchPendingUpdateApk()
-                } else {
-                    pendingUpdateApk = null
-                    updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+            val request = unknownAppsRequest
+            unknownAppsRequest = null
+            when (request) {
+                UnknownAppsRequest.UPDATE -> {
+                    if (resumePendingUpdateInstall() == PendingUpdateDecision.WAIT) {
+                        updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+                    }
                 }
-            } else {
-                installPendingApk()
+                UnknownAppsRequest.GAME_APK -> installPendingApk(pendingUpdateAlreadyCleared = true)
+                null -> {
+                    if (hasPendingUpdate()) {
+                        if (resumePendingUpdateInstall() == PendingUpdateDecision.WAIT) {
+                            updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+                        }
+                    } else {
+                        installPendingApk()
+                    }
+                }
             }
         }
         setContent {
@@ -363,6 +386,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         discoverBifrostPorts()
+        if (unknownAppsRequest != UnknownAppsRequest.GAME_APK) resumePendingUpdateInstall()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1127,11 +1151,14 @@ class MainActivity : ComponentActivity() {
                 pendingInstallSystemId = targetSystemId
                 try {
                     if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                        unknownAppsRequest = UnknownAppsRequest.GAME_APK
+                        clearPendingUpdateForGameApkInstall()
                         unknownAppsSettings.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
                     } else {
                         installPendingApk()
                     }
                 } catch (error: Throwable) {
+                    unknownAppsRequest = null
                     pendingApk = previousApk
                     pendingInstallPackage = previousPackage
                     pendingInstallLabel = previousLabel
@@ -1153,12 +1180,13 @@ class MainActivity : ComponentActivity() {
     private var pendingInstallLabel: String? = null
     private var pendingInstallCover: String? = null
 
-    private fun installPendingApk() {
+    private fun installPendingApk(pendingUpdateAlreadyCleared: Boolean = false) {
         val apk = pendingApk ?: return
         if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
             message = "Allow Bifrost to install unknown apps, then choose Install APK again."
             return
         }
+        if (!pendingUpdateAlreadyCleared) clearPendingUpdateForGameApkInstall()
         lifecycleScope.launch {
             try {
                 withContext(Dispatchers.IO) {
@@ -1393,7 +1421,11 @@ class MainActivity : ComponentActivity() {
         try {
             val current = if (file.isFile) ControlsDocument.parse(file.readText()) else ControlsDocument.create(profile.id, currentEntry.title)
             val gamepad = ControlsDocument.xboxOverlayPreset(profile.id, currentEntry.title)
-            writeAtomically(file, File(filesDir, "controls-tmp"), current.applyPreset(gamepad).encode())
+            writeAtomically(
+                file,
+                File(filesDir, "controls-tmp"),
+                current.applyPreset(gamepad).withDisableMouseInput(true).encode(),
+            )
             val profiledEntry = currentEntry.copy(controlsProfileId = profile.id)
             val next = snapshot.copy(entries = snapshot.entries.map { if (it.id == currentEntry.id) profiledEntry else it })
             if (!persist(next)) throw IllegalStateException("Could not save controls profile for this game")
@@ -1487,37 +1519,48 @@ class MainActivity : ComponentActivity() {
             .apply()
     }
 
-    internal fun shareControllerLog() {
-        val logFile = getExternalFilesDir(null)?.resolve("logs/gamepad.log")
-        if (logFile == null || !logFile.isFile) {
+    internal fun shareLogs() {
+        val logsDirectory = getExternalFilesDir(null)?.resolve("logs")
+        val logFiles = listOfNotNull(
+            logsDirectory?.resolve("gamepad.log"),
+            logsDirectory?.resolve("update.log"),
+        ).filter(File::isFile)
+        if (logFiles.isEmpty()) {
             Toast.makeText(this, "No controller log yet. Play a game first.", Toast.LENGTH_LONG).show()
             return
         }
         try {
-            val logUri = FileProvider.getUriForFile(this, "com.actofrod.FileProvider", logFile)
-            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            val logUris = ArrayList(logFiles.map { FileProvider.getUriForFile(this, "com.actofrod.FileProvider", it) })
+            val shareIntent = Intent(if (logUris.size > 1) Intent.ACTION_SEND_MULTIPLE else Intent.ACTION_SEND).apply {
                 type = "text/plain"
-                putExtra(Intent.EXTRA_STREAM, logUri)
+                if (logUris.size > 1) putParcelableArrayListExtra(Intent.EXTRA_STREAM, logUris)
+                else putExtra(Intent.EXTRA_STREAM, logUris.single())
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(Intent.createChooser(shareIntent, "Share controller log"))
+            startActivity(Intent.createChooser(shareIntent, "Share logs"))
         } catch (error: Exception) {
-            Toast.makeText(this, error.message ?: "Could not share controller log", Toast.LENGTH_LONG).show()
+            logUpdate("error sharing logs: ${error.message ?: error.javaClass.simpleName}")
+            Toast.makeText(this, error.message ?: "Could not share logs", Toast.LENGTH_LONG).show()
         }
     }
 
     internal fun checkForUpdates() {
         if (updateStatus == UpdateStatus.Checking || updateStatus is UpdateStatus.Downloading) return
         updateStatus = UpdateStatus.Checking
+        logUpdate("check start repo=${com.winlator.BuildConfig.UPDATE_REPO}")
         lifecycleScope.launch {
             try {
                 val release = UpdateChecker(com.winlator.BuildConfig.UPDATE_REPO).latestRelease()
-                updateStatus = if (isNewer(release.tagName, com.winlator.BuildConfig.VERSION_NAME)) {
+                val newer = isNewer(release.tagName, com.winlator.BuildConfig.VERSION_NAME)
+                val cachedApk = if (newer) findReusableDownloadedUpdate(release) else null
+                logUpdate("check result tag=${release.tagName} newer=$newer cached=${cachedApk != null}")
+                updateStatus = if (newer) {
                     UpdateStatus.Available(release)
                 } else {
                     UpdateStatus.Latest(com.winlator.BuildConfig.VERSION_NAME)
                 }
             } catch (error: UpdateRequestException) {
+                logUpdate("check error: ${error.message ?: error.javaClass.simpleName}")
                 updateStatus = UpdateStatus.Error(
                     when (error.statusCode) {
                         404 -> "No public releases found at ${com.winlator.BuildConfig.UPDATE_REPO}"
@@ -1526,6 +1569,7 @@ class MainActivity : ComponentActivity() {
                     },
                 )
             } catch (error: Exception) {
+                logUpdate("check error: ${error.message ?: error.javaClass.simpleName}")
                 updateStatus = UpdateStatus.Error(error.message ?: "Update check failed")
             }
         }
@@ -1535,20 +1579,43 @@ class MainActivity : ComponentActivity() {
         updateStatus = UpdateStatus.Downloading(release, 0)
         lifecycleScope.launch {
             try {
-                val apk = UpdateChecker(com.winlator.BuildConfig.UPDATE_REPO).download(release, cacheDir) { progress ->
-                    runOnUiThread {
-                        updateStatus = UpdateStatus.Downloading(release, progress)
+                val cachedApk = findReusableDownloadedUpdate(release)
+                val apk = if (cachedApk != null) {
+                    logUpdate("download reuse tag=${release.tagName} bytes=${cachedApk.length()}")
+                    cachedApk
+                } else {
+                    clearPendingUpdate()
+                    clearCachedUpdate()
+                    logUpdate("download start tag=${release.tagName} expectedBytes=${release.size}")
+                    UpdateChecker(com.winlator.BuildConfig.UPDATE_REPO).download(release, cacheDir) { progress ->
+                        runOnUiThread {
+                            if (updateStatus is UpdateStatus.Downloading) {
+                                updateStatus = UpdateStatus.Downloading(release, progress)
+                            }
+                        }
                     }
                 }
-                pendingUpdateApk = apk
-                if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
-                    unknownAppsSettings.launch(
-                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
-                    )
+                logUpdate("download complete tag=${release.tagName} bytes=${apk.length()}")
+                persistDownloadedUpdate(apk, release.tagName)
+                updateStatus = UpdateStatus.Available(release)
+                val canInstall = canRequestPackageInstalls()
+                logUpdate("permission canRequestPackageInstalls=$canInstall")
+                if (!canInstall) {
+                    unknownAppsRequest = UnknownAppsRequest.UPDATE
+                    try {
+                        unknownAppsSettings.launch(
+                            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+                        )
+                    } catch (error: Exception) {
+                        unknownAppsRequest = null
+                        logUpdate("error opening install settings: ${error.message ?: error.javaClass.simpleName}")
+                        updateStatus = UpdateStatus.Error(error.message ?: "Could not open install settings")
+                    }
                 } else {
-                    launchPendingUpdateApk()
+                    resumePendingUpdateInstall()
                 }
             } catch (error: UpdateRequestException) {
+                logUpdate("download error tag=${release.tagName}: ${error.message ?: error.javaClass.simpleName}")
                 updateStatus = UpdateStatus.Error(
                     if (error.statusCode == 403 || error.statusCode == 429) {
                         "GitHub is rate-limiting update checks right now. Try again in a few minutes."
@@ -1557,25 +1624,199 @@ class MainActivity : ComponentActivity() {
                     },
                 )
             } catch (error: Exception) {
+                logUpdate("download error tag=${release.tagName}: ${error.message ?: error.javaClass.simpleName}")
                 updateStatus = UpdateStatus.Error(error.message ?: "Could not download the update")
             }
         }
     }
 
-    private fun launchPendingUpdateApk() {
-        val apk = pendingUpdateApk ?: return
-        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) return
-        try {
-            val apkUri = FileProvider.getUriForFile(this, "com.actofrod.FileProvider", apk)
-            startActivity(
-                Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(apkUri, "application/vnd.android.package-archive")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-            )
-            pendingUpdateApk = null
-        } catch (error: Exception) {
-            updateStatus = UpdateStatus.Error(error.message ?: "Could not open the update installer")
+    private fun updatePreferences() = getSharedPreferences("hub", Context.MODE_PRIVATE)
+
+    private fun hasPendingUpdate(): Boolean =
+        updatePreferences().contains(PENDING_UPDATE_PATH)
+
+    private fun persistDownloadedUpdate(apk: File, tag: String) {
+        val path = apk.absolutePath
+        val size = apk.length()
+        val saved = updatePreferences().edit()
+            .putString(PENDING_UPDATE_PATH, path)
+            .putString(PENDING_UPDATE_TAG, tag)
+            .putLong(PENDING_UPDATE_SIZE, size)
+            .putString(CACHED_UPDATE_PATH, path)
+            .putString(CACHED_UPDATE_TAG, tag)
+            .putLong(CACHED_UPDATE_SIZE, size)
+            .commit()
+        if (!saved) throw IllegalStateException("Could not save pending update state")
+    }
+
+    private fun findReusableDownloadedUpdate(release: ReleaseInfo): File? {
+        val preferences = updatePreferences()
+        val path = preferences.getString(CACHED_UPDATE_PATH, null) ?: return null
+        val tag = preferences.getString(CACHED_UPDATE_TAG, null)
+        val size = preferences.getLong(CACHED_UPDATE_SIZE, -1L)
+        val apk = File(path)
+        if (tag != release.tagName || size <= 0 || !apk.isFile || apk.length() != size) return null
+        if (release.size > 0 && apk.length() != release.size) return null
+        return apk
+    }
+
+    private fun clearPendingUpdate() {
+        updatePreferences().edit()
+            .remove(PENDING_UPDATE_PATH)
+            .remove(PENDING_UPDATE_TAG)
+            .remove(PENDING_UPDATE_SIZE)
+            .commit()
+    }
+
+    private fun clearPendingUpdateForGameApkInstall() {
+        clearPendingUpdate()
+        logUpdate("pending update cleared: game APK install started")
+    }
+
+    private fun clearCachedUpdate() {
+        updatePreferences().edit()
+            .remove(CACHED_UPDATE_PATH)
+            .remove(CACHED_UPDATE_TAG)
+            .remove(CACHED_UPDATE_SIZE)
+            .commit()
+    }
+
+    private fun canRequestPackageInstalls(): Boolean =
+        Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()
+
+    private fun resumePendingUpdateInstall(): PendingUpdateDecision? {
+        val preferences = updatePreferences()
+        val path = preferences.getString(PENDING_UPDATE_PATH, null)
+        if (path == null) {
+            if (preferences.contains(PENDING_UPDATE_TAG) || preferences.contains(PENDING_UPDATE_SIZE)) {
+                clearPendingUpdate()
+            }
+            return null
         }
+        val storedSize = preferences.getLong(PENDING_UPDATE_SIZE, -1L)
+        val tag = preferences.getString(PENDING_UPDATE_TAG, "unknown")
+        val apk = File(path)
+        val fileSize = apk.takeIf { it.isFile }?.length()
+        val canInstall = canRequestPackageInstalls()
+        logUpdate("permission canRequestPackageInstalls=$canInstall")
+        return when (pendingUpdateDecision(path, storedSize, fileSize, canInstall)) {
+            PendingUpdateDecision.CLEAR -> {
+                logUpdate("pending update cleared tag=$tag path=$path expectedBytes=$storedSize actualBytes=${fileSize ?: "missing"}")
+                clearPendingUpdate()
+                if (preferences.getString(CACHED_UPDATE_PATH, null) == path) clearCachedUpdate()
+                updateStatus = UpdateStatus.Error("Downloaded update is no longer available. Check for updates again.")
+                PendingUpdateDecision.CLEAR
+            }
+            PendingUpdateDecision.WAIT -> {
+                logUpdate("pending update waiting for install permission tag=$tag")
+                PendingUpdateDecision.WAIT
+            }
+            PendingUpdateDecision.LAUNCH -> {
+                if (!validateDownloadedUpdate(apk, tag.orEmpty())) return PendingUpdateDecision.CLEAR
+                try {
+                    val apkUri = FileProvider.getUriForFile(this, "com.actofrod.FileProvider", apk)
+                    startActivity(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(apkUri, "application/vnd.android.package-archive")
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                    )
+                    clearPendingUpdate()
+                    logUpdate("installer launch tag=$tag bytes=${apk.length()}")
+                } catch (error: Exception) {
+                    logUpdate("installer error tag=$tag: ${error.message ?: error.javaClass.simpleName}")
+                    updateStatus = UpdateStatus.Error(error.message ?: "Could not open the update installer")
+                }
+                PendingUpdateDecision.LAUNCH
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun validateDownloadedUpdate(apk: File, tag: String): Boolean {
+        try {
+            val signingFlags = if (Build.VERSION.SDK_INT >= 28) {
+                PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                PackageManager.GET_SIGNATURES
+            }
+            val updatePackage = packageManager.getPackageArchiveInfo(apk.absolutePath, signingFlags)
+                ?: throw IllegalArgumentException("The downloaded update is not a valid APK")
+            if (updatePackage.packageName != packageName) {
+                throw IllegalArgumentException("The downloaded update is not a Bifrost APK")
+            }
+            val installedPackage = packageManager.getPackageInfo(packageName, signingFlags)
+            val installedVersionCode = packageVersionCode(installedPackage)
+            val updateVersionCode = packageVersionCode(updatePackage)
+            when (
+                updatePackageDecision(
+                    packageSigningCertificates(installedPackage),
+                    packageSigningCertificates(updatePackage),
+                    installedVersionCode,
+                    updateVersionCode,
+                )
+            ) {
+                UpdatePackageDecision.INSTALL -> return true
+                UpdatePackageDecision.SIGNER_MISMATCH -> {
+                    val reason = "This update is signed with a different key and can't be installed over your current app."
+                    logUpdate("update rejected tag=$tag reason=signer_mismatch message=$reason")
+                    discardDownloadedUpdate(apk)
+                    updateStatus = UpdateStatus.Error(reason)
+                }
+                UpdatePackageDecision.NOT_NEWER -> {
+                    val reason = "This update isn't newer than the installed app."
+                    logUpdate(
+                        "update rejected tag=$tag reason=not_newer updateVersionCode=$updateVersionCode " +
+                            "installedVersionCode=$installedVersionCode message=$reason",
+                    )
+                    discardDownloadedUpdate(apk)
+                    updateStatus = UpdateStatus.Error(reason)
+                }
+            }
+        } catch (error: Exception) {
+            logUpdate("update validation error tag=$tag: ${error.message ?: error.javaClass.simpleName}")
+            discardDownloadedUpdate(apk)
+            updateStatus = UpdateStatus.Error(error.message ?: "Could not verify downloaded update")
+        }
+        return false
+    }
+
+    private fun packageSigningCertificates(packageInfo: PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= 28) {
+            packageInfo.signingInfo?.apkContentsSigners
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.signatures
+        }
+        return signatures.orEmpty().map { signature ->
+            MessageDigest.getInstance("SHA-256")
+                .digest(signature.toByteArray())
+                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        }.toSet()
+    }
+
+    private fun packageVersionCode(packageInfo: PackageInfo): Long =
+        if (Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode else packageInfo.versionCode.toLong()
+
+    private fun discardDownloadedUpdate(apk: File) {
+        val path = apk.absolutePath
+        val deleted = !apk.exists() || apk.delete()
+        clearPendingUpdate()
+        if (updatePreferences().getString(CACHED_UPDATE_PATH, null) == path) clearCachedUpdate()
+        logUpdate("update APK discarded path=$path deleted=$deleted")
+    }
+
+    private fun logUpdate(message: String) {
+        val externalFilesDirectory = getExternalFilesDir(null) ?: return
+        val logFile = File(externalFilesDirectory, "logs/update.log")
+        val line = "${System.currentTimeMillis()} ${message.replace('\n', ' ')}"
+        try {
+            UPDATE_LOG_WRITER.execute {
+                runCatching {
+                    logFile.parentFile?.mkdirs()
+                    logFile.appendText(line + System.lineSeparator())
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     private suspend fun createContainer(manager: ContainerManager, data: JSONObject): Container =

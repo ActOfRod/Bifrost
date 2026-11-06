@@ -878,6 +878,13 @@ private fun SettingsDialog(activity: ControlsEditorActivity, document: ControlsD
                         onCheckedChange = { enabled -> activity.updateDocument { it.withAutoHideWithController(enabled) } },
                     )
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Touch screen moves the mouse", Modifier.weight(1f), color = Color.White)
+                    Switch(
+                        checked = !document.disableMouseInput,
+                        onCheckedChange = { enabled -> activity.updateDocument { it.withDisableMouseInput(!enabled) } },
+                    )
+                }
             }
         },
         confirmButton = { TextButton(onClick = { activity.showSettings = false }) { Text("Done") } },

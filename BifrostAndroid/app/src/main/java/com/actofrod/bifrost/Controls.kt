@@ -158,6 +158,7 @@ data class ControlsDocument(val json: JsonObject) {
     val hapticsUserSet: Boolean get() = json.boolean("hapticsUserSet", false)
     val hapticStrength: Int get() = json.int("hapticStrength", 50).coerceIn(1, 100)
     val autoHideWithController: Boolean get() = json.boolean("autoHideWithController", true)
+    val disableMouseInput: Boolean get() = json.boolean("disableMouseInput", false)
 
     fun encode(): String = JsonObject(json.toMap()).toString()
 
@@ -209,6 +210,9 @@ data class ControlsDocument(val json: JsonObject) {
 
     fun withAutoHideWithController(enabled: Boolean): ControlsDocument =
         withRootField("autoHideWithController", JsonPrimitive(enabled))
+
+    fun withDisableMouseInput(disabled: Boolean): ControlsDocument =
+        withRootField("disableMouseInput", JsonPrimitive(disabled))
 
     fun controllerBindings(): List<Pair<Int, String>> {
         val wildcard = json.array("controllers").mapNotNull { runCatching { it.jsonObject }.getOrNull() }
@@ -282,6 +286,7 @@ data class ControlsDocument(val json: JsonObject) {
             ControlsDocument(create(id, name).json.toMutableMap().apply {
                 put("elements", JsonArray(elements.map { it.json }))
                 put("presetVersion", JsonPrimitive(2))
+                put("disableMouseInput", JsonPrimitive(true))
             }.let(::JsonObject))
 
         fun xboxOverlayPreset(id: Int = 0, name: String = "Virtual Gamepad"): ControlsDocument {
