@@ -1,0 +1,5 @@
+DSOAL: https://github.com/kcat/dsoal
+Pinned commit: e11128250439d586483ee6598d1670ab52ab5e37
+OpenAL Soft: https://github.com/kcat/openal-soft
+Pinned release: 1.24.3 (dc7d7054a5b4f3bec1dc23a42fd616a0847af948)
+Both are distributed under LGPL-2.1-or-later. The build applies a fallback to the OpenAL default device when the selected endpoint cannot be opened; see scripts/build_dsoal.sh.

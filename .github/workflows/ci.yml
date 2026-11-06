@@ -4,20 +4,45 @@ on:
     branches: [main]
   pull_request:
 jobs:
+  dsoal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build DSOAL and OpenAL Soft
+        run: scripts/build_dsoal.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsoal-binaries
+          path: target/dsoal
   test:
+    needs: dsoal
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsoal-binaries
+          path: target/dsoal
       - name: Install toolchains
         run: |
           sudo apt-get update
           sudo apt-get install -y clang gcc-aarch64-linux-gnu qemu-user mingw-w64 \
             glslang-tools libvulkan-dev mesa-vulkan-drivers vulkan-validationlayers vulkan-tools \
-            spirv-tools xvfb imagemagick
+            spirv-tools xvfb imagemagick pulseaudio wine
           pip install unicorn==2.1.4 capstone==5.0.7
+      - name: Start a null audio sink for Wine
+        run: |
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/pulse-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=bifrost-test
+          pactl set-default-sink bifrost-test
       - name: Build FSR Vulkan layer
         run: scripts/build_fsr_layer.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
