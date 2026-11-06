@@ -93,6 +93,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -144,6 +145,7 @@ internal data class FolderSelection(
     val pickedExecutablePath: File? = null,
     val folderSizeBytes: Long? = null,
     val availableBytes: Long? = null,
+    val rootCandidates: List<File> = emptyList(),
 )
 internal data class FolderCandidate(
     val id: String,
@@ -152,6 +154,8 @@ internal data class FolderCandidate(
     val scan: PeScanResult,
     val copied: Boolean,
     val defaultTitle: String,
+    val rootCandidates: List<File> = emptyList(),
+    val pickedExecutablePath: File? = null,
 )
 
 internal fun formatStorageBytes(bytes: Long): String =
@@ -160,6 +164,14 @@ internal fun formatStorageBytes(bytes: Long): String =
         bytes >= 1024L * 1024 -> String.format("%.0f MB", bytes / (1024.0 * 1024))
         else -> String.format("%.0f KB", bytes / 1024.0)
     }
+
+internal fun gameRootLabel(root: File, outermostRoot: File): String {
+    val base = outermostRoot.parentFile ?: return root.name
+    return runCatching {
+        base.canonicalFile.toPath().relativize(root.canonicalFile.toPath()).toString()
+            .replace(File.separatorChar, '/')
+    }.getOrNull()?.ifBlank { root.name } ?: root.name
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: LibraryStore
@@ -202,6 +214,7 @@ class MainActivity : ComponentActivity() {
     internal var folderTitle by mutableStateOf("")
     internal var folderExeIndex by mutableStateOf(0)
     internal var folderCopyChoice by mutableStateOf(false)
+    internal var folderRootScanInProgress by mutableStateOf(false)
     internal var folderAddInProgress by mutableStateOf(false)
     internal var showRuntimeInstallDialog by mutableStateOf(false)
     internal var runtimeInstallProgress by mutableStateOf<Int?>(null)
@@ -768,10 +781,11 @@ class MainActivity : ComponentActivity() {
                 showUnresolvedExeDialog = true
                 return@launch
             }
-            val root = inferGameRoot(
+            val rootCandidates = gameRootCandidates(
                 executable,
                 listOf(Environment.getExternalStorageDirectory(), File("/storage")) + removableStorageRoots(),
             )
+            val root = rootCandidates.first()
             if (':' in root.absolutePath) {
                 message = "This folder path contains ':', which Winlator cannot map as a game drive. Choose a folder without ':' in its path."
                 return@launch
@@ -781,6 +795,7 @@ class MainActivity : ComponentActivity() {
                 inPlaceRoot = root,
                 folderName = root.name.ifBlank { "Windows game" },
                 pickedExecutablePath = executable,
+                rootCandidates = rootCandidates,
             )
             folderCopyChoice = false
             playFromSelectedFolder()
@@ -883,9 +898,45 @@ class MainActivity : ComponentActivity() {
                     scan,
                     copied = false,
                     defaultTitle = selection.folderName,
+                    rootCandidates = selection.rootCandidates,
+                    pickedExecutablePath = selection.pickedExecutablePath,
                 )
             } catch (error: Exception) {
                 message = error.message ?: "Could not scan the selected game folder"
+            }
+        }
+    }
+
+    internal fun selectGameRoot(root: File) {
+        val candidate = folderCandidate ?: return
+        if (folderRootScanInProgress || folderAddInProgress || candidate.root == root) return
+        folderRootScanInProgress = true
+        lifecycleScope.launch {
+            try {
+                val scan = withContext(Dispatchers.IO) { PeScan.scan(root) }
+                val current = folderCandidate?.takeIf { it.id == candidate.id } ?: return@launch
+                val pickedRelativePath = current.pickedExecutablePath?.let { picked ->
+                    runCatching {
+                        root.canonicalFile.toPath().relativize(picked.canonicalFile.toPath())
+                            .toString().replace(File.separatorChar, '/')
+                    }.getOrNull()
+                }
+                folderExeIndex = executableIndexForPath(
+                    scan.executables.map { it.path },
+                    pickedRelativePath,
+                    scan.mainIndex,
+                )
+                folderCandidate = current.copy(
+                    gameDir = root.canonicalPath,
+                    root = root,
+                    scan = scan,
+                )
+            } catch (error: Exception) {
+                if (folderCandidate?.id == candidate.id) {
+                    message = error.message ?: "Could not scan the selected game folder"
+                }
+            } finally {
+                folderRootScanInProgress = false
             }
         }
     }
@@ -1777,33 +1828,77 @@ private fun LauncherScreen(activity: MainActivity) {
             },
             title = { Text("Confirm Windows game") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = activity.folderTitle,
-                        onValueChange = { activity.folderTitle = it },
-                        label = { Text("Title") },
-                        singleLine = true,
-                    )
-                    Text("Game .exe", color = Color(0xFF9CA8BA), fontWeight = FontWeight.SemiBold)
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
-                        items(candidate.scan.executables.size) { index ->
-                            val executable = candidate.scan.executables[index]
+                LazyColumn(
+                    Modifier.fillMaxWidth().heightIn(max = 560.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item {
+                        OutlinedTextField(
+                            value = activity.folderTitle,
+                            onValueChange = { activity.folderTitle = it },
+                            label = { Text("Title") },
+                            singleLine = true,
+                        )
+                    }
+                    if (candidate.rootCandidates.size > 1) {
+                        item {
+                            Text("Game folder", color = Color(0xFF9CA8BA), fontWeight = FontWeight.SemiBold)
+                        }
+                        items(candidate.rootCandidates.size) { index ->
+                            val root = candidate.rootCandidates[index]
                             Row(
-                                Modifier.fillMaxWidth().clickable { activity.folderExeIndex = index }.padding(vertical = 4.dp),
+                                Modifier.fillMaxWidth()
+                                    .clickable(enabled = !activity.folderRootScanInProgress) { activity.selectGameRoot(root) }
+                                    .padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 RadioButton(
-                                    selected = activity.folderExeIndex == index,
-                                    onClick = { activity.folderExeIndex = index },
+                                    selected = candidate.root == root,
+                                    onClick = { activity.selectGameRoot(root) },
+                                    enabled = !activity.folderRootScanInProgress,
                                 )
-                                Text(executable.path, color = Color.White, maxLines = 1)
+                                Text(
+                                    gameRootLabel(root, candidate.rootCandidates.first()),
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                             }
+                        }
+                        item {
+                            Text(
+                                "Pick the folder that holds the whole game.",
+                                color = Color(0xFF9CA8BA),
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    item {
+                        Text("Game .exe", color = Color(0xFF9CA8BA), fontWeight = FontWeight.SemiBold)
+                    }
+                    items(candidate.scan.executables.size) { index ->
+                        val executable = candidate.scan.executables[index]
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable(enabled = !activity.folderRootScanInProgress) { activity.folderExeIndex = index }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = activity.folderExeIndex == index,
+                                onClick = { activity.folderExeIndex = index },
+                                enabled = !activity.folderRootScanInProgress,
+                            )
+                            Text(executable.path, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = activity::addSelectedFolder, enabled = !activity.folderAddInProgress) {
+                TextButton(
+                    onClick = activity::addSelectedFolder,
+                    enabled = !activity.folderAddInProgress && !activity.folderRootScanInProgress,
+                ) {
                     Text(if (activity.folderAddInProgress) "Adding…" else "Add")
                 }
             },

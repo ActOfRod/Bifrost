@@ -169,8 +169,8 @@ class PcLaunchTest {
     }
 
     @Test
-    fun infersGameRootAboveCommonExecutableDirectories() {
-        val temp = Files.createTempDirectory("bifrost-infer-game-root").toFile().canonicalFile
+    fun returnsOrderedGameRootCandidatesForCommonExecutableDirectories() {
+        val temp = Files.createTempDirectory("bifrost-game-root-candidates").toFile().canonicalFile
         fun executable(relativePath: String): File {
             val file = File(temp, relativePath)
             file.parentFile?.mkdirs()
@@ -180,14 +180,37 @@ class PcLaunchTest {
 
         try {
             val gameRoot = File(temp, "Game").canonicalFile
-            assertEquals(gameRoot, inferGameRoot(executable("Game/Binaries/Win64/Game.exe"), listOf(temp)))
-            assertEquals(gameRoot, inferGameRoot(executable("Game/System/Game.exe"), listOf(temp)))
-            assertEquals(gameRoot, inferGameRoot(executable("Game/Game.exe"), listOf(temp)))
-            assertEquals(gameRoot, inferGameRoot(executable("Game/bin/x64/Game.exe"), listOf(temp)))
+            assertEquals(
+                listOf(
+                    gameRoot,
+                    File(gameRoot, "Binaries").canonicalFile,
+                    File(gameRoot, "Binaries/Win64").canonicalFile,
+                ),
+                gameRootCandidates(executable("Game/Binaries/Win64/Game.exe"), listOf(temp)),
+            )
+            assertEquals(
+                listOf(gameRoot, File(gameRoot, "System").canonicalFile),
+                gameRootCandidates(executable("Game/System/Game.exe"), listOf(temp)),
+            )
+            assertEquals(
+                listOf(gameRoot),
+                gameRootCandidates(executable("Game/Game.exe"), listOf(temp)),
+            )
 
             val stopAtRoot = File(temp, "StopAt").apply { mkdirs() }
             val binExecutable = executable("StopAt/Bin/Game.exe")
-            assertEquals(File(stopAtRoot, "Bin").canonicalFile, inferGameRoot(binExecutable, listOf(stopAtRoot)))
+            assertEquals(
+                listOf(File(stopAtRoot, "Bin").canonicalFile),
+                gameRootCandidates(binExecutable, listOf(stopAtRoot)),
+            )
+            assertEquals(
+                listOf(
+                    gameRoot,
+                    File(gameRoot, "bin").canonicalFile,
+                    File(gameRoot, "bin/x64").canonicalFile,
+                ),
+                gameRootCandidates(executable("Game/bin/x64/Game.exe"), listOf(temp)),
+            )
         } finally {
             temp.deleteRecursively()
         }

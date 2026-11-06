@@ -350,28 +350,37 @@ internal fun HubScreen(activity: MainActivity) {
             },
             title = { Text("Confirm Windows game") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = activity.folderTitle,
-                        onValueChange = { activity.folderTitle = it },
-                        label = { Text("Title") },
-                        singleLine = true,
-                    )
-                    Text("Game .exe", color = HubMuted, fontWeight = FontWeight.SemiBold)
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 240.dp)) {
-                        items(candidate.scan.executables.size) { index ->
-                            val executable = candidate.scan.executables[index]
+                LazyColumn(
+                    Modifier.fillMaxWidth().heightIn(max = 560.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    item {
+                        OutlinedTextField(
+                            value = activity.folderTitle,
+                            onValueChange = { activity.folderTitle = it },
+                            label = { Text("Title") },
+                            singleLine = true,
+                        )
+                    }
+                    if (candidate.rootCandidates.size > 1) {
+                        item {
+                            Text("Game folder", color = HubMuted, fontWeight = FontWeight.SemiBold)
+                        }
+                        items(candidate.rootCandidates.size) { index ->
+                            val root = candidate.rootCandidates[index]
                             Row(
-                                Modifier.fillMaxWidth().clickable { activity.folderExeIndex = index }
-                                    .padding(vertical = 4.dp),
+                                Modifier.fillMaxWidth()
+                                    .clickable(enabled = !activity.folderRootScanInProgress) { activity.selectGameRoot(root) }
+                                    .padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 RadioButton(
-                                    selected = activity.folderExeIndex == index,
-                                    onClick = { activity.folderExeIndex = index },
+                                    selected = candidate.root == root,
+                                    onClick = { activity.selectGameRoot(root) },
+                                    enabled = !activity.folderRootScanInProgress,
                                 )
                                 Text(
-                                    executable.path,
+                                    gameRootLabel(root, candidate.rootCandidates.first()),
                                     Modifier.weight(1f),
                                     color = Color.White,
                                     maxLines = 1,
@@ -379,11 +388,46 @@ internal fun HubScreen(activity: MainActivity) {
                                 )
                             }
                         }
+                        item {
+                            Text(
+                                "Pick the folder that holds the whole game.",
+                                color = HubMuted,
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    item {
+                        Text("Game .exe", color = HubMuted, fontWeight = FontWeight.SemiBold)
+                    }
+                    items(candidate.scan.executables.size) { index ->
+                        val executable = candidate.scan.executables[index]
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable(enabled = !activity.folderRootScanInProgress) { activity.folderExeIndex = index }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = activity.folderExeIndex == index,
+                                onClick = { activity.folderExeIndex = index },
+                                enabled = !activity.folderRootScanInProgress,
+                            )
+                            Text(
+                                executable.path,
+                                Modifier.weight(1f),
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = activity::addSelectedFolder, enabled = !activity.folderAddInProgress) {
+                TextButton(
+                    onClick = activity::addSelectedFolder,
+                    enabled = !activity.folderAddInProgress && !activity.folderRootScanInProgress,
+                ) {
                     Text(if (activity.folderAddInProgress) "Adding…" else "Add")
                 }
             },

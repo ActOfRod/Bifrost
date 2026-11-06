@@ -44,16 +44,18 @@ private val executableRootDirectoryNames = setOf(
     "system",
 )
 
-internal fun inferGameRoot(executable: File, stopAt: List<File>): File {
+internal fun gameRootCandidates(executable: File, stopAt: List<File>): List<File> {
     val canonicalStopAt = stopAt.mapNotNull { runCatching { it.canonicalFile }.getOrNull() }.toSet()
-    var current = executable.parentFile ?: return executable
+    var current = executable.parentFile ?: return listOf(executable)
+    val candidates = mutableListOf(current)
     while (current.name.lowercase(Locale.ROOT) in executableRootDirectoryNames) {
         val parent = current.parentFile ?: break
         val canonicalParent = runCatching { parent.canonicalFile }.getOrNull() ?: break
         if (canonicalParent in canonicalStopAt) break
         current = parent
+        candidates += current
     }
-    return current
+    return candidates.asReversed()
 }
 
 internal fun resolveDocumentPath(
