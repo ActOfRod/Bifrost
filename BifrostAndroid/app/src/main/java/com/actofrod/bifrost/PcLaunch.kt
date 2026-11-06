@@ -1,6 +1,7 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.util.Locale
 
 private const val DXVK = "dxvk"
 private const val VKD3D = "vkd3d"
@@ -28,6 +29,31 @@ internal fun containerDrives(defaultDrives: String, gameDir: String): String {
 internal fun resolveGameDirectory(filesDirectory: File, gameDir: String): File {
     val path = File(gameDir)
     return (if (path.isAbsolute) path else File(File(filesDirectory, "games"), gameDir)).canonicalFile
+}
+
+private val executableRootDirectoryNames = setOf(
+    "bin",
+    "bin32",
+    "bin64",
+    "binaries",
+    "win32",
+    "win64",
+    "x86",
+    "x64",
+    "x86_64",
+    "system",
+)
+
+internal fun inferGameRoot(executable: File, stopAt: List<File>): File {
+    val canonicalStopAt = stopAt.mapNotNull { runCatching { it.canonicalFile }.getOrNull() }.toSet()
+    var current = executable.parentFile ?: return executable
+    while (current.name.lowercase(Locale.ROOT) in executableRootDirectoryNames) {
+        val parent = current.parentFile ?: break
+        val canonicalParent = runCatching { parent.canonicalFile }.getOrNull() ?: break
+        if (canonicalParent in canonicalStopAt) break
+        current = parent
+    }
+    return current
 }
 
 internal fun resolveDocumentPath(

@@ -154,8 +154,6 @@ internal data class FolderCandidate(
     val defaultTitle: String,
 )
 
-private enum class StoragePicker { GAME_EXE, GAME_FOLDER }
-
 internal fun formatStorageBytes(bytes: Long): String =
     when {
         bytes >= 1024L * 1024 * 1024 -> String.format("%.1f GB", bytes / (1024.0 * 1024 * 1024))
@@ -211,7 +209,7 @@ class MainActivity : ComponentActivity() {
     private var pendingApk by mutableStateOf<File?>(null)
     private var pendingPcEntry: LibraryEntry? = null
     private var pendingInstallSystemId: String? = null
-    private var pendingStoragePicker: StoragePicker? = null
+    private var pendingAfterStoragePermission: (() -> Unit)? = null
     internal var installedAppsReturnPage = Page.SETTINGS
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -251,9 +249,9 @@ class MainActivity : ComponentActivity() {
             if (uri != null) onGameFolderPicked(uri)
         }
         storagePermissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-            pendingStoragePicker?.let { picker ->
-                pendingStoragePicker = null
-                launchStoragePicker(picker)
+            pendingAfterStoragePermission?.let { action ->
+                pendingAfterStoragePermission = null
+                action()
             }
         }
         unknownAppsSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -435,7 +433,7 @@ class MainActivity : ComponentActivity() {
         return resolved
             .mapNotNull { it.activityInfo?.applicationInfo }
             .distinctBy { it.packageName }
-            .filterNot { it.packageName.startsWith("com.actofrod", ignoreCase = true) }
+            .filterNot { it.packageName == packageName }
             .map { app ->
                 @Suppress("DEPRECATION")
                 val label = packageManager.getApplicationLabel(app).toString()
@@ -478,32 +476,25 @@ class MainActivity : ComponentActivity() {
     internal fun beginAddWindowsGame() { showAddWindowsGameChooser = true }
     internal fun pickGameExe() {
         showAddWindowsGameChooser = false
-        requestStoragePermission(StoragePicker.GAME_EXE)
+        withStoragePermission { gameExePicker.launch(arrayOf("*/*")) }
     }
     fun pickGameFolder() {
         showAddWindowsGameChooser = false
-        requestStoragePermission(StoragePicker.GAME_FOLDER)
+        withStoragePermission { folderPicker.launch(null) }
     }
 
-    private fun requestStoragePermission(picker: StoragePicker) {
+    private fun withStoragePermission(action: () -> Unit) {
         if (Build.VERSION.SDK_INT >= 23 &&
             (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
                 ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED)
         ) {
-            pendingStoragePicker = picker
+            pendingAfterStoragePermission = action
             storagePermissionRequest.launch(arrayOf(
                 Manifest.permission.READ_EXTERNAL_STORAGE,
                 Manifest.permission.WRITE_EXTERNAL_STORAGE,
             ))
         } else {
-            launchStoragePicker(picker)
-        }
-    }
-
-    private fun launchStoragePicker(picker: StoragePicker) {
-        when (picker) {
-            StoragePicker.GAME_EXE -> gameExePicker.launch(arrayOf("*/*"))
-            StoragePicker.GAME_FOLDER -> folderPicker.launch(null)
+            action()
         }
     }
     fun showInstalledApps() {
@@ -777,11 +768,10 @@ class MainActivity : ComponentActivity() {
                 showUnresolvedExeDialog = true
                 return@launch
             }
-            val root = executable.parentFile
-            if (root == null) {
-                message = "Could not find the selected game's folder."
-                return@launch
-            }
+            val root = inferGameRoot(
+                executable,
+                listOf(Environment.getExternalStorageDirectory(), File("/storage")) + removableStorageRoots(),
+            )
             if (':' in root.absolutePath) {
                 message = "This folder path contains ':', which Winlator cannot map as a game drive. Choose a folder without ':' in its path."
                 return@launch
@@ -794,6 +784,18 @@ class MainActivity : ComponentActivity() {
             )
             folderCopyChoice = false
             playFromSelectedFolder()
+        }
+    }
+
+    private fun removableStorageRoots(): List<File> {
+        val storageRoot = runCatching { File("/storage").canonicalFile }.getOrNull() ?: return emptyList()
+        val primaryRoot = runCatching { Environment.getExternalStorageDirectory().canonicalFile }.getOrNull()
+        return getExternalFilesDirs(null).orEmpty().mapNotNull { appFilesDirectory ->
+            var volumeRoot: File? = appFilesDirectory
+            repeat(4) { volumeRoot = volumeRoot?.parentFile }
+            val canonicalRoot = volumeRoot?.let { runCatching { it.canonicalFile }.getOrNull() } ?: return@mapNotNull null
+            val canonicalParent = runCatching { canonicalRoot.parentFile?.canonicalFile }.getOrNull()
+            canonicalRoot.takeIf { it != primaryRoot && canonicalParent == storageRoot }
         }
     }
 
@@ -1170,7 +1172,7 @@ class MainActivity : ComponentActivity() {
                 if (displayName?.endsWith(".exe", ignoreCase = true) == true ||
                     resolvedFile?.extension.equals("exe", ignoreCase = true)
                 ) {
-                    onGameExePicked(uri)
+                    withStoragePermission { onGameExePicked(uri) }
                     return@launch
                 }
                 if (displayName?.endsWith(".bifrost", ignoreCase = true) != true) {

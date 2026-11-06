@@ -167,4 +167,29 @@ class PcLaunchTest {
         assertEquals(0, executableIndexForPath(executables, "other.exe", fallbackIndex = 0))
         assertEquals(1, executableIndexForPath(executables, null, fallbackIndex = 1))
     }
+
+    @Test
+    fun infersGameRootAboveCommonExecutableDirectories() {
+        val temp = Files.createTempDirectory("bifrost-infer-game-root").toFile().canonicalFile
+        fun executable(relativePath: String): File {
+            val file = File(temp, relativePath)
+            file.parentFile?.mkdirs()
+            file.createNewFile()
+            return file
+        }
+
+        try {
+            val gameRoot = File(temp, "Game").canonicalFile
+            assertEquals(gameRoot, inferGameRoot(executable("Game/Binaries/Win64/Game.exe"), listOf(temp)))
+            assertEquals(gameRoot, inferGameRoot(executable("Game/System/Game.exe"), listOf(temp)))
+            assertEquals(gameRoot, inferGameRoot(executable("Game/Game.exe"), listOf(temp)))
+            assertEquals(gameRoot, inferGameRoot(executable("Game/bin/x64/Game.exe"), listOf(temp)))
+
+            val stopAtRoot = File(temp, "StopAt").apply { mkdirs() }
+            val binExecutable = executable("StopAt/Bin/Game.exe")
+            assertEquals(File(stopAtRoot, "Bin").canonicalFile, inferGameRoot(binExecutable, listOf(stopAtRoot)))
+        } finally {
+            temp.deleteRecursively()
+        }
+    }
 }
