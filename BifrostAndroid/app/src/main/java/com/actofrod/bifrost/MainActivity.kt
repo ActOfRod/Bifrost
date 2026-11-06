@@ -1497,6 +1497,9 @@ class MainActivity : ComponentActivity() {
             }
             if (saved) selected = next.entries.firstOrNull { it.id == launchEntry.id }
 
+            if (!recordControllerTrace) {
+                getExternalFilesDir(null)?.resolve("logs")?.resolve("wine-input.log")?.delete()
+            }
             startActivity(
                 Intent(this, XServerDisplayActivity::class.java)
                     .putExtra("container_id", container.id)

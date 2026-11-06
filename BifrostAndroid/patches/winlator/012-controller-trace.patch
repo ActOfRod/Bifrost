@@ -39,7 +39,7 @@
 +        guestProgramLauncherComponent.setEnvVars(envVars);
 @@ -622,0 +648 @@
 +            if (controllerTraceEnabled) startWineInputTrace(externalFilesDir, executableName);
-@@ -654,0 +681,80 @@
+@@ -654,0 +681,94 @@
 +    }
 +
 +    private void startWineInputTrace(File externalFilesDir, String executableName) {
@@ -49,17 +49,25 @@
 +            wineInputTraceLineCount = 0;
 +            wineInputTraceCapped = false;
 +            wineInputTraceFinished = false;
++            BufferedWriter writer = null;
 +            try {
-+                wineInputTraceWriter = new BufferedWriter(new OutputStreamWriter(
++                writer = new BufferedWriter(new OutputStreamWriter(
 +                    new FileOutputStream(new File(logsDirectory, "wine-input.log"), false),
 +                    StandardCharsets.UTF_8));
-+                wineInputTraceWriter.write("TRACE_START timestamp=" + System.currentTimeMillis() +
++                writer.write("TRACE_START timestamp=" + System.currentTimeMillis() +
 +                    " exe=\"" + executableName + "\"");
-+                wineInputTraceWriter.newLine();
-+                wineInputTraceWriter.flush();
++                writer.newLine();
++                writer.flush();
++                wineInputTraceWriter = writer;
 +            }
 +            catch (IOException ignored) {
 +                wineInputTraceWriter = null;
++                if (writer != null) {
++                    try {
++                        writer.close();
++                    }
++                    catch (IOException ignoredClose) {}
++                }
 +                return;
 +            }
 +        }
@@ -112,13 +120,19 @@
 +        if (callback != null) ProcessHelper.removeDebugCallback(callback);
 +        synchronized (wineInputTraceLock) {
 +            wineInputTraceFinished = true;
-+            if (wineInputTraceWriter == null) return;
++            BufferedWriter writer = wineInputTraceWriter;
++            if (writer == null) return;
 +            try {
-+                wineInputTraceWriter.flush();
-+                wineInputTraceWriter.close();
++                writer.flush();
 +            }
 +            catch (IOException ignored) {}
-+            wineInputTraceWriter = null;
++            finally {
++                try {
++                    writer.close();
++                }
++                catch (IOException ignoredClose) {}
++                wineInputTraceWriter = null;
++            }
 +        }
 --- /dev/null
 +++ b/java/com/winlator/core/ControllerTrace.java
