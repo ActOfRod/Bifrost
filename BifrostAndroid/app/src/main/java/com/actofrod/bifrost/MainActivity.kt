@@ -127,6 +127,10 @@ private const val PENDING_UPDATE_SIZE = "pendingUpdateSize"
 private const val CACHED_UPDATE_PATH = "cachedUpdatePath"
 private const val CACHED_UPDATE_TAG = "cachedUpdateTag"
 private const val CACHED_UPDATE_SIZE = "cachedUpdateSize"
+private enum class UnknownAppsRequest {
+    UPDATE,
+    GAME_APK,
+}
 private val UPDATE_LOG_WRITER = Executors.newSingleThreadExecutor()
 private val GAME_COVER_ID_PATTERN =
     Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -233,7 +237,7 @@ class MainActivity : ComponentActivity() {
     internal var runtimeInstallProgress by mutableStateOf<Int?>(null)
     internal var runtimeInstallError by mutableStateOf<String?>(null)
     private var pendingApk by mutableStateOf<File?>(null)
-    private var pendingUpdateSettingsRequest = false
+    private var unknownAppsRequest: UnknownAppsRequest? = null
     private var pendingPcEntry: LibraryEntry? = null
     private var pendingInstallSystemId: String? = null
     private var pendingAfterStoragePermission: (() -> Unit)? = null
@@ -284,14 +288,24 @@ class MainActivity : ComponentActivity() {
             }
         }
         unknownAppsSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            val updateInstallInProgress = pendingUpdateSettingsRequest || hasPendingUpdate()
-            pendingUpdateSettingsRequest = false
-            if (updateInstallInProgress) {
-                if (resumePendingUpdateInstall() == PendingUpdateDecision.WAIT) {
-                    updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+            val request = unknownAppsRequest
+            unknownAppsRequest = null
+            when (request) {
+                UnknownAppsRequest.UPDATE -> {
+                    if (resumePendingUpdateInstall() == PendingUpdateDecision.WAIT) {
+                        updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+                    }
                 }
-            } else {
-                installPendingApk()
+                UnknownAppsRequest.GAME_APK -> installPendingApk()
+                null -> {
+                    if (hasPendingUpdate()) {
+                        if (resumePendingUpdateInstall() == PendingUpdateDecision.WAIT) {
+                            updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+                        }
+                    } else {
+                        installPendingApk()
+                    }
+                }
             }
         }
         setContent {
@@ -372,7 +386,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         discoverBifrostPorts()
-        resumePendingUpdateInstall()
+        if (unknownAppsRequest != UnknownAppsRequest.GAME_APK) resumePendingUpdateInstall()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -1137,11 +1151,13 @@ class MainActivity : ComponentActivity() {
                 pendingInstallSystemId = targetSystemId
                 try {
                     if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                        unknownAppsRequest = UnknownAppsRequest.GAME_APK
                         unknownAppsSettings.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
                     } else {
                         installPendingApk()
                     }
                 } catch (error: Throwable) {
+                    unknownAppsRequest = null
                     pendingApk = previousApk
                     pendingInstallPackage = previousPackage
                     pendingInstallLabel = previousLabel
@@ -1583,13 +1599,13 @@ class MainActivity : ComponentActivity() {
                 val canInstall = canRequestPackageInstalls()
                 logUpdate("permission canRequestPackageInstalls=$canInstall")
                 if (!canInstall) {
-                    pendingUpdateSettingsRequest = true
+                    unknownAppsRequest = UnknownAppsRequest.UPDATE
                     try {
                         unknownAppsSettings.launch(
                             Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
                         )
                     } catch (error: Exception) {
-                        pendingUpdateSettingsRequest = false
+                        unknownAppsRequest = null
                         logUpdate("error opening install settings: ${error.message ?: error.javaClass.simpleName}")
                         updateStatus = UpdateStatus.Error(error.message ?: "Could not open install settings")
                     }
