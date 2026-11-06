@@ -57,7 +57,7 @@ internal fun isNewer(remoteTag: String, currentVersionName: String): Boolean {
         return match.groupValues[1].split('.').map { it.toLongOrNull() ?: return null }
     }
     val remote = components(remoteTag) ?: return false
-    val current = components(currentVersionName) ?: return false
+    val current = components(currentVersionName) ?: return true
     for (index in 0 until maxOf(remote.size, current.size)) {
         val remotePart = remote.getOrElse(index) { 0L }
         val currentPart = current.getOrElse(index) { 0L }
@@ -66,7 +66,10 @@ internal fun isNewer(remoteTag: String, currentVersionName: String): Boolean {
     return false
 }
 
-internal class UpdateChecker(private val repo: String) {
+internal class UpdateChecker(
+    private val repo: String,
+    private val openDownloadConnection: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+) {
     suspend fun latestRelease(): ReleaseInfo = withContext(Dispatchers.IO) {
         val connection = openConnection(URL("https://api.github.com/repos/$repo/releases/latest"))
         try {
@@ -89,7 +92,7 @@ internal class UpdateChecker(private val repo: String) {
         directory.listFiles()?.forEach { it.deleteRecursively() }
         val partial = File(directory, "update.apk.part")
         val target = File(directory, "update.apk")
-        val connection = URL(release.downloadUrl).openConnection() as HttpURLConnection
+        val connection = openDownloadConnection(URL(release.downloadUrl))
         connection.setRequestProperty("User-Agent", "Bifrost-Android")
         connection.connectTimeout = 15000
         connection.readTimeout = 30000
@@ -118,6 +121,10 @@ internal class UpdateChecker(private val repo: String) {
                     }
                     output.fd.sync()
                 }
+            }
+            if (totalBytes > 0 && downloaded != totalBytes) {
+                partial.delete()
+                throw IOException("The update download was incomplete. Try again.")
             }
             if (!partial.renameTo(target)) throw IOException("Could not finish saving the update")
             reportProgress(100)

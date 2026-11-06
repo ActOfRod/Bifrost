@@ -363,9 +363,12 @@ data class ControlsDocument(val json: JsonObject) {
                 val left = actual[index]
                 val right = expected[index]
                 left.type == right.type && left.bindings == right.bindings &&
+                    left.shape == right.shape && left.text == right.text &&
+                    left.hidden == right.hidden && left.toggleSwitch == right.toggleSwitch &&
                     kotlin.math.abs(left.x - right.x) <= 1e-4f &&
                     kotlin.math.abs(left.y - right.y) <= 1e-4f &&
-                    kotlin.math.abs(left.scale - right.scale) <= 1e-4f
+                    kotlin.math.abs(left.scale - right.scale) <= 1e-4f &&
+                    kotlin.math.abs(left.opacity - right.opacity) <= 1e-4f
             }
         }
 

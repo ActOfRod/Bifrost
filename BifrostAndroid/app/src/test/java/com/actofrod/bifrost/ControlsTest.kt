@@ -126,21 +126,32 @@ class ControlsTest {
 
     @Test
     fun changedLegacyPresetElementDoesNotMigrate() {
-        val movedElements = ControlsDocument.oldControls3Elements().mapIndexed { index, element ->
-            if (index == 0) element.update(x = element.x + 0.01f) else element
-        }
-        val document = ControlsDocument(
-            JsonObject(
-                ControlsDocument.create(1, "Game").json.toMutableMap().apply {
-                    put("elements", JsonArray(movedElements.map { it.json }))
-                },
-            ),
+        val originalElements = ControlsDocument.oldControls3Elements()
+        val changedPresets = listOf(
+            originalElements.mapIndexed { index, element ->
+                if (index == 0) element.update(x = element.x + 0.01f) else element
+            },
+            originalElements.mapIndexed { index, element ->
+                if (index == 1) element.update(text = "Custom") else element
+            },
+            originalElements.mapIndexed { index, element ->
+                if (index == 1) element.update(hidden = true) else element
+            },
         )
 
-        val migrated = document.migrateLegacyPreset()
+        changedPresets.forEach { elements ->
+            val document = ControlsDocument(
+                JsonObject(
+                    ControlsDocument.create(1, "Game").json.toMutableMap().apply {
+                        put("elements", JsonArray(elements.map { it.json }))
+                    },
+                ),
+            )
+            val migrated = document.migrateLegacyPreset()
 
-        assertEquals(document.elements, migrated.elements)
-        assertFalse("presetVersion" in migrated.json)
+            assertEquals(document.elements, migrated.elements)
+            assertFalse("presetVersion" in migrated.json)
+        }
     }
 
     @Test
