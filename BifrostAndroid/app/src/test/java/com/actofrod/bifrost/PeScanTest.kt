@@ -7,6 +7,19 @@ import org.junit.Test
 
 class PeScanTest {
     @Test
+    fun parsesImportsFromOneExecutable() {
+        val root = Files.createTempDirectory("bifrost-pe-single-file").toFile()
+        try {
+            val executable = File(root, "Game.exe")
+            executable.writeBytes(tinyPe(0x014c, listOf("dinput8.dll", "xinput1_4.dll")))
+
+            assertEquals(setOf("dinput8.dll", "xinput1_4.dll"), PeScan.parseImports(executable))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun scansX86AndX64MachineTypes() {
         val root = Files.createTempDirectory("bifrost-pe-arch").toFile()
         try {

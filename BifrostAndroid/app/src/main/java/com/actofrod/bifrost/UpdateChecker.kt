@@ -93,6 +93,14 @@ internal class UpdateChecker(private val repo: String) {
         connection.setRequestProperty("User-Agent", "Bifrost-Android")
         connection.connectTimeout = 15000
         connection.readTimeout = 30000
+        var lastReportedPercent = -1
+        fun reportProgress(percent: Int) {
+            val normalized = percent.coerceIn(0, 100)
+            if (normalized != lastReportedPercent) {
+                lastReportedPercent = normalized
+                onProgress(normalized)
+            }
+        }
         try {
             val status = connection.responseCode
             if (status != HttpURLConnection.HTTP_OK) throw UpdateRequestException(status)
@@ -106,13 +114,13 @@ internal class UpdateChecker(private val repo: String) {
                         if (count < 0) break
                         output.write(buffer, 0, count)
                         downloaded += count
-                        if (totalBytes > 0) onProgress((downloaded * 100 / totalBytes).toInt().coerceIn(0, 100))
+                        if (totalBytes > 0) reportProgress((downloaded * 100 / totalBytes).toInt())
                     }
                     output.fd.sync()
                 }
             }
             if (!partial.renameTo(target)) throw IOException("Could not finish saving the update")
-            onProgress(100)
+            reportProgress(100)
             target
         } finally {
             connection.disconnect()

@@ -307,7 +307,7 @@ diff -ruN a/java/com/winlator/inputcontrols/ControlElement.java b/java/com/winla
 +    }
 +
 +    private void drawDpadChevron(Canvas canvas, Paint paint, float cx, float cy, int direction, boolean pressed, float size) {
-+        float half = size * 0.18f;
++        float half = size * 0.11f;
 +        Path path = new Path();
 +        if (direction == 0) {
 +            path.moveTo(cx - half, cy + half * 0.5f);
@@ -330,7 +330,7 @@ diff -ruN a/java/com/winlator/inputcontrols/ControlElement.java b/java/com/winla
 +            path.lineTo(cx + half * 0.5f, cy + half);
 +        }
 +        paint.setStyle(Paint.Style.STROKE);
-+        paint.setStrokeWidth(size * 0.075f);
++        paint.setStrokeWidth(size * 0.05f);
 +        paint.setStrokeCap(Paint.Cap.ROUND);
 +        paint.setStrokeJoin(Paint.Join.ROUND);
 +        paint.setColor(withDrawOpacity(pressed ? 0xFF18212B : 0xB3FFFFFF));

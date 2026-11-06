@@ -52,6 +52,8 @@ object PeScan {
         guid(0xf5049e77, 0x4861, 0x11d2, 0xa4, 0x07, 0x00, 0xa0, 0xc9, 0x06, 0x29, 0xa8),
     )
 
+    fun parseImports(executable: File): Set<String>? = parse(executable.readBytes())?.imports
+
     fun scan(gameDirectory: File): PeScanResult {
         require(gameDirectory.isDirectory) { "${gameDirectory.path} is not a game folder" }
         val root = gameDirectory.canonicalFile

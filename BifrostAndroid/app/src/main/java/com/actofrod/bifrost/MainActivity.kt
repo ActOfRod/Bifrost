@@ -1419,11 +1419,7 @@ class MainActivity : ComponentActivity() {
                 throw IllegalArgumentException("Game executable is missing or invalid")
             }
             val executableImports = withContext(Dispatchers.IO) {
-                runCatching {
-                    PeScan.scan(gameDir).executables.firstOrNull {
-                        it.path.equals(exe.replace('\\', '/'), ignoreCase = true)
-                    }?.imports
-                }.getOrNull().orEmpty()
+                runCatching { PeScan.parseImports(executable) }.getOrNull().orEmpty()
             }
             val mapperType = dinputMapperType(launchEntry.controllerApi, executableImports)
 
