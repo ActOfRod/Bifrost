@@ -218,6 +218,7 @@ class MainActivity : ComponentActivity() {
     internal var selectedInstalledPackages by mutableStateOf<Set<String>>(emptySet())
     internal var accentArgb by mutableStateOf(0xFF83F0C9L)
     internal var controllerStyle by mutableStateOf(ControllerStyle.XBOX)
+    internal var recordControllerTrace by mutableStateOf(false)
     internal var updateStatus by mutableStateOf<UpdateStatus>(UpdateStatus.Idle)
     internal var customBannerPath by mutableStateOf<String?>(null)
     internal var imageAction by mutableStateOf<ImageAction?>(null)
@@ -258,6 +259,7 @@ class MainActivity : ComponentActivity() {
             .getLong("accent", 0xFF83F0C9L)
         val hubPreferences = getSharedPreferences("hub", Context.MODE_PRIVATE)
         controllerStyle = ControllerStyle.fromId(hubPreferences.getString("controllerStyle", "xbox"))
+        recordControllerTrace = hubPreferences.getBoolean("recordControllerTrace", false)
         customBannerPath = hubPreferences.getString("banner", null)
         val storedSnapshot = runCatching { store.read() }
         snapshot = storedSnapshot.getOrElse {
@@ -1495,6 +1497,9 @@ class MainActivity : ComponentActivity() {
             }
             if (saved) selected = next.entries.firstOrNull { it.id == launchEntry.id }
 
+            if (!recordControllerTrace) {
+                getExternalFilesDir(null)?.resolve("logs")?.resolve("wine-input.log")?.delete()
+            }
             startActivity(
                 Intent(this, XServerDisplayActivity::class.java)
                     .putExtra("container_id", container.id)
@@ -1502,6 +1507,7 @@ class MainActivity : ComponentActivity() {
                     .putExtra("controls_profile_id", launchEntry.controlsProfileId ?: 0)
                     .putExtra("dinput_mapper_type", mapperType)
                     .putExtra("controller_style", controllerStyle.id)
+                    .putExtra("bifrost_controller_trace", recordControllerTrace)
                     .putExtra(
                         "controller_mode",
                         if (launchEntry.controllerMode == ControllerMode.SPLIT) "split" else "overlay",
@@ -1519,12 +1525,20 @@ class MainActivity : ComponentActivity() {
             .apply()
     }
 
+    internal fun updateControllerTrace(enabled: Boolean) {
+        recordControllerTrace = enabled
+        getSharedPreferences("hub", Context.MODE_PRIVATE).edit()
+            .putBoolean("recordControllerTrace", enabled)
+            .apply()
+    }
+
     internal fun shareLogs() {
         val logsDirectory = getExternalFilesDir(null)?.resolve("logs")
         val logFiles = listOfNotNull(
             logsDirectory?.resolve("gamepad.log"),
             logsDirectory?.resolve("update.log"),
-        ).filter(File::isFile)
+            logsDirectory?.resolve("wine-input.log"),
+        ).filter { it.isFile && (it.name != "wine-input.log" || it.length() > 0) }
         if (logFiles.isEmpty()) {
             Toast.makeText(this, "No controller log yet. Play a game first.", Toast.LENGTH_LONG).show()
             return

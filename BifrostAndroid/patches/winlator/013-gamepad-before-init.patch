@@ -1,0 +1,116 @@
+--- a/java/com/winlator/winhandler/WinHandler.java
++++ b/java/com/winlator/winhandler/WinHandler.java
+@@ -24 +23,0 @@
+-import java.util.ArrayDeque;
+@@ -36 +35,2 @@
+-    private final ArrayDeque<Runnable> actions = new ArrayDeque<>();
++    private final Object actions = new Object();
++    private final GatedActionQueue actionQueue = new GatedActionQueue();
+@@ -262 +262,8 @@
+-            actions.add(action);
++            actionQueue.add(action);
++            actions.notify();
++        }
++    }
++
++    protected void addGamepadAction(Runnable action) {
++        synchronized (actions) {
++            actionQueue.addUngated(action);
+@@ -285 +292,2 @@
+-                    while (initReceived && !actions.isEmpty()) actions.poll().run();
++                    Runnable action;
++                    while ((action = actionQueue.poll(initReceived)) != null) action.run();
+@@ -321,0 +330,2 @@
++                gamepadHandler.logDiagnosticEvent(
++                    "INIT received t=" + gamepadHandler.getSessionElapsedMillis());
+--- a/java/com/winlator/winhandler/GamepadHandler.java
++++ b/java/com/winlator/winhandler/GamepadHandler.java
+@@ -30,0 +31 @@
++import java.util.HashSet;
+@@ -32,0 +34 @@
++import java.util.Set;
+@@ -54,0 +57,3 @@
++    private volatile long sessionStartedAtMillis;
++    private final Object gamepadReplyLogLock = new Object();
++    private final Set<Integer> loggedGamepadReplyPorts = new HashSet<>();
+@@ -124 +129 @@
+-    public void startDiagnosticsLog(File file, String sessionHeader) {
++    public void startDiagnosticsLog(File file, String sessionHeader, long sessionStartedAtMillis) {
+@@ -125,0 +131,4 @@
++        this.sessionStartedAtMillis = sessionStartedAtMillis;
++        synchronized (gamepadReplyLogLock) {
++            loggedGamepadReplyPorts.clear();
++        }
+@@ -149,0 +159,5 @@
++    public long getSessionElapsedMillis() {
++        long sessionStartedAt = sessionStartedAtMillis;
++        return sessionStartedAt == 0 ? 0 : Math.max(0, System.currentTimeMillis() - sessionStartedAt);
++    }
++
+@@ -357 +371,2 @@
+-        String message = request + " port=" + port + " slot=" + slot +
++        String elapsed = "GET_GAMEPAD".equals(request) ? " t=" + getSessionElapsedMillis() : "";
++        String message = request + " port=" + port + elapsed + " slot=" + slot +
+@@ -406 +421 @@
+-        winHandler.addAction(() -> {
++        winHandler.addGamepadAction(() -> {
+@@ -412,0 +428 @@
++            boolean connected = false;
+@@ -425,0 +442 @@
++                    connected = true;
+@@ -457 +474 @@
+-            winHandler.sendPacket(port);
++            if (winHandler.sendPacket(port) && connected) logGamepadReplySent(port);
+@@ -458,0 +476,8 @@
++    }
++
++    private void logGamepadReplySent(int port) {
++        synchronized (gamepadReplyLogLock) {
++            if (!loggedGamepadReplyPorts.add(port)) return;
++        }
++        logDiagnosticEvent("GAMEPAD_REPLY_SENT port=" + port + " t=" +
++            getSessionElapsedMillis() + " connected=true");
+@@ -490 +515 @@
+-        if (!winHandler.initReceived || gamepadClients.isEmpty() || sendingState.get()) return;
++        if (gamepadClients.isEmpty() || sendingState.get()) return;
+@@ -498 +523 @@
+-            winHandler.addAction(() -> {
++            winHandler.addGamepadAction(() -> {
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -639 +639,2 @@
+-            String sessionHeader = "SESSION timestamp=" + System.currentTimeMillis() +
++            long sessionStartedAtMillis = System.currentTimeMillis();
++            String sessionHeader = "SESSION timestamp=" + sessionStartedAtMillis +
+@@ -647 +648 @@
+-                sessionHeader);
++                sessionHeader, sessionStartedAtMillis);
+--- /dev/null
++++ b/java/com/winlator/winhandler/GatedActionQueue.java
+@@ -0,0 +1,26 @@
++package com.winlator.winhandler;
++
++import java.util.ArrayDeque;
++
++public final class GatedActionQueue {
++    private final ArrayDeque<Runnable> gatedActions = new ArrayDeque<>();
++    private final ArrayDeque<Runnable> ungatedActions = new ArrayDeque<>();
++
++    public void add(Runnable action) {
++        gatedActions.add(action);
++    }
++
++    public void addUngated(Runnable action) {
++        ungatedActions.add(action);
++    }
++
++    public Runnable poll(boolean initReceived) {
++        Runnable action = ungatedActions.poll();
++        if (action != null) return action;
++        return initReceived ? gatedActions.poll() : null;
++    }
++
++    public boolean isEmpty() {
++        return gatedActions.isEmpty() && ungatedActions.isEmpty();
++    }
++}
