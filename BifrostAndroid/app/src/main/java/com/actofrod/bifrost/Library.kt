@@ -29,6 +29,9 @@ enum class Kind { NATIVE, PC }
 enum class ControllerMode { OVERLAY, SPLIT }
 
 @Serializable
+enum class ControllerApi { AUTO, XINPUT, DIRECTINPUT }
+
+@Serializable
 data class LauncherSystem(
     val id: String,
     val name: String,
@@ -54,6 +57,7 @@ data class LibraryEntry(
     val systemId: String? = null,
     val playCount: Int = 0,
     val controllerMode: ControllerMode = ControllerMode.OVERLAY,
+    val controllerApi: ControllerApi = ControllerApi.AUTO,
 )
 
 @Serializable

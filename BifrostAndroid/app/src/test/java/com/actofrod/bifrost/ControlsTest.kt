@@ -1,6 +1,9 @@
 package com.actofrod.bifrost
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -79,9 +82,107 @@ class ControlsTest {
     fun splitControllerPresetFitsAWideLowerDeck() {
         val preset = ControlsDocument.splitControllerPreset(12)
         assertEquals(13, preset.elements.size)
-        assertTrue(preset.elements.all { it.x in 0f..1f && it.y in 0.18f..0.67f })
+        assertTrue(preset.elements.all { it.x in 0f..1f && it.y in 0.18f..0.70f })
         assertTrue(preset.elements.any { "GAMEPAD_RIGHT_THUMB_UP" in it.bindings })
         assertTrue(preset.elements.any { "GAMEPAD_BUTTON_START" in it.bindings })
+    }
+
+    @Test
+    fun hapticsDefaultOnAndLegacyOptOutMigratesUnlessUserSet() {
+        assertTrue(ControlsDocument.parse("""{"id":1,"name":"Game","elements":[]}""").haptics)
+        val legacyOptOut = ControlsDocument.parse("""{"id":1,"name":"Game","haptics":false,"elements":[]}""")
+        assertTrue(legacyOptOut.migrateLegacyHaptics().haptics)
+
+        val userOptOut = legacyOptOut.withHaptics(false)
+        assertFalse(userOptOut.migrateLegacyHaptics().haptics)
+        assertTrue(userOptOut.hapticsUserSet)
+    }
+
+    @Test
+    fun migratesExactOldPresetsAndKeepsOtherProfileFields() {
+        fun legacyDocument(elements: List<ControlsElement>) = ControlsDocument(
+            JsonObject(
+                ControlsDocument.create(9, "Game").json.toMutableMap().apply {
+                    put("elements", JsonArray(elements.map { it.json }))
+                    put("haptics", JsonPrimitive(false))
+                    put("hapticStrength", JsonPrimitive(73))
+                    put("controllers", Json.parseToJsonElement("""[{"id":"*","name":"Bifrost"}]"""))
+                    put("customField", JsonPrimitive("keep"))
+                },
+            ),
+        )
+
+        val migratedXbox = legacyDocument(ControlsDocument.oldControls3Elements()).migrateLegacyPreset()
+        assertEquals(ControlsDocument.xboxOverlayPreset(9, "Game").elements, migratedXbox.elements)
+        assertEquals(2, migratedXbox.json["presetVersion"]!!.jsonPrimitive.content.toInt())
+        assertFalse(migratedXbox.haptics)
+        assertEquals(73, migratedXbox.hapticStrength)
+        assertEquals("keep", migratedXbox.json["customField"]!!.jsonPrimitive.content)
+        assertTrue("controllers" in migratedXbox.json)
+
+        val migratedSplit = legacyDocument(ControlsDocument.oldSplitControllerElements()).migrateLegacyPreset()
+        assertEquals(ControlsDocument.splitControllerPreset(9, "Game").elements, migratedSplit.elements)
+    }
+
+    @Test
+    fun changedLegacyPresetElementDoesNotMigrate() {
+        val originalElements = ControlsDocument.oldControls3Elements()
+        val changedPresets = listOf(
+            originalElements.mapIndexed { index, element ->
+                if (index == 0) element.update(x = element.x + 0.01f) else element
+            },
+            originalElements.mapIndexed { index, element ->
+                if (index == 1) element.update(text = "Custom") else element
+            },
+            originalElements.mapIndexed { index, element ->
+                if (index == 1) element.update(hidden = true) else element
+            },
+        )
+
+        changedPresets.forEach { elements ->
+            val document = ControlsDocument(
+                JsonObject(
+                    ControlsDocument.create(1, "Game").json.toMutableMap().apply {
+                        put("elements", JsonArray(elements.map { it.json }))
+                    },
+                ),
+            )
+            val migrated = document.migrateLegacyPreset()
+
+            assertEquals(document.elements, migrated.elements)
+            assertFalse("presetVersion" in migrated.json)
+        }
+    }
+
+    @Test
+    fun newPresetsHaveCorrectFaceButtonDiamondAndVersion() {
+        listOf(
+            ControlsDocument.splitControllerPreset(),
+            ControlsDocument.xboxOverlayPreset(),
+        ).forEach { preset ->
+            fun button(binding: String) = preset.elements.single { binding in it.bindings }
+            assertTrue(button("GAMEPAD_BUTTON_Y").y < button("GAMEPAD_BUTTON_A").y)
+            assertTrue(button("GAMEPAD_BUTTON_X").x < button("GAMEPAD_BUTTON_B").x)
+            assertEquals(2, preset.json["presetVersion"]!!.jsonPrimitive.content.toInt())
+        }
+        val xbox = ControlsDocument.xboxOverlayPreset()
+        assertEquals(
+            listOf(0.10f, 0.62f, 1.0f),
+            listOf(xbox.elements[0].x, xbox.elements[0].y, xbox.elements[0].scale),
+        )
+    }
+
+    @Test
+    fun controllerStylesMapLabelsColorsAndPlaystationShapes() {
+        assertEquals("B", controllerButtonPresentation(ControllerStyle.NINTENDO, "GAMEPAD_BUTTON_A")!!.label)
+        assertEquals("A", controllerButtonPresentation(ControllerStyle.NINTENDO, "GAMEPAD_BUTTON_B")!!.label)
+        assertEquals(0xFF5DC21EL, controllerButtonPresentation(ControllerStyle.XBOX, "GAMEPAD_BUTTON_A")!!.accent)
+        assertEquals(
+            ControllerSymbol.CROSS,
+            controllerButtonPresentation(ControllerStyle.PLAYSTATION, "GAMEPAD_BUTTON_A")!!.symbol,
+        )
+        assertEquals("OPTIONS", controllerButtonPresentation(ControllerStyle.PLAYSTATION, "GAMEPAD_BUTTON_START")!!.label)
+        assertEquals(ControllerStyle.XBOX, ControllerStyle.fromId("invalid"))
     }
 
     @Test

@@ -20,6 +20,7 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -88,14 +89,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
@@ -1180,6 +1186,31 @@ private fun EntryOptionsPanel(activity: MainActivity, entry: LibraryEntry) {
                                 )
                             }
                         }
+                        item {
+                            Column(Modifier.fillMaxWidth().padding(top = 5.dp)) {
+                                Text("Controller API", color = HubMuted, fontSize = 12.sp)
+                                Spacer(Modifier.height(7.dp))
+                                Row(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xFF0F1622)).padding(4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    listOf(
+                                        ControllerApi.AUTO to "Auto",
+                                        ControllerApi.XINPUT to "XInput",
+                                        ControllerApi.DIRECTINPUT to "DirectInput",
+                                    ).forEach { (api, label) ->
+                                        ControllerModeSegment(
+                                            label,
+                                            entry.controllerApi == api,
+                                            Modifier.weight(1f),
+                                        ) {
+                                            activity.updateEntry(entry.id) { it.copy(controllerApi = api) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     item {
                         Box {
@@ -1358,6 +1389,7 @@ private fun SettingsScreen(activity: MainActivity) {
         SettingsSection.ADD_GAMES to "Add games",
         SettingsSection.SYSTEMS to "Systems",
         SettingsSection.APPEARANCE to "Appearance",
+        SettingsSection.CONTROLS to "Controls",
         SettingsSection.WINDOWS_RUNTIME to "Windows runtime",
         SettingsSection.ABOUT to "About",
     )
@@ -1470,6 +1502,7 @@ private fun SettingsDetail(
             SettingsSection.ADD_GAMES -> AddGamesSettings(activity, compact, Modifier.weight(1f))
             SettingsSection.SYSTEMS -> SystemsSettings(activity, compact, Modifier.weight(1f))
             SettingsSection.APPEARANCE -> AppearanceSettings(activity, Modifier.weight(1f))
+            SettingsSection.CONTROLS -> ControlsSettings(activity, Modifier.weight(1f))
             SettingsSection.WINDOWS_RUNTIME -> RuntimeSettings(activity, Modifier.weight(1f))
             SettingsSection.ABOUT -> AboutSettings(activity, Modifier.weight(1f))
         }
@@ -1742,6 +1775,45 @@ private fun AboutSettings(activity: MainActivity, modifier: Modifier) {
     ) {
         Text("Bifrost ${com.winlator.BuildConfig.VERSION_NAME}", color = Color.White)
         Text("A game hub for native Android and Windows PC games.", color = HubMuted)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(
+                modifier = Modifier.weight(1f),
+                onClick = activity::checkForUpdates,
+                enabled = activity.updateStatus != UpdateStatus.Checking && activity.updateStatus !is UpdateStatus.Downloading,
+            ) {
+                Text(if (activity.updateStatus == UpdateStatus.Checking) "Checking…" else "Check for updates")
+            }
+            TextButton(onClick = activity::shareControllerLog) {
+                Text("Share controller log", maxLines = 1)
+            }
+        }
+        when (val status = activity.updateStatus) {
+            UpdateStatus.Idle -> Unit
+            UpdateStatus.Checking -> {
+                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                Text("Checking…", color = HubMuted)
+            }
+            is UpdateStatus.Latest -> Text("You're on the latest version (${status.version})", color = HubMuted)
+            is UpdateStatus.Available -> {
+                val sizeMb = ((status.release.size + 524_288L) / (1024L * 1024L)).coerceAtLeast(1L)
+                Text("Bifrost ${status.release.tagName} is available ($sizeMb MB)", color = Color.White)
+                Button(onClick = { activity.downloadAndInstallUpdate(status.release) }) {
+                    Text("Download and install")
+                }
+            }
+            is UpdateStatus.Downloading -> {
+                Text("Downloading… ${status.progress}%", color = HubMuted)
+                androidx.compose.material3.LinearProgressIndicator(
+                    progress = { status.progress / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            is UpdateStatus.Error -> Text(status.message, color = Color(0xFFFF9C9C))
+        }
         TextButton(onClick = {
             activity.startActivity(
                 android.content.Intent(
@@ -1750,6 +1822,105 @@ private fun AboutSettings(activity: MainActivity, modifier: Modifier) {
                 ),
             )
         }) { Text("Bifrost license") }
+    }
+}
+
+@Composable
+private fun ControlsSettings(activity: MainActivity, modifier: Modifier) {
+    Column(
+        modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        ControllerStyle.values().forEach { style ->
+            val selected = activity.controllerStyle == style
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                    .background(if (selected) HubAccent.copy(alpha = 0.12f) else Color(0xFF111824))
+                    .border(
+                        1.dp,
+                        if (selected) HubAccent.copy(alpha = 0.7f) else Color(0xFF263244),
+                        RoundedCornerShape(16.dp),
+                    )
+                    .clickable { activity.selectControllerStyle(style) }
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ControllerStylePreview(style)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    when (style) {
+                        ControllerStyle.XBOX -> "Xbox"
+                        ControllerStyle.NINTENDO -> "Nintendo"
+                        ControllerStyle.PLAYSTATION -> "PlayStation"
+                    },
+                    Modifier.weight(1f),
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                RadioButton(selected = selected, onClick = { activity.selectControllerStyle(style) })
+            }
+        }
+        Text(
+            "Changes button labels and colours. Buttons send the same inputs to the game, so the bottom button is always the game's A.",
+            color = HubMuted,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+@Composable
+private fun ControllerStylePreview(style: ControllerStyle) {
+    Canvas(Modifier.size(width = 64.dp, height = 58.dp)) {
+        val bindings = listOf(
+            "GAMEPAD_BUTTON_Y" to Offset(size.width * 0.72f, size.height * 0.23f),
+            "GAMEPAD_BUTTON_B" to Offset(size.width * 0.88f, size.height * 0.50f),
+            "GAMEPAD_BUTTON_A" to Offset(size.width * 0.72f, size.height * 0.77f),
+            "GAMEPAD_BUTTON_X" to Offset(size.width * 0.56f, size.height * 0.50f),
+        )
+        val radius = size.minDimension * 0.12f
+        bindings.forEach { (binding, center) ->
+            val presentation = controllerButtonPresentation(style, binding)
+            drawCircle(Color(0xFF172131), radius, center)
+            drawCircle(Color(0xFFB3FFFFFF), radius, center, style = Stroke(1.2f))
+            val accent = presentation?.accent?.let { Color(it) } ?: Color.White
+            when (presentation?.symbol) {
+                ControllerSymbol.CROSS -> {
+                    val half = radius * 0.42f
+                    drawLine(accent, center + Offset(-half, -half), center + Offset(half, half), 1.5f)
+                    drawLine(accent, center + Offset(half, -half), center + Offset(-half, half), 1.5f)
+                }
+                ControllerSymbol.CIRCLE -> drawCircle(accent, radius * 0.42f, center, style = Stroke(1.5f))
+                ControllerSymbol.SQUARE -> {
+                    val half = radius * 0.36f
+                    drawRect(accent, Offset(center.x - half, center.y - half), androidx.compose.ui.geometry.Size(half * 2, half * 2), style = Stroke(1.5f))
+                }
+                ControllerSymbol.TRIANGLE -> {
+                    val half = radius * 0.45f
+                    val path = Path().apply {
+                        moveTo(center.x, center.y - half)
+                        lineTo(center.x + half, center.y + half)
+                        lineTo(center.x - half, center.y + half)
+                        close()
+                    }
+                    drawPath(path, accent, style = Stroke(1.5f))
+                }
+                null -> {
+                    val label = presentation?.label.orEmpty()
+                    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = accent.toArgb()
+                        textAlign = android.graphics.Paint.Align.CENTER
+                        textSize = radius * 0.95f
+                        typeface = android.graphics.Typeface.create("sans-serif-bold", android.graphics.Typeface.BOLD)
+                    }
+                    drawContext.canvas.nativeCanvas.drawText(
+                        label,
+                        center.x,
+                        center.y - (paint.ascent() + paint.descent()) * 0.5f,
+                        paint,
+                    )
+                }
+            }
+        }
     }
 }
 

@@ -1,0 +1,254 @@
+--- a/java/com/winlator/inputcontrols/ControlsProfile.java
++++ b/java/com/winlator/inputcontrols/ControlsProfile.java
+@@ -34,0 +35 @@
++    private boolean virtualGamepadCached = false;
+@@ -103 +104,13 @@
+-    public boolean isVirtualGamepad() {
++    public synchronized boolean isVirtualGamepad() {
++        if (!virtualGamepadCached) {
++            virtualGamepad = false;
++            File file = getProfileFile(context, id);
++            if (file.isFile()) {
++                try {
++                    JSONObject profileJSONObject = new JSONObject(FileUtils.readString(file));
++                    virtualGamepad = hasGamepadElement(profileJSONObject.getJSONArray("elements"));
++                }
++                catch (JSONException e) {}
++            }
++            virtualGamepadCached = true;
++        }
+@@ -106,0 +120,15 @@
++    private static boolean hasGamepadElement(JSONArray elementsJSONArray) throws JSONException {
++        for (int i = 0; i < elementsJSONArray.length(); i++) {
++            JSONArray bindingsJSONArray = elementsJSONArray.getJSONObject(i).getJSONArray("bindings");
++            boolean hasGamepadBinding = true;
++            for (int j = 0; j < bindingsJSONArray.length(); j++) {
++                if (!Binding.fromString(bindingsJSONArray.getString(j)).isGamepad()) {
++                    hasGamepadBinding = false;
++                    break;
++                }
++            }
++            if (hasGamepadBinding) return true;
++        }
++        return false;
++    }
++
+@@ -161 +189,2 @@
+-    public void save() {
++    public synchronized void save() {
++        virtualGamepadCached = false;
+@@ -258 +287 @@
+-    public void loadElements(InputControlsView inputControlsView) {
++    public synchronized void loadElements(InputControlsView inputControlsView) {
+@@ -261,0 +291 @@
++        virtualGamepadCached = false;
+@@ -264 +294,4 @@
+-        if (!file.isFile()) return;
++        if (!file.isFile()) {
++            virtualGamepadCached = true;
++            return;
++        }
+@@ -271,0 +305 @@
++            virtualGamepad = hasGamepadElement(elementsJSONArray);
+@@ -293 +326,0 @@
+-                boolean hasGamepadBinding = true;
+@@ -298 +330,0 @@
+-                    if (!binding.isGamepad()) hasGamepadBinding = false;
+@@ -301 +332,0 @@
+-                if (!virtualGamepad && hasGamepadBinding) virtualGamepad = true;
+@@ -308,0 +340 @@
++        virtualGamepadCached = true;
+--- a/java/com/winlator/winhandler/GamepadHandler.java
++++ b/java/com/winlator/winhandler/GamepadHandler.java
+@@ -24,0 +25,2 @@
++import java.io.File;
++import java.io.FileOutputStream;
+@@ -25,0 +28 @@
++import java.nio.charset.StandardCharsets;
+@@ -29,0 +33,2 @@
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
+@@ -37,0 +43 @@
++    private static final ExecutorService diagnosticLogWriter = Executors.newSingleThreadExecutor();
+@@ -46,0 +53,25 @@
++    private volatile File diagnosticLogFile;
++    private int getGamepadRequestCount;
++    private boolean lastGetGamepadHadConnectedSlot;
++    private int gamepadStatePacketsSent;
++    private int setGamepadStateRequestCount;
++    private boolean sessionEndLogged;
++
++    public static class Diagnostics {
++        public final int getGamepadRequestCount;
++        public final boolean lastGetGamepadHadConnectedSlot;
++        public final boolean hasSentGamepadState;
++        public final int gamepadStatePacketsSent;
++        public final boolean hasReceivedGamepadState;
++        public final int setGamepadStateRequestCount;
++
++        private Diagnostics(int getGamepadRequestCount, boolean lastGetGamepadHadConnectedSlot,
++                            int gamepadStatePacketsSent, int setGamepadStateRequestCount) {
++            this.getGamepadRequestCount = getGamepadRequestCount;
++            this.lastGetGamepadHadConnectedSlot = lastGetGamepadHadConnectedSlot;
++            this.hasSentGamepadState = gamepadStatePacketsSent > 0;
++            this.gamepadStatePacketsSent = gamepadStatePacketsSent;
++            this.hasReceivedGamepadState = setGamepadStateRequestCount > 0;
++            this.setGamepadStateRequestCount = setGamepadStateRequestCount;
++        }
++    }
+@@ -73,0 +105,57 @@
++    public synchronized Diagnostics getDiagnostics() {
++        return new Diagnostics(getGamepadRequestCount, lastGetGamepadHadConnectedSlot,
++            gamepadStatePacketsSent, setGamepadStateRequestCount);
++    }
++
++    public void startDiagnosticsLog(File file, String sessionHeader) {
++        diagnosticLogFile = file;
++        synchronized (this) {
++            getGamepadRequestCount = 0;
++            lastGetGamepadHadConnectedSlot = false;
++            gamepadStatePacketsSent = 0;
++            setGamepadStateRequestCount = 0;
++            sessionEndLogged = false;
++        }
++        Log.i("BifrostGamepad", sessionHeader);
++        writeDiagnosticLog(file, sessionHeader, false);
++    }
++
++    public void finishDiagnosticsLog() {
++        synchronized (this) {
++            if (sessionEndLogged) return;
++            sessionEndLogged = true;
++        }
++        String message = "SESSION_END " + diagnosticsSummary(getDiagnostics());
++        Log.i("BifrostGamepad", message);
++        appendDiagnosticLog(message);
++    }
++
++    private static String diagnosticsSummary(Diagnostics diagnostics) {
++        return "getGamepadRequests=" + diagnostics.getGamepadRequestCount +
++            " lastGetGamepadHadConnectedSlot=" + diagnostics.lastGetGamepadHadConnectedSlot +
++            " getGamepadStatePacketsSent=" + diagnostics.gamepadStatePacketsSent +
++            " setGamepadStateRequests=" + diagnostics.setGamepadStateRequestCount;
++    }
++
++    private void appendDiagnosticLog(String line) {
++        File file = diagnosticLogFile;
++        if (file != null) writeDiagnosticLog(file, line, true);
++    }
++
++    private static void writeDiagnosticLog(File file, String line, boolean append) {
++        if (file == null) return;
++        try {
++            diagnosticLogWriter.execute(() -> {
++                try {
++                    File parent = file.getParentFile();
++                    if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) return;
++                    try (FileOutputStream outputStream = new FileOutputStream(file, append)) {
++                        outputStream.write((line + System.lineSeparator()).getBytes(StandardCharsets.UTF_8));
++                    }
++                }
++                catch (Exception ignored) {}
++            });
++        }
++        catch (Exception ignored) {}
++    }
++
+@@ -143 +231 @@
+-        Log.i("BifrostGamepad", request + " port=" + port + " slot=" + slot +
++        String message = request + " port=" + port + " slot=" + slot +
+@@ -146 +234,3 @@
+-            " pid=" + String.format(Locale.ENGLISH, "%04X", productId));
++            " pid=" + String.format(Locale.ENGLISH, "%04X", productId);
++        Log.i("BifrostGamepad", message);
++        appendDiagnosticLog(message);
+@@ -150,0 +241,5 @@
++        boolean hasConnectedSlot = isAnyGamepadConnected();
++        synchronized (this) {
++            getGamepadRequestCount++;
++            lastGetGamepadHadConnectedSlot = hasConnectedSlot;
++        }
+@@ -162 +257 @@
+-                        Toast.makeText(winHandler.activity, "Controller connected to the game", Toast.LENGTH_SHORT).show());
++                        Toast.makeText(winHandler.activity, "Controller connected to the game", Toast.LENGTH_LONG).show());
+@@ -262 +357 @@
+-                winHandler.sendPacket(port);
++                if (winHandler.sendPacket(port)) recordGamepadStateSent(port, slot);
+@@ -266,0 +362,9 @@
++    private void recordGamepadStateSent(int port, byte slot) {
++        boolean first;
++        synchronized (this) {
++            gamepadStatePacketsSent++;
++            first = gamepadStatePacketsSent == 1;
++        }
++        if (first) logGamepadRequest("GET_GAMEPAD_STATE", port, slot, gamepadSlots[slot]);
++    }
++
+@@ -275,0 +380,3 @@
++        String counts = "RELEASE_COUNTS port=" + port + " " + diagnosticsSummary(getDiagnostics());
++        Log.i("BifrostGamepad", counts);
++        appendDiagnosticLog(counts);
+@@ -284 +391,6 @@
+-        logGamepadRequest("SET_GAMEPAD_STATE", port, slot, gamepadSlot);
++        boolean first;
++        synchronized (this) {
++            setGamepadStateRequestCount++;
++            first = setGamepadStateRequestCount == 1;
++        }
++        if (first) logGamepadRequest("SET_GAMEPAD_STATE", port, slot, gamepadSlot);
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -85,0 +86 @@
++import com.winlator.winhandler.GamepadHandler;
+@@ -373,0 +375 @@
++        winHandler.gamepadHandler.finishDiagnosticsLog();
+@@ -598,0 +601,20 @@
++        ControlsProfile activeProfile = inputControlsView.getProfile();
++        File externalFilesDir = getExternalFilesDir(null);
++        if (externalFilesDir != null) {
++            String executablePath = getIntent().getStringExtra("exec_path");
++            if ((executablePath == null || executablePath.isEmpty()) && shortcut != null) executablePath = shortcut.path;
++            String executableName = executablePath != null ? FileUtils.getName(executablePath) : "";
++            String controllerStyle = getIntent().getStringExtra("controller_style");
++            if (controllerStyle == null || controllerStyle.isEmpty()) controllerStyle = "xbox";
++            String profileId = activeProfile != null ? String.valueOf(activeProfile.id) : "none";
++            String profileName = activeProfile != null ? String.valueOf(activeProfile.getName()) : "";
++            boolean isVirtualGamepad = activeProfile != null && activeProfile.isVirtualGamepad();
++            String sessionHeader = "SESSION timestamp=" + System.currentTimeMillis() +
++                " profileId=" + profileId + " profileName=\"" + profileName + "\"" +
++                " isVirtualGamepad=" + isVirtualGamepad +
++                " mapper=" + winHandler.gamepadHandler.getDInputMapperType() +
++                " controller_style=" + controllerStyle + " exe=\"" + executableName + "\"";
++            winHandler.gamepadHandler.startDiagnosticsLog(
++                new File(new File(externalFilesDir, "logs"), "gamepad.log"),
++                sessionHeader);
++        }
+@@ -602,2 +624 @@
+-        ControlsProfile activeProfile = inputControlsView.getProfile();
+-        if (activeProfile != null && activeProfile.isVirtualGamepad()) {
++        if (activeProfile != null) {
+@@ -605,4 +626,7 @@
+-                if (!isFinishing()) {
+-                    ControlsProfile currentProfile = inputControlsView.getProfile();
+-                    if (currentProfile != null && currentProfile.isVirtualGamepad() &&
+-                        !winHandler.gamepadHandler.hasGamepadClients()) {
++                if (isFinishing()) return;
++                ControlsProfile currentProfile = inputControlsView.getProfile();
++                if (currentProfile == null || !currentProfile.isVirtualGamepad() ||
++                    winHandler.gamepadHandler.hasGamepadClients()) return;
++                GamepadHandler.Diagnostics diagnostics = winHandler.gamepadHandler.getDiagnostics();
++                if (diagnostics.getGamepadRequestCount > 0) {
++                    if (!diagnostics.lastGetGamepadHadConnectedSlot) {
+@@ -610 +634 @@
+-                            "The game hasn't asked for a controller yet. Check its options for a gamepad setting.",
++                            "The game asked for a controller, but this layout has no gamepad controls.",
+@@ -612,0 +637,5 @@
++                }
++                else {
++                    Toast.makeText(this,
++                        "The game hasn't asked for a controller yet. Check its options for a gamepad setting.",
++                        Toast.LENGTH_LONG).show();
+--- a/res/xml/file_paths.xml
++++ b/res/xml/file_paths.xml
+@@ -4,0 +5 @@
++    <external-files-path name="external_files" path="." />
