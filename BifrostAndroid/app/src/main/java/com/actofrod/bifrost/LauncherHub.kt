@@ -1787,8 +1787,8 @@ private fun AboutSettings(activity: MainActivity, modifier: Modifier) {
             ) {
                 Text(if (activity.updateStatus == UpdateStatus.Checking) "Checking…" else "Check for updates")
             }
-            TextButton(onClick = activity::shareControllerLog) {
-                Text("Share controller log", maxLines = 1)
+            TextButton(onClick = activity::shareLogs) {
+                Text("Share logs", maxLines = 1)
             }
         }
         when (val status = activity.updateStatus) {

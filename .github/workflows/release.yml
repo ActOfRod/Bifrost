@@ -74,6 +74,8 @@ jobs:
           path: ${{ env.PKG }}.zip
   android:
     runs-on: ubuntu-latest
+    outputs:
+      signing_configured: ${{ steps.configure_signing.outputs.configured }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,18 +113,21 @@ jobs:
           set -o pipefail
           "$SDKMANAGER" --install "platforms;android-35" "ndk;24.0.8215888" "cmake;3.22.1"
       - name: Configure Android release signing
+        id: configure_signing
         env:
           BIFROST_ANDROID_KEYSTORE_B64: ${{ secrets.BIFROST_ANDROID_KEYSTORE_B64 }}
         run: |
           if [[ -n "$BIFROST_ANDROID_KEYSTORE_B64" ]]; then
             printf '%s' "$BIFROST_ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/bifrost-release.jks"
             echo "BIFROST_ANDROID_KEYSTORE=$RUNNER_TEMP/bifrost-release.jks" >> "$GITHUB_ENV"
+            echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::BIFROST_ANDROID_KEYSTORE_B64 is not configured; APK will be signed with a temporary debug key."
+            echo "The release APK must be uploaded manually. The Android APK is available as a workflow artifact only; upload a correctly signed APK to the GitHub Release." >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Build and package Android APK
         env:
-          BIFROST_VERSION_CODE: ${{ github.run_number }}
           BIFROST_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.BIFROST_ANDROID_KEYSTORE_PASSWORD }}
           BIFROST_ANDROID_KEY_ALIAS: ${{ secrets.BIFROST_ANDROID_KEY_ALIAS }}
           BIFROST_ANDROID_KEY_PASSWORD: ${{ secrets.BIFROST_ANDROID_KEY_PASSWORD }}
@@ -150,12 +155,21 @@ jobs:
           name: bifrost-windows
           path: dist
       - uses: actions/download-artifact@v4
+        if: needs.android.outputs.signing_configured == 'true'
         with:
           name: bifrost-android
           path: dist
-      - uses: softprops/action-gh-release@v2
+      - name: Publish signed Android APK and Windows ZIP
+        if: needs.android.outputs.signing_configured == 'true'
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/Bifrost-Windows-*.zip
             dist/Bifrost-Android-*.apk
+          generate_release_notes: true
+      - name: Publish Windows ZIP; Android APK requires manual upload
+        if: needs.android.outputs.signing_configured != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Bifrost-Windows-*.zip
           generate_release_notes: true

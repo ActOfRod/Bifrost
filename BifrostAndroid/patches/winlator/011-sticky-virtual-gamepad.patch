@@ -1,0 +1,207 @@
+--- a/java/com/winlator/winhandler/GamepadHandler.java
++++ b/java/com/winlator/winhandler/GamepadHandler.java
+@@ -29,0 +30 @@
++import java.util.Arrays;
+@@ -53,0 +55,13 @@
++    private ControlsProfile stickyVirtualProfile;
++    private final boolean[] hasLoggedSlotState = new boolean[GAMEPAD_MAX_COUNT];
++    private final boolean[] lastLoggedSlotConnected = new boolean[GAMEPAD_MAX_COUNT];
++    private final int[] lastLoggedSlotVendorId = new int[GAMEPAD_MAX_COUNT];
++    private final int[] lastLoggedSlotProductId = new int[GAMEPAD_MAX_COUNT];
++    private boolean hasLoggedSlot0Assignment;
++    private GamepadSlot lastSlot0Assignment;
++    private String lastSlot0Source;
++    private ControlsProfile lastInputProfile;
++    private short lastInputButtons;
++    private final boolean[] lastInputDpad = new boolean[4];
++    private int inputLogLineCount;
++    private boolean inputLogCapped;
+@@ -117,0 +132,13 @@
++            stickyVirtualProfile = null;
++            Arrays.fill(hasLoggedSlotState, false);
++            Arrays.fill(lastLoggedSlotConnected, false);
++            Arrays.fill(lastLoggedSlotVendorId, 0);
++            Arrays.fill(lastLoggedSlotProductId, 0);
++            hasLoggedSlot0Assignment = false;
++            lastSlot0Assignment = null;
++            lastSlot0Source = null;
++            lastInputProfile = null;
++            lastInputButtons = 0;
++            Arrays.fill(lastInputDpad, false);
++            inputLogLineCount = 0;
++            inputLogCapped = false;
+@@ -122,0 +150,38 @@
++    public synchronized void onControlsProfileChanged(ControlsProfile profile) {
++        if (stickyVirtualProfile != null && stickyVirtualProfile != profile &&
++            resetGamepadState(stickyVirtualProfile)) {
++            sendGamepadState(stickyVirtualProfile);
++        }
++
++        if (profile != null && profile.isVirtualGamepad()) stickyVirtualProfile = profile;
++        String message;
++        if (profile == null) {
++            message = "PROFILE_CHANGE none disableMouseInput=false";
++        }
++        else {
++            String name = String.valueOf(profile.getName())
++                .replace("\\", "\\\\").replace("\"", "\\\"").replace('\n', ' ');
++            message = "PROFILE_CHANGE id=" + profile.id + " name=\"" + name +
++                "\" isVirtualGamepad=" + profile.isVirtualGamepad() +
++                " disableMouseInput=" + profile.isDisableMouseInput();
++        }
++        Log.i("BifrostGamepad", message);
++        appendDiagnosticLog(message);
++    }
++
++    private boolean resetGamepadState(ControlsProfile profile) {
++        GamepadState state = profile.getGamepadState();
++        boolean changed = state.buttons != 0 || state.thumbLX != 0 || state.thumbLY != 0 ||
++            state.thumbRX != 0 || state.thumbRY != 0 || state.triggerL != 0 || state.triggerR != 0;
++        for (boolean pressed : state.dpad) changed |= pressed;
++        state.buttons = 0;
++        state.thumbLX = 0;
++        state.thumbLY = 0;
++        state.thumbRX = 0;
++        state.thumbRY = 0;
++        state.triggerL = 0;
++        state.triggerR = 0;
++        Arrays.fill(state.dpad, false);
++        return changed;
++    }
++
+@@ -162 +227 @@
+-    private void updateGamepadSlots() {
++    private synchronized void updateGamepadSlots() {
+@@ -183,2 +248,14 @@
+-        ControlsProfile profile = winHandler.activity.getInputControlsView().getProfile();
+-        boolean useVirtualGamepad = profile != null && profile.isVirtualGamepad();
++        ControlsProfile activeProfile = winHandler.activity.getInputControlsView().getProfile();
++        boolean activeVirtualGamepad = activeProfile != null && activeProfile.isVirtualGamepad();
++        if (activeVirtualGamepad) {
++            if (stickyVirtualProfile != null && stickyVirtualProfile != activeProfile &&
++                resetGamepadState(stickyVirtualProfile)) {
++                sendGamepadState(stickyVirtualProfile);
++            }
++            stickyVirtualProfile = activeProfile;
++        }
++        else if (stickyVirtualProfile != null && resetGamepadState(stickyVirtualProfile)) {
++            sendGamepadState(stickyVirtualProfile);
++        }
++        ControlsProfile profile = activeVirtualGamepad ? activeProfile : stickyVirtualProfile;
++        boolean useVirtualGamepad = profile != null;
+@@ -219,0 +297,44 @@
++
++        if (!autoAssign && useVirtualGamepad) {
++            boolean profileAssigned = false;
++            for (GamepadSlot gamepadSlot : gamepadSlots) profileAssigned |= gamepadSlot == profile;
++            if (!profileAssigned) {
++                for (byte i = 0; i < GAMEPAD_MAX_COUNT; i++) {
++                    if (gamepadSlots[i] == null) {
++                        gamepadSlots[i] = profile;
++                        break;
++                    }
++                }
++            }
++        }
++
++        if (!activeVirtualGamepad && profile != null && gamepadSlots[0] != profile) {
++            int profileSlot = ArrayUtils.indexOf(gamepadSlots, profile);
++            GamepadSlot displacedSlot = gamepadSlots[0];
++            gamepadSlots[0] = profile;
++            if (profileSlot > 0) {
++                gamepadSlots[profileSlot] = displacedSlot;
++            }
++            else if (displacedSlot != null) {
++                for (byte i = 1; i < GAMEPAD_MAX_COUNT; i++) {
++                    if (gamepadSlots[i] == null) {
++                        gamepadSlots[i] = displacedSlot;
++                        break;
++                    }
++                }
++            }
++        }
++
++        GamepadSlot slot0 = gamepadSlots[0];
++        String source = slot0 == null ? "none" :
++            (slot0 == profile && !activeVirtualGamepad ? "sticky" : "active");
++        boolean assignmentChanged = !hasLoggedSlot0Assignment ||
++            lastSlot0Assignment != slot0 || !source.equals(lastSlot0Source);
++        if (assignmentChanged) {
++            hasLoggedSlot0Assignment = true;
++            lastSlot0Assignment = slot0;
++            lastSlot0Source = source;
++            String message = "SLOT0 connected=" + (slot0 != null) + " source=" + source;
++            Log.i("BifrostGamepad", message);
++            appendDiagnosticLog(message);
++        }
+@@ -238,0 +360,17 @@
++    private void logGetGamepadRequestIfChanged(int port, int slot, GamepadSlot gamepadSlot) {
++        boolean connected = gamepadSlot != null;
++        int vendorId = connected ? gamepadSlot.getVendorId() & 0xffff : 0;
++        int productId = connected ? gamepadSlot.getProductId() & 0xffff : 0;
++        synchronized (this) {
++            if (hasLoggedSlotState[slot] &&
++                lastLoggedSlotConnected[slot] == connected &&
++                lastLoggedSlotVendorId[slot] == vendorId &&
++                lastLoggedSlotProductId[slot] == productId) return;
++            hasLoggedSlotState[slot] = true;
++            lastLoggedSlotConnected[slot] = connected;
++            lastLoggedSlotVendorId[slot] = vendorId;
++            lastLoggedSlotProductId[slot] = productId;
++        }
++        logGamepadRequest("GET_GAMEPAD", port, slot, gamepadSlot);
++    }
++
+@@ -248 +386 @@
+-            logGamepadRequest("GET_GAMEPAD", port, i, gamepadSlots[i]);
++            logGetGamepadRequestIfChanged(port, i, gamepadSlots[i]);
+@@ -342,0 +481,4 @@
++        if (gamepadSlot instanceof ControlsProfile) {
++            ControlsProfile profile = (ControlsProfile)gamepadSlot;
++            if (profile.isVirtualGamepad()) logVirtualInputIfChanged(profile);
++        }
+@@ -358,0 +501,32 @@
++        }
++    }
++
++    private void logVirtualInputIfChanged(ControlsProfile profile) {
++        GamepadState state = profile.getGamepadState();
++        String message = null;
++        synchronized (this) {
++            if (lastInputProfile != profile) {
++                lastInputProfile = profile;
++                lastInputButtons = 0;
++                Arrays.fill(lastInputDpad, false);
++            }
++            boolean dpadChanged = !Arrays.equals(lastInputDpad, state.dpad);
++            if (lastInputButtons == state.buttons && !dpadChanged) return;
++            if (inputLogLineCount >= 300) {
++                if (!inputLogCapped) {
++                    inputLogCapped = true;
++                    message = "INPUT_LOG_CAPPED";
++                }
++            }
++            else {
++                inputLogLineCount++;
++                message = String.format(Locale.ENGLISH,
++                    "INPUT buttons=0x%04X dpad=%d lx=%.3f ly=%.3f",
++                    state.buttons & 0xffff, state.getPovHat(), state.thumbLX, state.thumbLY);
++            }
++            lastInputButtons = state.buttons;
++            System.arraycopy(state.dpad, 0, lastInputDpad, 0, state.dpad.length);
++        }
++        if (message != null) {
++            Log.i("BifrostGamepad", message);
++            appendDiagnosticLog(message);
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -461,0 +462 @@
++        winHandler.gamepadHandler.finishDiagnosticsLog();
+@@ -611,0 +613 @@
++            boolean disableMouseInput = activeProfile != null && activeProfile.isDisableMouseInput();
+@@ -614,0 +617 @@
++                " disableMouseInput=" + disableMouseInput +
+@@ -842,0 +846 @@
++        winHandler.gamepadHandler.onControlsProfileChanged(profile);
+@@ -863,0 +868 @@
++        winHandler.gamepadHandler.onControlsProfileChanged(null);

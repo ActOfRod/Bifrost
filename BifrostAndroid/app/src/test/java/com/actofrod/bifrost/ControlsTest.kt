@@ -50,6 +50,7 @@ class ControlsTest {
         val applied = current.applyPreset(preset)
         assertEquals(8, applied.id)
         assertEquals("My game", applied.name)
+        assertFalse(applied.disableMouseInput)
         assertTrue(applied.haptics)
         assertEquals(73, applied.hapticStrength)
         assertFalse(applied.autoHideWithController)
@@ -99,6 +100,14 @@ class ControlsTest {
     }
 
     @Test
+    fun disableMouseInputRoundTripsAndMissingKeyKeepsCurrentBehavior() {
+        val original = ControlsDocument.parse("""{"id":1,"name":"Game","elements":[]}""")
+        assertFalse(original.disableMouseInput)
+        assertTrue(ControlsDocument.parse(original.withDisableMouseInput(true).encode()).disableMouseInput)
+        assertFalse(ControlsDocument.parse(original.withDisableMouseInput(false).encode()).disableMouseInput)
+    }
+
+    @Test
     fun migratesExactOldPresetsAndKeepsOtherProfileFields() {
         fun legacyDocument(elements: List<ControlsElement>) = ControlsDocument(
             JsonObject(
@@ -119,9 +128,11 @@ class ControlsTest {
         assertEquals(73, migratedXbox.hapticStrength)
         assertEquals("keep", migratedXbox.json["customField"]!!.jsonPrimitive.content)
         assertTrue("controllers" in migratedXbox.json)
+        assertFalse(migratedXbox.disableMouseInput)
 
         val migratedSplit = legacyDocument(ControlsDocument.oldSplitControllerElements()).migrateLegacyPreset()
         assertEquals(ControlsDocument.splitControllerPreset(9, "Game").elements, migratedSplit.elements)
+        assertFalse(migratedSplit.disableMouseInput)
     }
 
     @Test
@@ -160,6 +171,7 @@ class ControlsTest {
             ControlsDocument.splitControllerPreset(),
             ControlsDocument.xboxOverlayPreset(),
         ).forEach { preset ->
+            assertTrue(preset.disableMouseInput)
             fun button(binding: String) = preset.elements.single { binding in it.bindings }
             assertTrue(button("GAMEPAD_BUTTON_Y").y < button("GAMEPAD_BUTTON_A").y)
             assertTrue(button("GAMEPAD_BUTTON_X").x < button("GAMEPAD_BUTTON_B").x)
