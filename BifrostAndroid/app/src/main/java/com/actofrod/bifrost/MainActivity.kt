@@ -296,7 +296,7 @@ class MainActivity : ComponentActivity() {
                         updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
                     }
                 }
-                UnknownAppsRequest.GAME_APK -> installPendingApk()
+                UnknownAppsRequest.GAME_APK -> installPendingApk(pendingUpdateAlreadyCleared = true)
                 null -> {
                     if (hasPendingUpdate()) {
                         if (resumePendingUpdateInstall() == PendingUpdateDecision.WAIT) {
@@ -1152,6 +1152,7 @@ class MainActivity : ComponentActivity() {
                 try {
                     if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
                         unknownAppsRequest = UnknownAppsRequest.GAME_APK
+                        clearPendingUpdateForGameApkInstall()
                         unknownAppsSettings.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
                     } else {
                         installPendingApk()
@@ -1179,12 +1180,13 @@ class MainActivity : ComponentActivity() {
     private var pendingInstallLabel: String? = null
     private var pendingInstallCover: String? = null
 
-    private fun installPendingApk() {
+    private fun installPendingApk(pendingUpdateAlreadyCleared: Boolean = false) {
         val apk = pendingApk ?: return
         if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
             message = "Allow Bifrost to install unknown apps, then choose Install APK again."
             return
         }
+        if (!pendingUpdateAlreadyCleared) clearPendingUpdateForGameApkInstall()
         lifecycleScope.launch {
             try {
                 withContext(Dispatchers.IO) {
@@ -1664,6 +1666,11 @@ class MainActivity : ComponentActivity() {
             .remove(PENDING_UPDATE_TAG)
             .remove(PENDING_UPDATE_SIZE)
             .commit()
+    }
+
+    private fun clearPendingUpdateForGameApkInstall() {
+        clearPendingUpdate()
+        logUpdate("pending update cleared: game APK install started")
     }
 
     private fun clearCachedUpdate() {
