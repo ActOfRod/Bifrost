@@ -948,17 +948,37 @@ private fun TopPlayedCard(entry: LibraryEntry, rank: Int, compact: Boolean, modi
         colors = CardDefaults.cardColors(containerColor = Color(0xFF151D2A)),
         border = BorderStroke(if (rank == 1) 1.5.dp else 1.dp, if (rank == 1) HubAccent.copy(alpha = 0.6f) else Color(0x334D6577)),
     ) {
-        Row(Modifier.fillMaxSize().padding(if (compact) 6.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            HubArtwork(
-                entry.cover,
-                Modifier.size(if (compact) 36.dp else 48.dp).clip(RoundedCornerShape(9.dp)),
-                title = entry.title,
-            )
-            Spacer(Modifier.width(if (compact) 6.dp else 9.dp))
-            Column(Modifier.weight(1f)) {
-                Text("#$rank  MOST PLAYED", color = if (rank == 1) HubAccent else HubMuted, fontSize = if (compact) 8.sp else 9.sp, fontWeight = FontWeight.Bold)
-                Text(entry.title, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = if (compact) 10.sp else 12.sp)
-                Text("${entry.playCount} plays", color = HubMuted, fontSize = if (compact) 8.sp else 10.sp)
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val showArtwork = maxWidth >= 120.dp
+            Row(Modifier.fillMaxSize().padding(if (compact) 6.dp else 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (showArtwork) {
+                    HubArtwork(
+                        entry.cover,
+                        Modifier.size(if (compact) 36.dp else 48.dp).clip(RoundedCornerShape(9.dp)),
+                        title = entry.title,
+                    )
+                    Spacer(Modifier.width(if (compact) 6.dp else 9.dp))
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "#$rank · ${entry.playCount} plays",
+                        color = if (rank == 1) HubAccent else HubMuted,
+                        fontSize = if (compact) 8.sp else 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        softWrap = false,
+                    )
+                    Text(
+                        entry.title,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        softWrap = false,
+                        fontSize = if (compact) 10.sp else 12.sp,
+                    )
+                }
             }
         }
     }
