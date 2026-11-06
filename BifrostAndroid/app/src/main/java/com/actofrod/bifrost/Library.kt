@@ -15,8 +15,26 @@ import kotlinx.serialization.json.Json
 internal const val DEFAULT_MIN_FREE_BYTES = 512L * 1024 * 1024
 internal const val STORAGE_CHECK_INTERVAL_BYTES = 64L * 1024 * 1024
 
+internal fun shouldDeleteUnreferencedOwnedArtwork(
+    artworkPath: String,
+    ownedDirectoryPath: String,
+    referencedPaths: Set<String>,
+): Boolean =
+    File(artworkPath).parentFile?.path == ownedDirectoryPath && artworkPath !in referencedPaths
+
 @Serializable
 enum class Kind { NATIVE, PC }
+
+@Serializable
+enum class ControllerMode { OVERLAY, SPLIT }
+
+@Serializable
+data class LauncherSystem(
+    val id: String,
+    val name: String,
+    val icon: String? = null,
+    val accent: Long? = null,
+)
 
 @Serializable
 data class LibraryEntry(
@@ -33,16 +51,109 @@ data class LibraryEntry(
     val lastPlayed: Long? = null,
     val containerId: Int? = null,
     val controlsProfileId: Int? = null,
+    val systemId: String? = null,
+    val playCount: Int = 0,
+    val controllerMode: ControllerMode = ControllerMode.OVERLAY,
 )
 
 @Serializable
 data class LibrarySnapshot(
     val entries: List<LibraryEntry> = emptyList(),
     val dismissed: Set<String> = emptySet(),
+    val systems: List<LauncherSystem> = emptyList(),
 )
 
 internal fun LibrarySnapshot.currentEntry(entry: LibraryEntry): LibraryEntry =
     entries.firstOrNull { it.id == entry.id } ?: entry
+
+internal fun LibrarySnapshot.deleteSystem(systemId: String): LibrarySnapshot =
+    copy(
+        systems = systems.filterNot { it.id == systemId },
+        entries = entries.map { if (it.systemId == systemId) it.copy(systemId = null) else it },
+    )
+
+internal fun LibrarySnapshot.recordPlay(entryId: String, timestamp: Long): LibrarySnapshot =
+    copy(entries = entries.map {
+        if (it.id == entryId) it.copy(lastPlayed = timestamp, playCount = it.playCount + 1) else it
+    })
+
+internal fun LibrarySnapshot.recordPlayAndUpdate(
+    entryId: String,
+    timestamp: Long,
+    update: (LibraryEntry) -> LibraryEntry,
+): LibrarySnapshot {
+    val recorded = recordPlay(entryId, timestamp)
+    return recorded.copy(entries = recorded.entries.map {
+        if (it.id == entryId) update(it) else it
+    })
+}
+
+internal fun topPlayedGames(entries: List<LibraryEntry>): List<LibraryEntry> =
+    entries.asSequence()
+        .filter { it.playCount > 0 }
+        .sortedWith(
+            compareByDescending<LibraryEntry> { it.playCount }
+                .thenByDescending { it.lastPlayed ?: 0L }
+                .thenBy { it.title.lowercase() },
+        )
+        .take(3)
+        .toList()
+
+internal data class InstalledApp(
+    val packageName: String,
+    val label: String,
+    val isGame: Boolean,
+    val isBifrostPort: Boolean,
+)
+
+internal fun defaultGamesOnly(apps: List<InstalledApp>): Boolean =
+    apps.any { it.isGame && !it.packageName.startsWith("com.actofrod", ignoreCase = true) }
+
+internal fun filterInstalledApps(
+    apps: List<InstalledApp>,
+    gamesOnly: Boolean,
+    query: String,
+    linkedPackages: Set<String>,
+): List<InstalledApp> {
+    val normalizedQuery = query.trim().lowercase()
+    return apps.filter { app ->
+        !app.packageName.startsWith("com.actofrod", ignoreCase = true) &&
+            (!gamesOnly || app.isGame) &&
+            app.packageName !in linkedPackages &&
+            (normalizedQuery.isEmpty() ||
+                app.label.lowercase().contains(normalizedQuery) ||
+                app.packageName.lowercase().contains(normalizedQuery))
+    }
+}
+
+internal data class PixelRect(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    val width: Int get() = right - left
+    val height: Int get() = bottom - top
+}
+
+internal data class SplitControllerRects(val game: PixelRect, val controls: PixelRect)
+
+internal fun splitControllerRects(
+    width: Int,
+    height: Int,
+    foldBounds: PixelRect? = null,
+    gameRatio: Float = 0.55f,
+): SplitControllerRects {
+    val safeWidth = width.coerceAtLeast(1)
+    val safeHeight = height.coerceAtLeast(2)
+    val horizontalFold = foldBounds?.takeIf {
+        it.left >= 0 && it.right <= safeWidth && it.top >= 0 && it.bottom <= safeHeight &&
+            it.width >= safeWidth / 2 && it.height > 0 && it.height <= safeHeight / 5 &&
+            it.top > 0 && it.bottom < safeHeight
+    }
+    val gameBottom = horizontalFold?.top
+        ?: (safeHeight * gameRatio.coerceIn(0.1f, 0.9f)).toInt().coerceIn(1, safeHeight - 1)
+    val controlsTop = horizontalFold?.bottom ?: gameBottom
+    return SplitControllerRects(
+        game = PixelRect(0, 0, safeWidth, gameBottom),
+        controls = PixelRect(0, controlsTop, safeWidth, safeHeight),
+    )
+}
 
 @Serializable
 data class BifrostManifest(

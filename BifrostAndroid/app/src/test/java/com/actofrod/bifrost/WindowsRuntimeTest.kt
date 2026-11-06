@@ -3,9 +3,18 @@ package com.actofrod.bifrost
 import java.io.File
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WindowsRuntimeTest {
+    @Test
+    fun forceReinstallDoesNotSkipAnInstalledRuntime() {
+        assertTrue(shouldSkipRuntimeInstall(installed = true, force = false))
+        assertFalse(shouldSkipRuntimeInstall(installed = true, force = true))
+        assertFalse(shouldSkipRuntimeInstall(installed = false, force = false))
+    }
+
     @Test
     fun reclaimableBytesMirrorsRuntimeCleanupAndDoesNotFollowSymlinks() {
         val rootDir = Files.createTempDirectory("bifrost-runtime-size").toFile()

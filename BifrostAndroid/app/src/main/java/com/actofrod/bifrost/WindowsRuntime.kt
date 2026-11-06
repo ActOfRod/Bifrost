@@ -27,9 +27,9 @@ object WindowsRuntime {
         }.getOrDefault(false)
     }
 
-    suspend fun install(context: Context, progress: (Int) -> Unit) {
+    suspend fun install(context: Context, force: Boolean = false, progress: (Int) -> Unit) {
         val appContext = context.applicationContext
-        if (isInstalled(appContext)) {
+        if (shouldSkipRuntimeInstall(isInstalled(appContext), force)) {
             progress(100)
             return
         }
@@ -125,6 +125,8 @@ object WindowsRuntime {
         }
     }
 }
+
+internal fun shouldSkipRuntimeInstall(installed: Boolean, force: Boolean): Boolean = installed && !force
 
 internal fun reclaimableBytes(rootDir: File): Long {
     if (!Files.isDirectory(rootDir.toPath(), LinkOption.NOFOLLOW_LINKS)) return 0L
