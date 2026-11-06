@@ -97,6 +97,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.winlator.XServerDisplayActivity
 import com.winlator.container.Container
@@ -135,7 +136,7 @@ private fun deleteCachedInstallApk(context: Context, path: String?) {
 
 internal enum class Page { HOME, DETAIL, SETTINGS, LINK_APPS }
 internal enum class Tab { ALL, NATIVE, PC }
-internal enum class SettingsSection { ADD_GAMES, SYSTEMS, APPEARANCE, WINDOWS_RUNTIME, ABOUT }
+internal enum class SettingsSection { ADD_GAMES, SYSTEMS, APPEARANCE, CONTROLS, WINDOWS_RUNTIME, ABOUT }
 internal enum class ImageAction { BANNER, SYSTEM_ICON, COVER }
 
 internal data class FolderSelection(
@@ -202,6 +203,8 @@ class MainActivity : ComponentActivity() {
     internal var installedGamesOnly by mutableStateOf(true)
     internal var selectedInstalledPackages by mutableStateOf<Set<String>>(emptySet())
     internal var accentArgb by mutableStateOf(0xFF83F0C9L)
+    internal var controllerStyle by mutableStateOf(ControllerStyle.XBOX)
+    internal var updateStatus by mutableStateOf<UpdateStatus>(UpdateStatus.Idle)
     internal var customBannerPath by mutableStateOf<String?>(null)
     internal var imageAction by mutableStateOf<ImageAction?>(null)
     internal var imageTargetId by mutableStateOf<String?>(null)
@@ -220,6 +223,7 @@ class MainActivity : ComponentActivity() {
     internal var runtimeInstallProgress by mutableStateOf<Int?>(null)
     internal var runtimeInstallError by mutableStateOf<String?>(null)
     private var pendingApk by mutableStateOf<File?>(null)
+    private var pendingUpdateApk: File? = null
     private var pendingPcEntry: LibraryEntry? = null
     private var pendingInstallSystemId: String? = null
     private var pendingAfterStoragePermission: (() -> Unit)? = null
@@ -238,7 +242,9 @@ class MainActivity : ComponentActivity() {
         store = LibraryStore(File(filesDir, "library.json"))
         accentArgb = getSharedPreferences("hub", Context.MODE_PRIVATE)
             .getLong("accent", 0xFF83F0C9L)
-        customBannerPath = getSharedPreferences("hub", Context.MODE_PRIVATE).getString("banner", null)
+        val hubPreferences = getSharedPreferences("hub", Context.MODE_PRIVATE)
+        controllerStyle = ControllerStyle.fromId(hubPreferences.getString("controllerStyle", "xbox"))
+        customBannerPath = hubPreferences.getString("banner", null)
         val storedSnapshot = runCatching { store.read() }
         snapshot = storedSnapshot.getOrElse {
             Toast.makeText(this, "Could not read library: ${it.message}", Toast.LENGTH_LONG).show()
@@ -268,7 +274,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         unknownAppsSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            installPendingApk()
+            if (pendingUpdateApk != null) {
+                if (Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()) {
+                    launchPendingUpdateApk()
+                } else {
+                    pendingUpdateApk = null
+                    updateStatus = UpdateStatus.Error("Allow Bifrost to install unknown apps, then check for updates again.")
+                }
+            } else {
+                installPendingApk()
+            }
         }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(
@@ -1347,7 +1362,8 @@ class MainActivity : ComponentActivity() {
                 startActivity(
                     Intent(this@MainActivity, ControlsEditorActivity::class.java)
                         .putExtra("entry_id", profiledEntry.id)
-                        .putExtra("controls_profile_id", profiledEntry.controlsProfileId),
+                        .putExtra("controls_profile_id", profiledEntry.controlsProfileId)
+                        .putExtra("controller_style", controllerStyle.id),
                 )
             } catch (error: Exception) {
                 message = error.message ?: "Could not open controls"
@@ -1359,6 +1375,14 @@ class MainActivity : ComponentActivity() {
         val currentEntry = snapshot.currentEntry(entry)
         if (currentEntry.kind != Kind.PC) return currentEntry
         if (currentEntry.controlsProfileId != null) {
+            val file = ControlsProfile.getProfileFile(this, currentEntry.controlsProfileId)
+            if (file.isFile) {
+                val current = ControlsDocument.parse(file.readText())
+                val migrated = current.migrateLegacyPreset().migrateLegacyHaptics()
+                if (migrated.encode() != current.encode()) {
+                    writeAtomically(file, File(filesDir, "controls-tmp"), migrated.encode())
+                }
+            }
             if (selected?.id == currentEntry.id && selected != currentEntry) selected = currentEntry
             return currentEntry
         }
@@ -1368,9 +1392,7 @@ class MainActivity : ComponentActivity() {
         val file = ControlsProfile.getProfileFile(this, profile.id)
         try {
             val current = if (file.isFile) ControlsDocument.parse(file.readText()) else ControlsDocument.create(profile.id, currentEntry.title)
-            val gamepad = assets.open("inputcontrols/profiles/controls-3.icp").bufferedReader().use {
-                ControlsDocument.parse(it.readText())
-            }
+            val gamepad = ControlsDocument.xboxOverlayPreset(profile.id, currentEntry.title)
             writeAtomically(file, File(filesDir, "controls-tmp"), current.applyPreset(gamepad).encode())
             val profiledEntry = currentEntry.copy(controlsProfileId = profile.id)
             val next = snapshot.copy(entries = snapshot.entries.map { if (it.id == currentEntry.id) profiledEntry else it })
@@ -1396,6 +1418,14 @@ class MainActivity : ComponentActivity() {
             if (!executable.path.startsWith(gameDir.path + File.separator) || !executable.isFile) {
                 throw IllegalArgumentException("Game executable is missing or invalid")
             }
+            val executableImports = withContext(Dispatchers.IO) {
+                runCatching {
+                    PeScan.scan(gameDir).executables.firstOrNull {
+                        it.path.equals(exe.replace('\\', '/'), ignoreCase = true)
+                    }?.imports
+                }.getOrNull().orEmpty()
+            }
+            val mapperType = dinputMapperType(launchEntry.controllerApi, executableImports)
 
             val manager = ContainerManager(this)
             val existingContainer = launchEntry.containerId?.let(manager::getContainerById)
@@ -1442,6 +1472,8 @@ class MainActivity : ComponentActivity() {
                     .putExtra("container_id", container.id)
                     .putExtra("exec_path", executable.absolutePath)
                     .putExtra("controls_profile_id", launchEntry.controlsProfileId ?: 0)
+                    .putExtra("dinput_mapper_type", mapperType)
+                    .putExtra("controller_style", controllerStyle.id)
                     .putExtra(
                         "controller_mode",
                         if (launchEntry.controllerMode == ControllerMode.SPLIT) "split" else "overlay",
@@ -1449,6 +1481,85 @@ class MainActivity : ComponentActivity() {
             )
         } catch (error: Exception) {
             message = error.message ?: "Could not launch PC game"
+        }
+    }
+
+    internal fun selectControllerStyle(style: ControllerStyle) {
+        controllerStyle = style
+        getSharedPreferences("hub", Context.MODE_PRIVATE).edit()
+            .putString("controllerStyle", style.id)
+            .apply()
+    }
+
+    internal fun checkForUpdates() {
+        if (updateStatus == UpdateStatus.Checking || updateStatus is UpdateStatus.Downloading) return
+        updateStatus = UpdateStatus.Checking
+        lifecycleScope.launch {
+            try {
+                val release = UpdateChecker(com.winlator.BuildConfig.UPDATE_REPO).latestRelease()
+                updateStatus = if (isNewer(release.tagName, com.winlator.BuildConfig.VERSION_NAME)) {
+                    UpdateStatus.Available(release)
+                } else {
+                    UpdateStatus.Latest(com.winlator.BuildConfig.VERSION_NAME)
+                }
+            } catch (error: UpdateRequestException) {
+                updateStatus = UpdateStatus.Error(
+                    when (error.statusCode) {
+                        404 -> "No public releases found at ${com.winlator.BuildConfig.UPDATE_REPO}"
+                        403, 429 -> "GitHub is rate-limiting update checks right now. Try again in a few minutes."
+                        else -> "Update check failed (HTTP ${error.statusCode})"
+                    },
+                )
+            } catch (error: Exception) {
+                updateStatus = UpdateStatus.Error(error.message ?: "Update check failed")
+            }
+        }
+    }
+
+    internal fun downloadAndInstallUpdate(release: ReleaseInfo) {
+        updateStatus = UpdateStatus.Downloading(release, 0)
+        lifecycleScope.launch {
+            try {
+                val apk = UpdateChecker(com.winlator.BuildConfig.UPDATE_REPO).download(release, cacheDir) { progress ->
+                    runOnUiThread {
+                        updateStatus = UpdateStatus.Downloading(release, progress)
+                    }
+                }
+                pendingUpdateApk = apk
+                if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                    unknownAppsSettings.launch(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")),
+                    )
+                } else {
+                    launchPendingUpdateApk()
+                }
+            } catch (error: UpdateRequestException) {
+                updateStatus = UpdateStatus.Error(
+                    if (error.statusCode == 403 || error.statusCode == 429) {
+                        "GitHub is rate-limiting update checks right now. Try again in a few minutes."
+                    } else {
+                        error.message ?: "Could not download the update"
+                    },
+                )
+            } catch (error: Exception) {
+                updateStatus = UpdateStatus.Error(error.message ?: "Could not download the update")
+            }
+        }
+    }
+
+    private fun launchPendingUpdateApk() {
+        val apk = pendingUpdateApk ?: return
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) return
+        try {
+            val apkUri = FileProvider.getUriForFile(this, "com.actofrod.FileProvider", apk)
+            startActivity(
+                Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(apkUri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            )
+            pendingUpdateApk = null
+        } catch (error: Exception) {
+            updateStatus = UpdateStatus.Error(error.message ?: "Could not open the update installer")
         }
     }
 

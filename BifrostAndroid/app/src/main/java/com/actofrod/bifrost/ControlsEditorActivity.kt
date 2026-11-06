@@ -93,6 +93,7 @@ class ControlsEditorActivity : ComponentActivity() {
     internal var presetConfirmation by mutableStateOf<String?>(null)
     internal var discardConfirmation by mutableStateOf(false)
     internal var error by mutableStateOf<String?>(null)
+    internal var controllerStyle by mutableStateOf(ControllerStyle.XBOX)
     private var profileFile: File? = null
     private var templates = emptyMap<String, ControlsDocument>()
 
@@ -113,10 +114,15 @@ class ControlsEditorActivity : ComponentActivity() {
                 ?: throw IllegalArgumentException("Game entry is missing")
             require(entry.controlsProfileId == profileId) { "Controls profile does not match this game" }
             profileFile = ControlsProfile.getProfileFile(this, profileId)
-            document = ControlsDocument.parse(profileFile!!.readText())
+            controllerStyle = ControllerStyle.fromId(intent.getStringExtra("controller_style"))
+            val loaded = ControlsDocument.parse(profileFile!!.readText())
+            document = loaded.migrateLegacyPreset().migrateLegacyHaptics()
+            if (document!!.encode() != loaded.encode()) {
+                writeAtomically(profileFile!!, File(filesDir, "controls-tmp"), document!!.encode())
+            }
             savedContents = document!!.encode()
             templates = mapOf(
-                "Gamepad" to readTemplate("controls-3.icp"),
+                "Gamepad" to ControlsDocument.xboxOverlayPreset(profileId, "Virtual Gamepad"),
                 "Keyboard + mouse" to readTemplate("controls-4.icp"),
                 "RTS" to readTemplate("controls-1.icp"),
                 "Split-Controller" to ControlsDocument.splitControllerPreset(profileId, "Split-Controller"),
@@ -445,11 +451,27 @@ private fun ControlsCanvas(activity: ControlsEditorActivity, document: ControlsD
             val topLeft = Offset(centerX - halfWidth, centerY - halfHeight)
             val boxSize = Size(halfWidth * 2, halfHeight * 2)
             when (element.type) {
-                "BUTTON" -> when (element.shape) {
-                    "RECT" -> drawRect(color, topLeft, boxSize)
-                    "ROUND_RECT" -> drawRoundRect(color, topLeft, boxSize, androidx.compose.ui.geometry.CornerRadius(snappingSize))
-                    "SQUARE" -> drawRect(color, topLeft, boxSize)
-                    else -> drawCircle(color, radius = halfWidth, center = Offset(centerX, centerY))
+                "BUTTON" -> {
+                    val fill = Color(0x73000000).copy(alpha = (element.opacity * 0.45f).coerceIn(0f, 1f))
+                    val rim = Color(0xB3FFFFFF).copy(alpha = (element.opacity * 0.7f).coerceIn(0f, 1f))
+                    when (element.shape) {
+                        "RECT" -> {
+                            drawRect(fill, topLeft, boxSize)
+                            drawRect(rim, topLeft, boxSize, style = Stroke(snappingSize * 0.18f))
+                        }
+                        "ROUND_RECT" -> {
+                            drawRoundRect(fill, topLeft, boxSize, androidx.compose.ui.geometry.CornerRadius(snappingSize))
+                            drawRoundRect(rim, topLeft, boxSize, androidx.compose.ui.geometry.CornerRadius(snappingSize), style = Stroke(snappingSize * 0.18f))
+                        }
+                        "SQUARE" -> {
+                            drawRect(fill, topLeft, boxSize)
+                            drawRect(rim, topLeft, boxSize, style = Stroke(snappingSize * 0.18f))
+                        }
+                        else -> {
+                            drawCircle(fill, radius = halfWidth, center = Offset(centerX, centerY))
+                            drawCircle(rim, radius = halfWidth, center = Offset(centerX, centerY), style = Stroke(snappingSize * 0.18f))
+                        }
+                    }
                 }
                 "D_PAD" -> {
                     drawRect(color, Offset(centerX - halfWidth * 0.28f, centerY - halfHeight), Size(halfWidth * 0.56f, halfHeight * 2))
@@ -465,10 +487,43 @@ private fun ControlsCanvas(activity: ControlsEditorActivity, document: ControlsD
             if (activity.selectedIndex == index) {
                 drawRoundRect(EditorAccent, topLeft, boxSize, androidx.compose.ui.geometry.CornerRadius(snappingSize), style = Stroke(2f))
             }
-            val label = canvasLabel(element)
+            val styleBinding = if (
+                element.type == "BUTTON" && element.text.isEmpty() &&
+                element.bindings.count { it != "NONE" } == 1
+            ) element.bindings.firstOrNull { it != "NONE" } else null
+            val presentation = styleBinding?.let { controllerButtonPresentation(activity.controllerStyle, it) }
+            val label = canvasLabel(element, activity.controllerStyle)
+            if (presentation?.symbol != null) {
+                val symbolColor = presentation.accent?.let { Color(it) } ?: Color.White
+                val symbolSize = minOf(boxSize.width, boxSize.height) * 0.38f
+                when (presentation.symbol) {
+                    ControllerSymbol.CROSS -> {
+                        val half = symbolSize * 0.32f
+                        drawLine(symbolColor, Offset(centerX - half, centerY - half), Offset(centerX + half, centerY + half), snappingSize * 0.16f)
+                        drawLine(symbolColor, Offset(centerX + half, centerY - half), Offset(centerX - half, centerY + half), snappingSize * 0.16f)
+                    }
+                    ControllerSymbol.CIRCLE -> drawCircle(symbolColor, symbolSize * 0.32f, Offset(centerX, centerY), style = Stroke(snappingSize * 0.16f))
+                    ControllerSymbol.SQUARE -> {
+                        val half = symbolSize * 0.28f
+                        drawRect(symbolColor, Offset(centerX - half, centerY - half), Size(half * 2, half * 2), style = Stroke(snappingSize * 0.16f))
+                    }
+                    ControllerSymbol.TRIANGLE -> {
+                        val half = symbolSize * 0.36f
+                        val path = androidx.compose.ui.graphics.Path().apply {
+                            moveTo(centerX, centerY - half)
+                            lineTo(centerX + half, centerY + half)
+                            lineTo(centerX - half, centerY + half)
+                            close()
+                        }
+                        drawPath(path, symbolColor, style = Stroke(snappingSize * 0.16f))
+                    }
+                }
+            }
             if (label.isNotEmpty()) {
                 val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                    this.color = Color.White.copy(alpha = if (element.hidden) 0.25f else 0.95f).toArgb()
+                    val accent = presentation?.accent?.let { Color(it) }
+                    this.color = (accent ?: Color.White)
+                        .copy(alpha = if (element.hidden) 0.25f else 0.95f).toArgb()
                     textAlign = android.graphics.Paint.Align.CENTER
                     textSize = (snappingSize * 1.1f).coerceIn(8f, 18f)
                     typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
@@ -494,14 +549,20 @@ private fun ControlsCanvas(activity: ControlsEditorActivity, document: ControlsD
     }
 }
 
-private fun canvasLabel(element: ControlsElement): String = when (element.type) {
+private fun canvasLabel(element: ControlsElement, style: ControllerStyle): String = when (element.type) {
     "D_PAD" -> ""
     "STICK" -> element.text.ifBlank {
         if (element.bindings.any { it.startsWith("GAMEPAD_RIGHT_THUMB_") }) "R-stick" else "L-stick"
     }
     "TRACKPAD" -> element.text.ifBlank { "Mouse" }
     else -> element.text.ifBlank {
-        element.bindings.firstOrNull { it != "NONE" }?.let(::bindingLabel).orEmpty()
+        val activeBindings = element.bindings.filter { it != "NONE" }
+        val styleBinding = activeBindings.singleOrNull()?.takeIf {
+            element.type == "BUTTON" && it.startsWith("GAMEPAD_BUTTON_")
+        }
+        val styled = styleBinding?.let { controllerButtonPresentation(style, it) }
+        styled?.let { it.label ?: if (it.symbol != null) "" else activeBindings.firstOrNull()?.let(::bindingLabel).orEmpty() }
+            ?: activeBindings.firstOrNull()?.let(::bindingLabel).orEmpty()
     }
 }
 

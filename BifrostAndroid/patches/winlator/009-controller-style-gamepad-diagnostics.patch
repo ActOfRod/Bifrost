@@ -1,0 +1,676 @@
+diff -ruN a/java/com/winlator/XServerDisplayActivity.java b/java/com/winlator/XServerDisplayActivity.java
+--- a/java/com/winlator/XServerDisplayActivity.java	2026-11-06 16:34:05.018414561 +0000
++++ b/java/com/winlator/XServerDisplayActivity.java	2026-11-06 16:35:26.856627768 +0000
+@@ -9,6 +9,8 @@
+ import android.content.SharedPreferences;
+ import android.content.res.Configuration;
+ import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
+ import android.view.KeyEvent;
+ import android.view.Menu;
+ import android.view.MenuItem;
+@@ -19,6 +21,7 @@
+ import android.widget.FrameLayout;
+ import android.widget.LinearLayout;
+ import android.widget.Spinner;
++import android.widget.Toast;
+ 
+ import androidx.annotation.NonNull;
+ import androidx.annotation.Nullable;
+@@ -239,6 +242,11 @@
+                 if (intent.hasExtra("exec_path")) win32AppWorkarounds.applyStartupWorkarounds(FileUtils.getName(intent.getStringExtra("exec_path")));
+             }
+ 
++            int requestedMapperType = getIntent().getIntExtra("dinput_mapper_type", -1);
++            if (requestedMapperType != -1) {
++                winHandler.gamepadHandler.setDInputMapperType((byte)requestedMapperType);
++            }
++
+             this.graphicsDriver = GraphicsDrivers.parseIdentifiers(graphicsDriver);
+             this.graphicsDriverConfig = GraphicsDrivers.parseConfigs(graphicsDriver, graphicsDriverConfig);
+             this.dxwrapper = DXWrappers.parseIdentifier(dxwrapper);
+@@ -591,6 +599,20 @@
+         environment.startEnvironmentComponents();
+ 
+         winHandler.start();
++        ControlsProfile activeProfile = inputControlsView.getProfile();
++        if (activeProfile != null && activeProfile.isVirtualGamepad()) {
++            new Handler(Looper.getMainLooper()).postDelayed(() -> {
++                if (!isFinishing()) {
++                    ControlsProfile currentProfile = inputControlsView.getProfile();
++                    if (currentProfile != null && currentProfile.isVirtualGamepad() &&
++                        !winHandler.gamepadHandler.hasGamepadClients()) {
++                        Toast.makeText(this,
++                            "The game hasn't asked for a controller yet. Check its options for a gamepad setting.",
++                            Toast.LENGTH_LONG).show();
++                    }
++                }
++            }, 20000L);
++        }
+         envVars.clear();
+         graphicsDriver = null;
+         dxwrapperConfig = null;
+@@ -645,6 +667,7 @@
+             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+ 
+         inputControlsView = new InputControlsView(this);
++        inputControlsView.setControllerStyle(getIntent().getStringExtra("controller_style"));
+         inputControlsView.setOverlayOpacity(preferences.getFloat("overlay_opacity", InputControlsView.DEFAULT_OVERLAY_OPACITY));
+         inputControlsView.setTouchpadView(touchpadView);
+         if (capturePointerOnExternalMouse) {
+diff -ruN a/java/com/winlator/inputcontrols/ControlElement.java b/java/com/winlator/inputcontrols/ControlElement.java
+--- a/java/com/winlator/inputcontrols/ControlElement.java	2026-11-06 16:34:04.999414514 +0000
++++ b/java/com/winlator/inputcontrols/ControlElement.java	2026-11-06 16:43:54.679595817 +0000
+@@ -435,6 +435,23 @@
+     public void draw(Canvas canvas) {
+         if (isHidden() && !inputControlsView.isEditMode()) return;
+         int snappingSize = inputControlsView.getSnappingSize();
++        if (type == Type.BUTTON) {
++            drawControllerButton(canvas, snappingSize);
++            return;
++        }
++        if (type == Type.D_PAD) {
++            drawControllerDpad(canvas, snappingSize);
++            return;
++        }
++        if (type == Type.STICK) {
++            drawControllerStick(canvas, snappingSize);
++            return;
++        }
++        if (type == Type.TRACKPAD) {
++            drawControllerTrackpad(canvas, snappingSize);
++            return;
++        }
++
+         Paint paint = inputControlsView.getPaint();
+         int lightColor = getLightColor();
+ 
+@@ -467,9 +484,11 @@
+                     case SQUARE: {
+                         float radius = snappingSize * 0.75f * scale;
+                         canvas.drawRoundRect(boundingBox.left, boundingBox.top, boundingBox.right, boundingBox.bottom, radius, radius, paint);
+-                        break;
+-                    }
+-                }
++                break;
++        }
++    }
++
++
+ 
+                 if (iconId > 0) {
+                     drawIcon(canvas, cx, cy, boundingBox.width(), boundingBox.height(), iconId, true);
+@@ -764,6 +783,340 @@
+         }
+     }
+ 
++    private float getDrawOpacity() {
++        float opacity = this.opacity * inputControlsView.getOverlayOpacity();
++        return Math.max(0.0f, Math.min(1.0f, opacity));
++    }
++
++    private int withDrawOpacity(int color) {
++        return ColorUtils.setAlphaComponent(color, (int)(Color.alpha(color) * getDrawOpacity()));
++    }
++
++    private Binding getStyledButtonBinding() {
++        if (!text.isEmpty()) return null;
++        Binding result = null;
++        for (Binding binding : bindings) {
++            if (binding == Binding.NONE) continue;
++            if (!binding.isGamepad() || result != null) return null;
++            result = binding;
++        }
++        return result != null && result.name().startsWith("GAMEPAD_BUTTON_") ? result : null;
++    }
++
++    private String getStyledButtonLabel(Binding binding) {
++        String style = inputControlsView.getControllerStyle();
++        if ("nintendo".equals(style)) {
++            switch (binding) {
++                case GAMEPAD_BUTTON_A: return "B";
++                case GAMEPAD_BUTTON_B: return "A";
++                case GAMEPAD_BUTTON_X: return "Y";
++                case GAMEPAD_BUTTON_Y: return "X";
++                case GAMEPAD_BUTTON_L1: return "L";
++                case GAMEPAD_BUTTON_R1: return "R";
++                case GAMEPAD_BUTTON_L2: return "ZL";
++                case GAMEPAD_BUTTON_R2: return "ZR";
++                case GAMEPAD_BUTTON_L3: return "LS";
++                case GAMEPAD_BUTTON_R3: return "RS";
++                case GAMEPAD_BUTTON_SELECT: return "−";
++                case GAMEPAD_BUTTON_START: return "+";
++                default: return null;
++            }
++        }
++        if ("playstation".equals(style)) {
++            switch (binding) {
++                case GAMEPAD_BUTTON_L1: return "L1";
++                case GAMEPAD_BUTTON_R1: return "R1";
++                case GAMEPAD_BUTTON_L2: return "L2";
++                case GAMEPAD_BUTTON_R2: return "R2";
++                case GAMEPAD_BUTTON_L3: return "L3";
++                case GAMEPAD_BUTTON_R3: return "R3";
++                case GAMEPAD_BUTTON_SELECT: return "SHARE";
++                case GAMEPAD_BUTTON_START: return "OPTIONS";
++                default: return "";
++            }
++        }
++        switch (binding) {
++            case GAMEPAD_BUTTON_A: return "A";
++            case GAMEPAD_BUTTON_B: return "B";
++            case GAMEPAD_BUTTON_X: return "X";
++            case GAMEPAD_BUTTON_Y: return "Y";
++            case GAMEPAD_BUTTON_L1: return "LB";
++            case GAMEPAD_BUTTON_R1: return "RB";
++            case GAMEPAD_BUTTON_L2: return "LT";
++            case GAMEPAD_BUTTON_R2: return "RT";
++            case GAMEPAD_BUTTON_L3: return "LS";
++            case GAMEPAD_BUTTON_R3: return "RS";
++            case GAMEPAD_BUTTON_SELECT: return "VIEW";
++            case GAMEPAD_BUTTON_START: return "MENU";
++            default: return null;
++        }
++    }
++
++    private int getFaceButtonAccent(Binding binding) {
++        String style = inputControlsView.getControllerStyle();
++        if ("xbox".equals(style)) {
++            switch (binding) {
++                case GAMEPAD_BUTTON_A: return 0xFF5DC21E;
++                case GAMEPAD_BUTTON_B: return 0xFFE8473F;
++                case GAMEPAD_BUTTON_X: return 0xFF2D7FF9;
++                case GAMEPAD_BUTTON_Y: return 0xFFF2C12E;
++                default: return 0;
++            }
++        }
++        if ("playstation".equals(style)) {
++            switch (binding) {
++                case GAMEPAD_BUTTON_A: return 0xFF7FA7E8;
++                case GAMEPAD_BUTTON_B: return 0xFFE86B74;
++                case GAMEPAD_BUTTON_X: return 0xFFD58CC6;
++                case GAMEPAD_BUTTON_Y: return 0xFF3FC5A0;
++                default: return 0;
++            }
++        }
++        return 0;
++    }
++
++    private int getPlaystationSymbol(Binding binding) {
++        switch (binding) {
++            case GAMEPAD_BUTTON_A: return 1;
++            case GAMEPAD_BUTTON_B: return 2;
++            case GAMEPAD_BUTTON_X: return 3;
++            case GAMEPAD_BUTTON_Y: return 4;
++            default: return 0;
++        }
++    }
++
++    private void drawButtonShape(Canvas canvas, Paint paint, Rect box, int snappingSize) {
++        float radius = box.height() * 0.5f;
++        switch (shape) {
++            case CIRCLE:
++                canvas.drawCircle(box.centerX(), box.centerY(), box.width() * 0.5f, paint);
++                break;
++            case RECT:
++                canvas.drawRect(box, paint);
++                break;
++            case ROUND_RECT:
++                canvas.drawRoundRect(box.left, box.top, box.right, box.bottom, radius, radius, paint);
++                break;
++            case SQUARE:
++                radius = snappingSize * 0.75f * scale;
++                canvas.drawRoundRect(box.left, box.top, box.right, box.bottom, radius, radius, paint);
++                break;
++        }
++    }
++
++    private void drawPlaystationSymbol(Canvas canvas, Paint paint, int symbol, float cx, float cy, float size, int color) {
++        paint.setColor(withDrawOpacity(color));
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(size * 0.12f);
++        paint.setStrokeCap(Paint.Cap.ROUND);
++        paint.setStrokeJoin(Paint.Join.ROUND);
++        float half = size * 0.28f;
++        if (symbol == 1) {
++            canvas.drawLine(cx - half, cy - half, cx + half, cy + half, paint);
++            canvas.drawLine(cx + half, cy - half, cx - half, cy + half, paint);
++        }
++        else if (symbol == 2) {
++            canvas.drawCircle(cx, cy, half, paint);
++        }
++        else if (symbol == 3) {
++            canvas.drawRect(cx - half, cy - half, cx + half, cy + half, paint);
++        }
++        else if (symbol == 4) {
++            Path triangle = new Path();
++            triangle.moveTo(cx, cy - half);
++            triangle.lineTo(cx + half, cy + half);
++            triangle.lineTo(cx - half, cy + half);
++            triangle.close();
++            canvas.drawPath(triangle, paint);
++        }
++    }
++
++    private void drawControllerButton(Canvas canvas, int snappingSize) {
++        Paint paint = inputControlsView.getPaint();
++        Rect box = getBoundingBox();
++        float cx = box.centerX();
++        float cy = box.centerY();
++        boolean pressed = propertyFlags.isSet(FLAG_PRESSED);
++        Binding styledBinding = getStyledButtonBinding();
++        int accent = styledBinding != null ? getFaceButtonAccent(styledBinding) : 0;
++        int symbol = styledBinding != null && "playstation".equals(inputControlsView.getControllerStyle()) ?
++            getPlaystationSymbol(styledBinding) : 0;
++        boolean hasStyledLabel = styledBinding != null && getStyledButtonLabel(styledBinding) != null;
++        String label = hasStyledLabel ? getStyledButtonLabel(styledBinding) : getDisplayText();
++        if (iconId > 0) label = "";
++
++        int saveCount = canvas.save();
++        if (pressed) canvas.scale(0.94f, 0.94f, cx, cy);
++
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(withDrawOpacity(pressed ? (accent != 0 ? accent : 0xE6FFFFFF) : 0x73000000));
++        drawButtonShape(canvas, paint, box, snappingSize);
++
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(snappingSize * 0.18f);
++        paint.setColor(withDrawOpacity(0xB3FFFFFF));
++        drawButtonShape(canvas, paint, box, snappingSize);
++
++        if (propertyFlags.isSet(FLAG_SELECTED)) {
++            paint.setStyle(Paint.Style.STROKE);
++            paint.setStrokeWidth(snappingSize * 0.4f);
++            paint.setColor(getHighlightColor());
++            drawButtonShape(canvas, paint, box, snappingSize);
++        }
++
++        if (iconId > 0) {
++            drawIcon(canvas, cx, cy, box.width(), box.height(), iconId, true);
++        }
++        else if (symbol != 0) {
++            int symbolColor = pressed ? 0xFF18212B : accent;
++            drawPlaystationSymbol(canvas, paint, symbol, cx, cy, Math.min(box.width(), box.height()), symbolColor);
++        }
++        else if (!label.isEmpty()) {
++            paint.setStyle(Paint.Style.FILL);
++            paint.setTextAlign(Paint.Align.CENTER);
++            paint.setTextSize(Math.min(
++                getTextSizeForWidth(paint, label, box.width() - snappingSize * 0.36f),
++                snappingSize * 2 * scale));
++            int textColor = pressed ? 0xFF18212B : (accent != 0 ? accent : 0xFFFFFFFF);
++            paint.setColor(withDrawOpacity(textColor));
++            canvas.drawText(label, cx, cy - ((paint.descent() + paint.ascent()) * 0.5f), paint);
++        }
++        canvas.restoreToCount(saveCount);
++    }
++
++    private void drawDpadChevron(Canvas canvas, Paint paint, float cx, float cy, int direction, boolean pressed, float size) {
++        float half = size * 0.18f;
++        Path path = new Path();
++        if (direction == 0) {
++            path.moveTo(cx - half, cy + half * 0.5f);
++            path.lineTo(cx, cy - half * 0.5f);
++            path.lineTo(cx + half, cy + half * 0.5f);
++        }
++        else if (direction == 1) {
++            path.moveTo(cx - half * 0.5f, cy - half);
++            path.lineTo(cx + half * 0.5f, cy);
++            path.lineTo(cx - half * 0.5f, cy + half);
++        }
++        else if (direction == 2) {
++            path.moveTo(cx - half, cy - half * 0.5f);
++            path.lineTo(cx, cy + half * 0.5f);
++            path.lineTo(cx + half, cy - half * 0.5f);
++        }
++        else {
++            path.moveTo(cx + half * 0.5f, cy - half);
++            path.lineTo(cx - half * 0.5f, cy);
++            path.lineTo(cx + half * 0.5f, cy + half);
++        }
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(size * 0.075f);
++        paint.setStrokeCap(Paint.Cap.ROUND);
++        paint.setStrokeJoin(Paint.Join.ROUND);
++        paint.setColor(withDrawOpacity(pressed ? 0xFF18212B : 0xB3FFFFFF));
++        canvas.drawPath(path, paint);
++    }
++
++    private void drawDpadArm(Canvas canvas, Paint paint, RectF arm, int direction, boolean pressed, float size) {
++        float radius = arm.width() < arm.height() ? arm.width() * 0.34f : arm.height() * 0.34f;
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(withDrawOpacity(pressed ? 0xE6FFFFFF : 0x73000000));
++        canvas.drawRoundRect(arm, radius, radius, paint);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(size * 0.035f);
++        paint.setColor(withDrawOpacity(0xB3FFFFFF));
++        canvas.drawRoundRect(arm, radius, radius, paint);
++
++        float cx = arm.centerX();
++        float cy = arm.centerY();
++        drawDpadChevron(canvas, paint, cx, cy, direction, pressed, size);
++    }
++
++    private void drawControllerDpad(Canvas canvas, int snappingSize) {
++        Paint paint = inputControlsView.getPaint();
++        Rect box = getBoundingBox();
++        float cx = box.centerX();
++        float cy = box.centerY();
++        float size = Math.min(box.width(), box.height());
++        float thickness = size * 0.28f;
++        float center = thickness * 0.45f;
++        float inset = size * 0.035f;
++        drawDpadArm(canvas, paint, new RectF(cx - thickness * 0.5f, box.top + inset, cx + thickness * 0.5f, cy + center), 0, states[0], size);
++        drawDpadArm(canvas, paint, new RectF(cx - center, cy - thickness * 0.5f, box.right - inset, cy + thickness * 0.5f), 1, states[1], size);
++        drawDpadArm(canvas, paint, new RectF(cx - thickness * 0.5f, cy - center, cx + thickness * 0.5f, box.bottom - inset), 2, states[2], size);
++        drawDpadArm(canvas, paint, new RectF(box.left + inset, cy - thickness * 0.5f, cx + center, cy + thickness * 0.5f), 3, states[3], size);
++
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(withDrawOpacity(0x73000000));
++        canvas.drawRect(cx - center, cy - center, cx + center, cy + center, paint);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(size * 0.035f);
++        paint.setColor(withDrawOpacity(0xB3FFFFFF));
++        canvas.drawRect(cx - center, cy - center, cx + center, cy + center, paint);
++
++        if (propertyFlags.isSet(FLAG_SELECTED)) {
++            paint.setStyle(Paint.Style.STROKE);
++            paint.setStrokeWidth(snappingSize * 0.4f);
++            paint.setColor(getHighlightColor());
++            canvas.drawRect(box, paint);
++        }
++    }
++
++    private void drawControllerStick(Canvas canvas, int snappingSize) {
++        Paint paint = inputControlsView.getPaint();
++        Rect box = getBoundingBox();
++        float cx = box.centerX();
++        float cy = box.centerY();
++        float radius = box.width() * 0.5f;
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(withDrawOpacity(0x73000000));
++        canvas.drawCircle(cx, cy, radius, paint);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(snappingSize * 0.18f);
++        paint.setColor(withDrawOpacity(0xB3FFFFFF));
++        canvas.drawCircle(cx, cy, radius, paint);
++
++        float knobX = currentPosition != null ? currentPosition.x : cx;
++        float knobY = currentPosition != null ? currentPosition.y : cy;
++        float knobRadius = snappingSize * 3.5f * scale;
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(withDrawOpacity(currentPointerId >= 0 ? 0xFFFFFFFF : 0xCCFFFFFF));
++        canvas.drawCircle(knobX, knobY, knobRadius, paint);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(snappingSize * 0.1f);
++        paint.setColor(withDrawOpacity(0xB3FFFFFF));
++        canvas.drawCircle(knobX, knobY, knobRadius, paint);
++
++        if (propertyFlags.isSet(FLAG_SELECTED)) {
++            paint.setStrokeWidth(snappingSize * 0.4f);
++            paint.setColor(getHighlightColor());
++            canvas.drawCircle(cx, cy, radius, paint);
++        }
++    }
++
++    private void drawControllerTrackpad(Canvas canvas, int snappingSize) {
++        Paint paint = inputControlsView.getPaint();
++        Rect box = getBoundingBox();
++        float radius = box.height() * 0.15f;
++        paint.setStyle(Paint.Style.FILL);
++        paint.setColor(withDrawOpacity(0x73000000));
++        canvas.drawRoundRect(box.left, box.top, box.right, box.bottom, radius, radius, paint);
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(snappingSize * 0.18f);
++        paint.setColor(withDrawOpacity(0xB3FFFFFF));
++        canvas.drawRoundRect(box.left, box.top, box.right, box.bottom, radius, radius, paint);
++
++        float inset = snappingSize * 0.5f * scale;
++        paint.setStrokeWidth(snappingSize * 0.12f);
++        paint.setColor(withDrawOpacity(0x80FFFFFF));
++        canvas.drawRoundRect(
++            box.left + inset, box.top + inset, box.right - inset, box.bottom - inset,
++            Math.max(0, radius - inset), Math.max(0, radius - inset), paint);
++        if (propertyFlags.isSet(FLAG_SELECTED)) {
++            paint.setStrokeWidth(snappingSize * 0.4f);
++            paint.setColor(getHighlightColor());
++            canvas.drawRoundRect(box.left, box.top, box.right, box.bottom, radius, radius, paint);
++        }
++    }
++
+     private void drawIcon(Canvas canvas, float cx, float cy, float width, float height, int iconId, boolean automargin) {
+         Paint paint = inputControlsView.getPaint();
+         Bitmap icon = inputControlsView.getIcon((byte)iconId);
+@@ -868,13 +1221,17 @@
+                     if (currentPosition == null) currentPosition = new PointF();
+                     currentPosition.set(x, y);
+                 }
+-                return handleTouchMove(pointerId, x, y);
++                return handleTouchMove(pointerId, x, y, false);
+             }
+         }
+         else return false;
+     }
+ 
+     public boolean handleTouchMove(int pointerId, float x, float y) {
++        return handleTouchMove(pointerId, x, y, true);
++    }
++
++    private boolean handleTouchMove(int pointerId, float x, float y, boolean vibrateForNewDirection) {
+         if (pointerId == currentPointerId && (type == Type.D_PAD || type == Type.STICK || type == Type.TRACKPAD)) {
+             float deltaX, deltaY;
+             Rect boundingBox = getBoundingBox();
+@@ -963,14 +1320,20 @@
+             }
+             else {
+                 final boolean[] states = {deltaY <= -DPAD_DEAD_ZONE, deltaX >= DPAD_DEAD_ZONE, deltaY >= DPAD_DEAD_ZONE, deltaX <= -DPAD_DEAD_ZONE};
++                boolean gainedDirection = false;
++                boolean changedDirection = false;
+ 
+                 for (byte i = 0; i < 4; i++) {
+                     float value = i == 1 || i == 3 ? deltaX : deltaY;
+                     Binding binding = getBindingAt(i);
+                     boolean state = binding.isMouseMove() ? (states[i] || states[(i+2)%4]) : states[i];
+                     inputControlsView.handleInputEvent(binding, state, value);
++                    if (this.states[i] != state) changedDirection = true;
++                    if (!this.states[i] && state) gainedDirection = true;
+                     this.states[i] = state;
+                 }
++                if (changedDirection) inputControlsView.invalidate();
++                if (vibrateForNewDirection && gainedDirection) inputControlsView.vibrateForDpadPress();
+             }
+ 
+             return true;
+diff -ruN a/java/com/winlator/inputcontrols/ControlsProfile.java b/java/com/winlator/inputcontrols/ControlsProfile.java
+--- a/java/com/winlator/inputcontrols/ControlsProfile.java	2026-11-06 16:34:04.992414496 +0000
++++ b/java/com/winlator/inputcontrols/ControlsProfile.java	2026-11-06 16:38:47.377148572 +0000
+@@ -23,7 +23,7 @@
+     private String name;
+     private float cursorSpeed = 1.0f;
+     private boolean disableMouseInput = false;
+-    private boolean haptics = false;
++    private boolean haptics = true;
+     private int hapticStrength = 50;
+     private boolean autoHideWithController = true;
+     private final ArrayList<ControlElement> elements = new ArrayList<>();
+@@ -48,12 +48,12 @@
+ 
+     @Override
+     public short getVendorId() {
+-        return 0x0001;
++        return (short)0x045E;
+     }
+ 
+     @Override
+     public short getProductId() {
+-        return 0x0001;
++        return (short)0x028E;
+     }
+ 
+     public void setName(String name) {
+@@ -265,7 +265,7 @@
+ 
+         try {
+             JSONObject profileJSONObject = new JSONObject(FileUtils.readString(file));
+-            haptics = profileJSONObject.optBoolean("haptics", false);
++            haptics = profileJSONObject.optBoolean("haptics", true);
+             setHapticStrength(profileJSONObject.optInt("hapticStrength", 50));
+             autoHideWithController = profileJSONObject.optBoolean("autoHideWithController", true);
+             JSONArray elementsJSONArray = profileJSONObject.getJSONArray("elements");
+diff -ruN a/java/com/winlator/widget/InputControlsView.java b/java/com/winlator/widget/InputControlsView.java
+--- a/java/com/winlator/widget/InputControlsView.java	2026-11-06 16:34:05.005414529 +0000
++++ b/java/com/winlator/widget/InputControlsView.java	2026-11-06 16:34:47.947522030 +0000
+@@ -65,6 +65,7 @@
+     private Timer mouseMoveTimer;
+     private final PointF mouseMoveOffset = new PointF();
+     private boolean showTouchscreenControls = true;
++    private String controllerStyle = "xbox";
+     private InputManager inputManager;
+     private final InputManager.InputDeviceListener inputDeviceListener = new InputManager.InputDeviceListener() {
+         @Override
+@@ -127,9 +128,35 @@
+         Vibrator vibrator = (Vibrator)getContext().getSystemService(Context.VIBRATOR_SERVICE);
+         if (vibrator == null || !vibrator.hasVibrator()) return;
+         int strength = profile.getHapticStrength();
+-        long duration = 10L + (30L * (strength - 1) / 99);
++        long duration = 20L + (30L * strength / 100);
+         int amplitude = Math.max(1, Math.min(255, strength * 255 / 100));
+-        if (Build.VERSION.SDK_INT >= 26) vibrator.vibrate(VibrationEffect.createOneShot(duration, amplitude));
++        if (Build.VERSION.SDK_INT >= 29) {
++            int effect = strength <= 33 ? VibrationEffect.EFFECT_TICK :
++                strength <= 66 ? VibrationEffect.EFFECT_CLICK : VibrationEffect.EFFECT_HEAVY_CLICK;
++            vibrator.vibrate(VibrationEffect.createPredefined(effect));
++        }
++        else if (Build.VERSION.SDK_INT >= 26) {
++            vibrator.vibrate(VibrationEffect.createOneShot(
++                duration, vibrator.hasAmplitudeControl() ? amplitude : VibrationEffect.DEFAULT_AMPLITUDE));
++        }
++        else vibrator.vibrate(duration);
++    }
++
++    public void vibrateForDpadPress() {
++        vibrateForPress();
++    }
++
++    public void setControllerStyle(String controllerStyle) {
++        String normalized = "nintendo".equals(controllerStyle) || "playstation".equals(controllerStyle) ?
++            controllerStyle : "xbox";
++        if (!this.controllerStyle.equals(normalized)) {
++            this.controllerStyle = normalized;
++            invalidate();
++        }
++    }
++
++    public String getControllerStyle() {
++        return controllerStyle;
+     }
+ 
+     public void setEditMode(boolean editMode) {
+diff -ruN a/java/com/winlator/winhandler/GamepadHandler.java b/java/com/winlator/winhandler/GamepadHandler.java
+--- a/java/com/winlator/winhandler/GamepadHandler.java	2026-11-06 16:34:05.012414546 +0000
++++ b/java/com/winlator/winhandler/GamepadHandler.java	2026-11-06 16:35:21.050611157 +0000
+@@ -2,8 +2,10 @@
+ 
+ import android.content.Context;
+ import android.content.SharedPreferences;
++import android.util.Log;
+ import android.view.KeyEvent;
+ import android.view.MotionEvent;
++import android.widget.Toast;
+ 
+ import androidx.annotation.NonNull;
+ 
+@@ -35,6 +37,7 @@
+     private static final byte GAMEPAD_MAX_COUNT = 4;
+     private final WinHandler winHandler;
+     private final List<Integer> gamepadClients = new CopyOnWriteArrayList<>();
++    private boolean connectionToastShown;
+     private byte dinputMapperType = DINPUT_MAPPER_TYPE_XINPUT;
+     private final GamepadSlot[] gamepadSlots = new GamepadSlot[GAMEPAD_MAX_COUNT];
+     private final ArrayList<ExternalController> connectedControllers = new ArrayList<>(GAMEPAD_MAX_COUNT);
+@@ -133,12 +136,32 @@
+         return false;
+     }
+ 
++    private void logGamepadRequest(String request, int port, int slot, GamepadSlot gamepadSlot) {
++        boolean connected = gamepadSlot != null;
++        int vendorId = connected ? gamepadSlot.getVendorId() & 0xffff : 0;
++        int productId = connected ? gamepadSlot.getProductId() & 0xffff : 0;
++        Log.i("BifrostGamepad", request + " port=" + port + " slot=" + slot +
++            " connected=" + connected + " mapper=" + dinputMapperType +
++            " vid=" + String.format(Locale.ENGLISH, "%04X", vendorId) +
++            " pid=" + String.format(Locale.ENGLISH, "%04X", productId));
++    }
++
+     public void handleGetGamepadRequest(int port) {
+         updateGamepadSlots();
+ 
++        for (int i = 0; i < GAMEPAD_MAX_COUNT; i++) {
++            logGamepadRequest("GET_GAMEPAD", port, i, gamepadSlots[i]);
++        }
+         int clientIndex = gamepadClients.indexOf(port);
+         if (isAnyGamepadConnected()) {
+-            if (clientIndex == -1) gamepadClients.add(port);
++            if (clientIndex == -1) {
++                gamepadClients.add(port);
++                if (!connectionToastShown) {
++                    connectionToastShown = true;
++                    winHandler.activity.runOnUiThread(() ->
++                        Toast.makeText(winHandler.activity, "Controller connected to the game", Toast.LENGTH_SHORT).show());
++                }
++            }
+         }
+         else if (clientIndex != -1) gamepadClients.remove(clientIndex);
+ 
+@@ -242,6 +265,14 @@
+     }
+ 
+     public void handleReleaseGamepadRequest(int port) {
++        GamepadSlot firstSlot = null;
++        for (GamepadSlot gamepadSlot : gamepadSlots) {
++            if (gamepadSlot != null) {
++                firstSlot = gamepadSlot;
++                break;
++            }
++        }
++        logGamepadRequest("RELEASE_GAMEPAD", port, -1, firstSlot);
+         int index = gamepadClients.indexOf(port);
+         if (index != -1) gamepadClients.remove(index);
+     }
+@@ -249,12 +280,13 @@
+     public void handleSetGamepadStateRequest(int port) {
+         final ByteBuffer buffer = winHandler.receiveData;
+         byte slot = buffer.get();
++        GamepadSlot gamepadSlot = slot >= 0 && slot < GAMEPAD_MAX_COUNT ? gamepadSlots[slot] : null;
++        logGamepadRequest("SET_GAMEPAD_STATE", port, slot, gamepadSlot);
+         if (slot < 0 || slot >= GAMEPAD_MAX_COUNT) return;
+         int leftMotorSpeed = buffer.getInt();
+         int rightMotorSpeed = buffer.getInt();
+         int durationMs = buffer.getInt();
+ 
+-        GamepadSlot gamepadSlot = gamepadSlots[slot];
+         if (gamepadSlot == null) return;
+ 
+         GamepadVibration vibration = gamepadSlot.getGamepadVibration();
+@@ -307,6 +339,10 @@
+         return dinputMapperType;
+     }
+ 
++    public boolean hasGamepadClients() {
++        return !gamepadClients.isEmpty();
++    }
++
+     public void setDInputMapperType(byte dinputMapperType) {
+         this.dinputMapperType = dinputMapperType;
+     }
+diff -ruN a/res/xml/file_paths.xml b/res/xml/file_paths.xml
+--- a/res/xml/file_paths.xml	2026-11-06 16:41:37.762380715 +0000
++++ b/res/xml/file_paths.xml	2026-11-06 16:41:22.585363566 +0000
+@@ -1,4 +1,5 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <paths xmlns:android="http://schemas.android.com/apk/res/android">
+     <files-path name="files" path="." />
++    <cache-path name="updates" path="updates/" />
+ </paths>
+\ No newline at end of file

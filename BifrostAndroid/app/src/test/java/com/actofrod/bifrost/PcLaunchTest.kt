@@ -7,6 +7,17 @@ import org.junit.Test
 
 class PcLaunchTest {
     @Test
+    fun selectsDinputMapperByControllerApiAndExecutableImports() {
+        assertEquals(1, dinputMapperType(ControllerApi.XINPUT, setOf("dinput8.dll")))
+        assertEquals(0, dinputMapperType(ControllerApi.DIRECTINPUT, setOf("xinput1_3.dll")))
+        assertEquals(0, dinputMapperType(ControllerApi.AUTO, setOf("DINPUT.DLL")))
+        assertEquals(0, dinputMapperType(ControllerApi.AUTO, setOf("dinput8.dll", "user32.dll")))
+        assertEquals(1, dinputMapperType(ControllerApi.AUTO, setOf("dinput8.dll", "XInput1_4.dll")))
+        assertEquals(1, dinputMapperType(ControllerApi.AUTO, setOf("xinput1_3.dll")))
+        assertEquals(1, dinputMapperType(ControllerApi.AUTO, emptySet()))
+    }
+
+    @Test
     fun selectsDxWrapperByApiPriority() {
         assertEquals("vkd3d", dxwrapperFor(listOf("Direct3D 8", "Direct3D 12")))
         assertEquals("dxvk", dxwrapperFor(listOf("Direct3D 9", "Direct3D 8")))

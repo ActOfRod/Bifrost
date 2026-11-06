@@ -10,6 +10,7 @@ plugins {
 val releaseKeystore = System.getenv("BIFROST_ANDROID_KEYSTORE")
 val appVersionCode = System.getenv("BIFROST_VERSION_CODE")?.toInt() ?: 1
 val appVersionName = System.getenv("BIFROST_VERSION_NAME") ?: "0.1.0-dev"
+val updateRepo = System.getenv("BIFROST_UPDATE_REPO") ?: "ActOfRod/Bifrost"
 val winlatorSource = file("../third_party/winlator-app")
 val winlatorOutput = layout.buildDirectory.dir("winlator")
 val winlatorStamp = file("build/winlator/.source-sha")
@@ -48,6 +49,7 @@ android {
         targetSdk = 28
         versionCode = appVersionCode
         versionName = appVersionName
+        buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += "arm64-v8a"

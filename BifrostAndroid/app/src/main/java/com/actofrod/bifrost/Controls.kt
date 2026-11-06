@@ -17,6 +17,78 @@ import kotlinx.serialization.json.put
 
 data class NormalizedPosition(val x: Float, val y: Float)
 
+enum class ControllerStyle(val id: String) {
+    XBOX("xbox"),
+    NINTENDO("nintendo"),
+    PLAYSTATION("playstation");
+
+    companion object {
+        fun fromId(id: String?, default: ControllerStyle = XBOX): ControllerStyle =
+            values().firstOrNull { it.id == id } ?: default
+    }
+}
+
+enum class ControllerSymbol { CROSS, CIRCLE, SQUARE, TRIANGLE }
+
+data class ControllerButtonPresentation(
+    val label: String? = null,
+    val accent: Long? = null,
+    val symbol: ControllerSymbol? = null,
+)
+
+internal fun controllerButtonPresentation(
+    style: ControllerStyle,
+    binding: String,
+): ControllerButtonPresentation? {
+    val face = when (binding) {
+        "GAMEPAD_BUTTON_A" -> 0
+        "GAMEPAD_BUTTON_B" -> 1
+        "GAMEPAD_BUTTON_X" -> 2
+        "GAMEPAD_BUTTON_Y" -> 3
+        else -> -1
+    }
+    if (face >= 0) {
+        return when (style) {
+            ControllerStyle.XBOX -> ControllerButtonPresentation(
+                label = listOf("A", "B", "X", "Y")[face],
+                accent = listOf(0xFF5DC21EL, 0xFFE8473FL, 0xFF2D7FF9L, 0xFFF2C12EL)[face],
+            )
+            ControllerStyle.NINTENDO -> ControllerButtonPresentation(
+                label = listOf("B", "A", "Y", "X")[face],
+            )
+            ControllerStyle.PLAYSTATION -> ControllerButtonPresentation(
+                accent = listOf(0xFF7FA7E8L, 0xFFE86B74L, 0xFFD58CC6L, 0xFF3FC5A0L)[face],
+                symbol = listOf(
+                    ControllerSymbol.CROSS,
+                    ControllerSymbol.CIRCLE,
+                    ControllerSymbol.SQUARE,
+                    ControllerSymbol.TRIANGLE,
+                )[face],
+            )
+        }
+    }
+    val label = when (binding) {
+        "GAMEPAD_BUTTON_L1" -> if (style == ControllerStyle.NINTENDO) "L" else if (style == ControllerStyle.PLAYSTATION) "L1" else "LB"
+        "GAMEPAD_BUTTON_R1" -> if (style == ControllerStyle.NINTENDO) "R" else if (style == ControllerStyle.PLAYSTATION) "R1" else "RB"
+        "GAMEPAD_BUTTON_L2" -> if (style == ControllerStyle.NINTENDO) "ZL" else if (style == ControllerStyle.PLAYSTATION) "L2" else "LT"
+        "GAMEPAD_BUTTON_R2" -> if (style == ControllerStyle.NINTENDO) "ZR" else if (style == ControllerStyle.PLAYSTATION) "R2" else "RT"
+        "GAMEPAD_BUTTON_L3" -> if (style == ControllerStyle.PLAYSTATION) "L3" else "LS"
+        "GAMEPAD_BUTTON_R3" -> if (style == ControllerStyle.PLAYSTATION) "R3" else "RS"
+        "GAMEPAD_BUTTON_SELECT" -> when (style) {
+            ControllerStyle.XBOX -> "VIEW"
+            ControllerStyle.NINTENDO -> "−"
+            ControllerStyle.PLAYSTATION -> "SHARE"
+        }
+        "GAMEPAD_BUTTON_START" -> when (style) {
+            ControllerStyle.XBOX -> "MENU"
+            ControllerStyle.NINTENDO -> "+"
+            ControllerStyle.PLAYSTATION -> "OPTIONS"
+        }
+        else -> return null
+    }
+    return ControllerButtonPresentation(label = label)
+}
+
 data class ControlsElement(val json: JsonObject) {
     val type: String get() = json.string("type")
     val shape: String get() = json.string("shape", "CIRCLE")
@@ -82,16 +154,37 @@ data class ControlsDocument(val json: JsonObject) {
     val name: String get() = json.string("name")
     val elements: List<ControlsElement>
         get() = json.array("elements").mapNotNull { runCatching { ControlsElement(it.jsonObject) }.getOrNull() }
-    val haptics: Boolean get() = json.boolean("haptics", false)
+    val haptics: Boolean get() = json.boolean("haptics", true)
+    val hapticsUserSet: Boolean get() = json.boolean("hapticsUserSet", false)
     val hapticStrength: Int get() = json.int("hapticStrength", 50).coerceIn(1, 100)
     val autoHideWithController: Boolean get() = json.boolean("autoHideWithController", true)
 
     fun encode(): String = JsonObject(json.toMap()).toString()
 
-    fun applyPreset(template: ControlsDocument): ControlsDocument = withRootField(
-        "elements",
-        template.json["elements"] ?: JsonArray(emptyList()),
-    )
+    fun applyPreset(template: ControlsDocument): ControlsDocument {
+        val updated = withRootField("elements", template.json["elements"] ?: JsonArray(emptyList()))
+        return template.json["presetVersion"]?.let { updated.withRootField("presetVersion", it) } ?: updated
+    }
+
+    fun migrateLegacyHaptics(): ControlsDocument =
+        if (json["haptics"]?.jsonPrimitive?.content == "false" && "hapticsUserSet" !in json) {
+            withRootField("haptics", JsonPrimitive(true))
+        } else {
+            this
+        }
+
+    fun migrateLegacyPreset(): ControlsDocument {
+        if ("presetVersion" in json) return this
+        val replacement = when {
+            elementsMatch(elements, oldControls3Elements()) -> xboxOverlayPreset(id, name)
+            elementsMatch(elements, oldSplitControllerElements()) -> splitControllerPreset(id, name)
+            else -> return this
+        }
+        return ControlsDocument(json.toMutableMap().apply {
+            put("elements", replacement.json["elements"] ?: JsonArray(emptyList()))
+            put("presetVersion", JsonPrimitive(2))
+        }.let(::JsonObject))
+    }
 
     fun addElement(type: String, x: Float = 0.5f, y: Float = 0.5f): ControlsDocument =
         withElements(elements + ControlsElement.create(type, x, y))
@@ -107,7 +200,9 @@ data class ControlsDocument(val json: JsonObject) {
         })
     }
 
-    fun withHaptics(enabled: Boolean): ControlsDocument = withRootField("haptics", JsonPrimitive(enabled))
+    fun withHaptics(enabled: Boolean): ControlsDocument =
+        withRootField("haptics", JsonPrimitive(enabled))
+            .withRootField("hapticsUserSet", JsonPrimitive(true))
 
     fun withHapticStrength(strength: Int): ControlsDocument =
         withRootField("hapticStrength", JsonPrimitive(strength.coerceIn(1, 100)))
@@ -173,28 +268,105 @@ data class ControlsDocument(val json: JsonObject) {
             put("elements", JsonArray(emptyList()))
         })
 
+        private fun presetElement(
+            type: String,
+            x: Float,
+            y: Float,
+            scale: Float,
+            bindings: List<String>,
+            shape: String = "CIRCLE",
+        ): ControlsElement =
+            ControlsElement.create(type, x, y).update(shape = shape, scale = scale, bindings = bindings)
+
+        private fun preset(id: Int, name: String, elements: List<ControlsElement>): ControlsDocument =
+            ControlsDocument(create(id, name).json.toMutableMap().apply {
+                put("elements", JsonArray(elements.map { it.json }))
+                put("presetVersion", JsonPrimitive(2))
+            }.let(::JsonObject))
+
+        fun xboxOverlayPreset(id: Int = 0, name: String = "Virtual Gamepad"): ControlsDocument {
+            val elements = listOf(
+                presetElement("STICK", 0.10f, 0.62f, 1.0f, listOf("GAMEPAD_LEFT_THUMB_UP", "GAMEPAD_LEFT_THUMB_RIGHT", "GAMEPAD_LEFT_THUMB_DOWN", "GAMEPAD_LEFT_THUMB_LEFT")),
+                presetElement("D_PAD", 0.24f, 0.84f, 0.85f, listOf("GAMEPAD_DPAD_UP", "GAMEPAD_DPAD_RIGHT", "GAMEPAD_DPAD_DOWN", "GAMEPAD_DPAD_LEFT")),
+                presetElement("BUTTON", 0.88f, 0.50f, 0.8f, listOf("GAMEPAD_BUTTON_Y", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.88f, 0.74f, 0.8f, listOf("GAMEPAD_BUTTON_A", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.82f, 0.62f, 0.8f, listOf("GAMEPAD_BUTTON_X", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.94f, 0.62f, 0.8f, listOf("GAMEPAD_BUTTON_B", "NONE", "NONE", "NONE")),
+                presetElement("STICK", 0.74f, 0.84f, 0.85f, listOf("GAMEPAD_RIGHT_THUMB_UP", "GAMEPAD_RIGHT_THUMB_RIGHT", "GAMEPAD_RIGHT_THUMB_DOWN", "GAMEPAD_RIGHT_THUMB_LEFT")),
+                presetElement("BUTTON", 0.08f, 0.30f, 0.7f, listOf("GAMEPAD_BUTTON_L1", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.08f, 0.15f, 0.7f, listOf("GAMEPAD_BUTTON_L2", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.92f, 0.30f, 0.7f, listOf("GAMEPAD_BUTTON_R1", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.92f, 0.15f, 0.7f, listOf("GAMEPAD_BUTTON_R2", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.45f, 0.92f, 0.55f, listOf("GAMEPAD_BUTTON_SELECT", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.55f, 0.92f, 0.55f, listOf("GAMEPAD_BUTTON_START", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.36f, 0.92f, 0.55f, listOf("GAMEPAD_BUTTON_L3", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.64f, 0.92f, 0.55f, listOf("GAMEPAD_BUTTON_R3", "NONE", "NONE", "NONE")),
+            )
+            return preset(id, name, elements)
+        }
+
         fun splitControllerPreset(id: Int = 0, name: String = "Split-Controller"): ControlsDocument {
-            var document = create(id, name)
-            fun add(type: String, x: Float, y: Float, scale: Float, bindings: List<String>) {
-                document = document.addElement(type, x, y)
-                document = document.updateElement(document.elements.lastIndex) {
-                    it.update(scale = scale, bindings = bindings)
-                }
+            val elements = listOf(
+                presetElement("D_PAD", 0.12f, 0.55f, 0.9f, listOf("GAMEPAD_DPAD_UP", "GAMEPAD_DPAD_RIGHT", "GAMEPAD_DPAD_DOWN", "GAMEPAD_DPAD_LEFT")),
+                presetElement("STICK", 0.32f, 0.56f, 0.76f, listOf("GAMEPAD_LEFT_THUMB_UP", "GAMEPAD_LEFT_THUMB_RIGHT", "GAMEPAD_LEFT_THUMB_DOWN", "GAMEPAD_LEFT_THUMB_LEFT")),
+                presetElement("STICK", 0.68f, 0.56f, 0.76f, listOf("GAMEPAD_RIGHT_THUMB_UP", "GAMEPAD_RIGHT_THUMB_RIGHT", "GAMEPAD_RIGHT_THUMB_DOWN", "GAMEPAD_RIGHT_THUMB_LEFT")),
+                presetElement("BUTTON", 0.83f, 0.40f, 0.62f, listOf("GAMEPAD_BUTTON_Y", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.90f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_B", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.76f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_X", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.83f, 0.70f, 0.62f, listOf("GAMEPAD_BUTTON_A", "NONE", "NONE", "NONE")),
+                presetElement("BUTTON", 0.14f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L1", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.29f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L2", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.71f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R1", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.86f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R2", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.46f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_SELECT", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+                presetElement("BUTTON", 0.54f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_START", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+            )
+            return preset(id, name, elements)
+        }
+
+        internal fun oldControls3Elements(): List<ControlsElement> = listOf(
+            presetElement("D_PAD", 0.21568628f, 0.35555556f, 0.85f, listOf("GAMEPAD_DPAD_UP", "GAMEPAD_DPAD_RIGHT", "GAMEPAD_DPAD_DOWN", "GAMEPAD_DPAD_LEFT")),
+            presetElement("BUTTON", 0.813317f, 0.73333335f, 1f, listOf("GAMEPAD_BUTTON_X", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.8721405f, 0.6f, 1f, listOf("GAMEPAD_BUTTON_Y", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.8721405f, 0.8666667f, 1f, listOf("GAMEPAD_BUTTON_A", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.93096405f, 0.73333335f, 1f, listOf("GAMEPAD_BUTTON_B", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.92156863f, 0.2888889f, 1f, listOf("GAMEPAD_BUTTON_R2", "NONE", "NONE", "NONE"), "RECT"),
+            presetElement("BUTTON", 0.92156863f, 0.42222223f, 1f, listOf("GAMEPAD_BUTTON_R1", "NONE", "NONE", "NONE"), "RECT"),
+            presetElement("BUTTON", 0.078431375f, 0.42222223f, 1f, listOf("GAMEPAD_BUTTON_L1", "NONE", "NONE", "NONE"), "RECT"),
+            presetElement("BUTTON", 0.078431375f, 0.2888889f, 1f, listOf("GAMEPAD_BUTTON_L2", "NONE", "NONE", "NONE"), "RECT"),
+            presetElement("BUTTON", 0.5388072f, 0.9111111f, 0.85f, listOf("GAMEPAD_BUTTON_START", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+            presetElement("BUTTON", 0.46078432f, 0.9111111f, 0.85f, listOf("GAMEPAD_BUTTON_SELECT", "NONE", "NONE", "NONE"), "ROUND_RECT"),
+            presetElement("STICK", 0.10784314f, 0.73333335f, 1f, listOf("GAMEPAD_LEFT_THUMB_UP", "GAMEPAD_LEFT_THUMB_RIGHT", "GAMEPAD_LEFT_THUMB_DOWN", "GAMEPAD_LEFT_THUMB_LEFT")),
+            presetElement("TRACKPAD", 0.78431374f, 0.35555556f, 1f, listOf("GAMEPAD_RIGHT_THUMB_UP", "GAMEPAD_RIGHT_THUMB_RIGHT", "GAMEPAD_RIGHT_THUMB_DOWN", "GAMEPAD_RIGHT_THUMB_LEFT"), "CIRCLE"),
+            presetElement("BUTTON", 0.21568628f, 0.9111111f, 0.85f, listOf("GAMEPAD_BUTTON_L3", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.78431374f, 0.9111111f, 0.85f, listOf("GAMEPAD_BUTTON_R3", "NONE", "NONE", "NONE")),
+        )
+
+        internal fun oldSplitControllerElements(): List<ControlsElement> = listOf(
+            presetElement("D_PAD", 0.12f, 0.55f, 0.9f, listOf("GAMEPAD_DPAD_UP", "GAMEPAD_DPAD_RIGHT", "GAMEPAD_DPAD_DOWN", "GAMEPAD_DPAD_LEFT")),
+            presetElement("STICK", 0.32f, 0.56f, 0.76f, listOf("GAMEPAD_LEFT_THUMB_UP", "GAMEPAD_LEFT_THUMB_RIGHT", "GAMEPAD_LEFT_THUMB_DOWN", "GAMEPAD_LEFT_THUMB_LEFT")),
+            presetElement("STICK", 0.68f, 0.56f, 0.76f, listOf("GAMEPAD_RIGHT_THUMB_UP", "GAMEPAD_RIGHT_THUMB_RIGHT", "GAMEPAD_RIGHT_THUMB_DOWN", "GAMEPAD_RIGHT_THUMB_LEFT")),
+            presetElement("BUTTON", 0.83f, 0.43f, 0.62f, listOf("GAMEPAD_BUTTON_X", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.91f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_B", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.75f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_A", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.83f, 0.67f, 0.62f, listOf("GAMEPAD_BUTTON_Y", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.14f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L1", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.29f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L2", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.71f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R1", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.86f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R2", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.46f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_SELECT", "NONE", "NONE", "NONE")),
+            presetElement("BUTTON", 0.54f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_START", "NONE", "NONE", "NONE")),
+        )
+
+        private fun elementsMatch(actual: List<ControlsElement>, expected: List<ControlsElement>): Boolean {
+            return actual.size == expected.size && actual.indices.all { index ->
+                val left = actual[index]
+                val right = expected[index]
+                left.type == right.type && left.bindings == right.bindings &&
+                    kotlin.math.abs(left.x - right.x) <= 1e-4f &&
+                    kotlin.math.abs(left.y - right.y) <= 1e-4f &&
+                    kotlin.math.abs(left.scale - right.scale) <= 1e-4f
             }
-            add("D_PAD", 0.12f, 0.55f, 0.9f, listOf("GAMEPAD_DPAD_UP", "GAMEPAD_DPAD_RIGHT", "GAMEPAD_DPAD_DOWN", "GAMEPAD_DPAD_LEFT"))
-            add("STICK", 0.32f, 0.56f, 0.76f, listOf("GAMEPAD_LEFT_THUMB_UP", "GAMEPAD_LEFT_THUMB_RIGHT", "GAMEPAD_LEFT_THUMB_DOWN", "GAMEPAD_LEFT_THUMB_LEFT"))
-            add("STICK", 0.68f, 0.56f, 0.76f, listOf("GAMEPAD_RIGHT_THUMB_UP", "GAMEPAD_RIGHT_THUMB_RIGHT", "GAMEPAD_RIGHT_THUMB_DOWN", "GAMEPAD_RIGHT_THUMB_LEFT"))
-            add("BUTTON", 0.83f, 0.43f, 0.62f, listOf("GAMEPAD_BUTTON_X", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.91f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_B", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.75f, 0.55f, 0.62f, listOf("GAMEPAD_BUTTON_A", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.83f, 0.67f, 0.62f, listOf("GAMEPAD_BUTTON_Y", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.14f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L1", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.29f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_L2", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.71f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R1", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.86f, 0.18f, 0.5f, listOf("GAMEPAD_BUTTON_R2", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.46f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_SELECT", "NONE", "NONE", "NONE"))
-            add("BUTTON", 0.54f, 0.18f, 0.42f, listOf("GAMEPAD_BUTTON_START", "NONE", "NONE", "NONE"))
-            return document
         }
 
         fun snap(x: Float, y: Float, viewWidthPx: Int, viewHeightPx: Int): NormalizedPosition {

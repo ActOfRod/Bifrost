@@ -2,6 +2,7 @@ package com.actofrod.bifrost
 
 import java.io.File
 import java.util.Locale
+import com.winlator.winhandler.GamepadHandler
 
 private const val DXVK = "dxvk"
 private const val VKD3D = "vkd3d"
@@ -24,6 +25,19 @@ internal fun dxwrapperFor(apis: List<String>): String {
 internal fun containerDrives(defaultDrives: String, gameDir: String): String {
     require(':' !in gameDir) { "Game path cannot contain ':' in Winlator drive mappings" }
     return "${defaultDrives}G:$gameDir"
+}
+
+internal fun dinputMapperType(api: ControllerApi, imports: Set<String>): Int {
+    val normalizedImports = imports.map { it.lowercase(Locale.ROOT) }
+    return when (api) {
+        ControllerApi.XINPUT -> GamepadHandler.DINPUT_MAPPER_TYPE_XINPUT.toInt()
+        ControllerApi.DIRECTINPUT -> GamepadHandler.DINPUT_MAPPER_TYPE_STANDARD.toInt()
+        ControllerApi.AUTO -> if (
+            normalizedImports.any { it == "dinput.dll" || it == "dinput8.dll" } &&
+            normalizedImports.none { it.startsWith("xinput") }
+        ) GamepadHandler.DINPUT_MAPPER_TYPE_STANDARD.toInt()
+        else GamepadHandler.DINPUT_MAPPER_TYPE_XINPUT.toInt()
+    }
 }
 
 internal fun resolveGameDirectory(filesDirectory: File, gameDir: String): File {

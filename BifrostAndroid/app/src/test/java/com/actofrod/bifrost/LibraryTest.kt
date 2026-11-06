@@ -87,6 +87,7 @@ class LibraryTest {
             assertEquals(null, entry.systemId)
             assertEquals(0, entry.playCount)
             assertEquals(ControllerMode.OVERLAY, entry.controllerMode)
+            assertEquals(ControllerApi.AUTO, entry.controllerApi)
         } finally {
             temp.deleteRecursively()
         }
