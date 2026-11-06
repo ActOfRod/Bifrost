@@ -1487,6 +1487,25 @@ class MainActivity : ComponentActivity() {
             .apply()
     }
 
+    internal fun shareControllerLog() {
+        val logFile = getExternalFilesDir(null)?.resolve("logs/gamepad.log")
+        if (logFile == null || !logFile.isFile) {
+            Toast.makeText(this, "No controller log yet. Play a game first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        try {
+            val logUri = FileProvider.getUriForFile(this, "com.actofrod.FileProvider", logFile)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, logUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Share controller log"))
+        } catch (error: Exception) {
+            Toast.makeText(this, error.message ?: "Could not share controller log", Toast.LENGTH_LONG).show()
+        }
+    }
+
     internal fun checkForUpdates() {
         if (updateStatus == UpdateStatus.Checking || updateStatus is UpdateStatus.Downloading) return
         updateStatus = UpdateStatus.Checking

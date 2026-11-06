@@ -1775,11 +1775,21 @@ private fun AboutSettings(activity: MainActivity, modifier: Modifier) {
     ) {
         Text("Bifrost ${com.winlator.BuildConfig.VERSION_NAME}", color = Color.White)
         Text("A game hub for native Android and Windows PC games.", color = HubMuted)
-        Button(
-            onClick = activity::checkForUpdates,
-            enabled = activity.updateStatus != UpdateStatus.Checking && activity.updateStatus !is UpdateStatus.Downloading,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(if (activity.updateStatus == UpdateStatus.Checking) "Checking…" else "Check for updates")
+            Button(
+                modifier = Modifier.weight(1f),
+                onClick = activity::checkForUpdates,
+                enabled = activity.updateStatus != UpdateStatus.Checking && activity.updateStatus !is UpdateStatus.Downloading,
+            ) {
+                Text(if (activity.updateStatus == UpdateStatus.Checking) "Checking…" else "Check for updates")
+            }
+            TextButton(onClick = activity::shareControllerLog) {
+                Text("Share controller log", maxLines = 1)
+            }
         }
         when (val status = activity.updateStatus) {
             UpdateStatus.Idle -> Unit
