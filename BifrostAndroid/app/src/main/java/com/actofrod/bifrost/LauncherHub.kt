@@ -1865,6 +1865,25 @@ private fun ControlsSettings(activity: MainActivity, modifier: Modifier) {
             color = HubMuted,
             fontSize = 12.sp,
         )
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF111824))
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Record controller trace", color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Logs the game's joystick requests to Wine. May slow the game; turn off after testing.",
+                    color = HubMuted,
+                    fontSize = 11.sp,
+                )
+            }
+            Switch(
+                checked = activity.recordControllerTrace,
+                onCheckedChange = activity::updateControllerTrace,
+            )
+        }
     }
 }
 

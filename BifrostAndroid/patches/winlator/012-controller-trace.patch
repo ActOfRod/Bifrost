@@ -1,0 +1,166 @@
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -56,0 +57 @@
++import com.winlator.core.Callback;
+@@ -57,0 +59 @@
++import com.winlator.core.ControllerTrace;
+@@ -110,0 +113 @@
++import java.io.BufferedWriter;
+@@ -111,0 +115,4 @@
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.OutputStreamWriter;
++import java.nio.charset.StandardCharsets;
+@@ -154,0 +162,6 @@
++    private final Object wineInputTraceLock = new Object();
++    private BufferedWriter wineInputTraceWriter;
++    private Callback<String> wineInputTraceCallback;
++    private int wineInputTraceLineCount;
++    private boolean wineInputTraceCapped;
++    private boolean wineInputTraceFinished;
+@@ -375,0 +389,2 @@
++        finishWineInputTrace();
++        closeWineInputTrace();
+@@ -402,0 +418,5 @@
++            case R.id.menu_item_test_controller:
++                drawerLayout.closeDrawers();
++                winHandler.exec("control", "joy.cpl");
++                winHandler.gamepadHandler.logDiagnosticEvent("TEST_CONTROLLER launched");
++                break;
+@@ -462,0 +483 @@
++        finishWineInputTrace();
+@@ -590 +610,0 @@
+-        guestProgramLauncherComponent.setEnvVars(envVars);
+@@ -601,0 +622,5 @@
++        boolean controllerTraceEnabled = getIntent().getBooleanExtra("bifrost_controller_trace", false);
++        if (controllerTraceEnabled) {
++            envVars.put("WINEDEBUG", ControllerTrace.composeWineDebug(envVars.get("WINEDEBUG")));
++        }
++        guestProgramLauncherComponent.setEnvVars(envVars);
+@@ -622,0 +648 @@
++            if (controllerTraceEnabled) startWineInputTrace(externalFilesDir, executableName);
+@@ -654,0 +681,80 @@
++    }
++
++    private void startWineInputTrace(File externalFilesDir, String executableName) {
++        File logsDirectory = new File(externalFilesDir, "logs");
++        if (!logsDirectory.isDirectory() && !logsDirectory.mkdirs() && !logsDirectory.isDirectory()) return;
++        synchronized (wineInputTraceLock) {
++            wineInputTraceLineCount = 0;
++            wineInputTraceCapped = false;
++            wineInputTraceFinished = false;
++            try {
++                wineInputTraceWriter = new BufferedWriter(new OutputStreamWriter(
++                    new FileOutputStream(new File(logsDirectory, "wine-input.log"), false),
++                    StandardCharsets.UTF_8));
++                wineInputTraceWriter.write("TRACE_START timestamp=" + System.currentTimeMillis() +
++                    " exe=\"" + executableName + "\"");
++                wineInputTraceWriter.newLine();
++                wineInputTraceWriter.flush();
++            }
++            catch (IOException ignored) {
++                wineInputTraceWriter = null;
++                return;
++            }
++        }
++        wineInputTraceCallback = line -> appendWineInputTrace(line);
++        ProcessHelper.addDebugCallback(wineInputTraceCallback);
++    }
++
++    private void appendWineInputTrace(String line) {
++        if (!ControllerTrace.shouldLogLine(line)) return;
++        synchronized (wineInputTraceLock) {
++            if (wineInputTraceWriter == null || wineInputTraceFinished || wineInputTraceCapped) return;
++            try {
++                if (wineInputTraceLineCount >= 20000) {
++                    wineInputTraceWriter.write("TRACE_CAPPED");
++                    wineInputTraceWriter.newLine();
++                    wineInputTraceWriter.flush();
++                    wineInputTraceCapped = true;
++                    return;
++                }
++                wineInputTraceWriter.write(line);
++                wineInputTraceWriter.newLine();
++                wineInputTraceLineCount++;
++                if (wineInputTraceLineCount == 20000) {
++                    wineInputTraceWriter.write("TRACE_CAPPED");
++                    wineInputTraceWriter.newLine();
++                    wineInputTraceWriter.flush();
++                    wineInputTraceCapped = true;
++                }
++            }
++            catch (IOException ignored) {
++                wineInputTraceFinished = true;
++            }
++        }
++    }
++
++    private void finishWineInputTrace() {
++        synchronized (wineInputTraceLock) {
++            wineInputTraceFinished = true;
++            if (wineInputTraceWriter == null) return;
++            try {
++                wineInputTraceWriter.flush();
++            }
++            catch (IOException ignored) {}
++        }
++    }
++
++    private void closeWineInputTrace() {
++        Callback<String> callback = wineInputTraceCallback;
++        wineInputTraceCallback = null;
++        if (callback != null) ProcessHelper.removeDebugCallback(callback);
++        synchronized (wineInputTraceLock) {
++            wineInputTraceFinished = true;
++            if (wineInputTraceWriter == null) return;
++            try {
++                wineInputTraceWriter.flush();
++                wineInputTraceWriter.close();
++            }
++            catch (IOException ignored) {}
++            wineInputTraceWriter = null;
++        }
+--- /dev/null
++++ b/java/com/winlator/core/ControllerTrace.java
+@@ -0,0 +1,25 @@
++package com.winlator.core;
++
++import java.util.Locale;
++
++public final class ControllerTrace {
++    private static final String WINE_DEBUG_CHANNELS = "+dinput,+hid,+xinput";
++
++    private ControllerTrace() {}
++
++    public static String composeWineDebug(String current) {
++        String value = current == null ? "" : current.trim();
++        if (value.isEmpty() || "-all".equals(value)) return WINE_DEBUG_CHANNELS;
++        return value + (value.endsWith(",") ? "" : ",") + WINE_DEBUG_CHANNELS;
++    }
++
++    public static boolean shouldLogLine(String line) {
++        if (line == null) return false;
++        String lowerCaseLine = line.toLowerCase(Locale.ROOT);
++        return lowerCaseLine.contains("dinput") ||
++            lowerCaseLine.contains("hid") ||
++            lowerCaseLine.contains("xinput") ||
++            lowerCaseLine.contains("err:") ||
++            lowerCaseLine.contains("fixme:");
++    }
++}
+--- a/java/com/winlator/winhandler/GamepadHandler.java
++++ b/java/com/winlator/winhandler/GamepadHandler.java
+@@ -209,0 +210,5 @@
++    public void logDiagnosticEvent(String line) {
++        Log.i("BifrostGamepad", line);
++        appendDiagnosticLog(line);
++    }
++
+--- a/res/menu/xserver_menu.xml
++++ b/res/menu/xserver_menu.xml
+@@ -6,0 +7 @@
++        <item android:icon="@drawable/icon_input_controls" android:id="@+id/menu_item_test_controller" android:title="@string/test_controller" />
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -10,0 +11 @@
++    <string name="test_controller">Test controller</string>
