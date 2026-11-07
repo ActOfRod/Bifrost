@@ -161,13 +161,15 @@
 +        catch (Exception ignored) {}
 +    }
 +
-@@ -226,0 +266,54 @@
+@@ -226,0 +266,56 @@
 +    }
 +
-+    private void writeGamepadReadyFlag(boolean slot0Connected) {
++    private void writeGamepadReadyFlag(boolean slot0Connected, short vendorId, short productId) {
 +        if (!gamepadReadyFlagScheduled.compareAndSet(false, true)) return;
 +        File readyFile = gamepadReadyFile;
-+        String value = slot0Connected ? "1" : "0";
++        String value = slot0Connected
++            ? String.format(Locale.ROOT, "1 %04x %04x", vendorId & 0xffff, productId & 0xffff)
++            : "0";
 +        if (readyFile == null) {
 +            logDiagnosticEvent("GAMEPAD_READY_FLAG error=flag_path_unavailable t=" +
 +                getSessionElapsedMillis());
@@ -216,19 +218,39 @@
 +            }
 +        }
 +        catch (Exception ignored) {}
-@@ -428,0 +522 @@
+@@ -428,0 +524,3 @@
 +            boolean slot0Connected = false;
-@@ -442,0 +537 @@
-+                    if (i == 0) slot0Connected = true;
-@@ -474 +569,4 @@
++            short slot0VendorId = 0;
++            short slot0ProductId = 0;
+@@ -447,0 +546,2 @@
++                    short vendorId;
++                    short productId;
+@@ -449,2 +549,2 @@
+-                        buffer.putShort(gamepadModelIds[0]);
+-                        buffer.putShort(gamepadModelIds[1]);
++                        vendorId = gamepadModelIds[0];
++                        productId = gamepadModelIds[1];
+@@ -453,2 +553,9 @@
+-                        buffer.putShort(gamepadSlots[i].getVendorId());
+-                        buffer.putShort(gamepadSlots[i].getProductId());
++                        vendorId = gamepadSlots[i].getVendorId();
++                        productId = gamepadSlots[i].getProductId();
++                    }
++                    buffer.putShort(vendorId);
++                    buffer.putShort(productId);
++                    if (i == 0) {
++                        slot0Connected = true;
++                        slot0VendorId = vendorId;
++                        slot0ProductId = productId;
+@@ -474 +581,4 @@
 -            if (winHandler.sendPacket(port) && connected) logGamepadReplySent(port);
 +            if (winHandler.sendPacket(port)) {
 +                logGamepadReplySent(port, connected);
-+                writeGamepadReadyFlag(slot0Connected);
++                writeGamepadReadyFlag(slot0Connected, slot0VendorId, slot0ProductId);
 +            }
-@@ -478 +576 @@
+@@ -478 +588 @@
 -    private void logGamepadReplySent(int port) {
 +    private void logGamepadReplySent(int port, boolean connected) {
-@@ -483 +581 @@
+@@ -483 +593 @@
 -            getSessionElapsedMillis() + " connected=true");
 +            getSessionElapsedMillis() + " connected=" + connected);

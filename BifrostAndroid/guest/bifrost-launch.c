@@ -17,6 +17,20 @@ static const wchar_t *READY_PATH = L"C:\\windows\\bifrost\\gamepad-ready";
 static HANDLE log_file = INVALID_HANDLE_VALUE;
 static ULONGLONG started_at;
 
+typedef struct {
+    wchar_t value;
+    BOOL has_product_ids;
+    WORD vendor_id;
+    WORD product_id;
+} READY_FLAG;
+
+typedef struct {
+    DWORD count;
+    BOOL match_product_id;
+    WORD vendor_id;
+    WORD product_id;
+} GAMEPAD_ENUM_CONTEXT;
+
 static void log_event(const wchar_t *format, ...)
 {
     if (log_file == INVALID_HANDLE_VALUE) return;
@@ -88,41 +102,96 @@ static BOOL get_first_token(const wchar_t *command, wchar_t *token, size_t token
     return TRUE;
 }
 
-static BOOL read_ready_flag(wchar_t *value)
+static BOOL is_flag_whitespace(BYTE value)
+{
+    return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+static int hex_digit(BYTE value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static BOOL parse_hex_word(const BYTE *contents, DWORD length, DWORD *position, WORD *value)
+{
+    if (*position > length || length - *position < 4) return FALSE;
+    WORD parsed = 0;
+    for (DWORD i = 0; i < 4; i++) {
+        int digit = hex_digit(contents[*position + i]);
+        if (digit < 0) return FALSE;
+        parsed = (WORD)((parsed << 4) | digit);
+    }
+    *position += 4;
+    *value = parsed;
+    return TRUE;
+}
+
+static BOOL parse_ready_product_ids(const BYTE *contents, DWORD length, WORD *vendor_id,
+    WORD *product_id)
+{
+    DWORD position = 1;
+    if (position >= length || !is_flag_whitespace(contents[position])) return FALSE;
+    while (position < length && is_flag_whitespace(contents[position])) position++;
+    if (!parse_hex_word(contents, length, &position, vendor_id)) return FALSE;
+    if (position >= length || !is_flag_whitespace(contents[position])) return FALSE;
+    while (position < length && is_flag_whitespace(contents[position])) position++;
+    if (!parse_hex_word(contents, length, &position, product_id)) return FALSE;
+    while (position < length && is_flag_whitespace(contents[position])) position++;
+    return position == length;
+}
+
+static BOOL read_ready_flag(READY_FLAG *flag)
 {
     HANDLE file = CreateFileW(READY_PATH, GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return FALSE;
 
-    BYTE byte = 0;
+    BYTE contents[32];
     DWORD bytes_read = 0;
-    BOOL read_ok = ReadFile(file, &byte, 1, &bytes_read, NULL);
+    BOOL read_ok = ReadFile(file, contents, sizeof(contents), &bytes_read, NULL);
     CloseHandle(file);
-    if (!read_ok || bytes_read != 1 || (byte != '0' && byte != '1')) return FALSE;
-    *value = (wchar_t)byte;
+    if (!read_ok || bytes_read == 0 || (contents[0] != '0' && contents[0] != '1')) return FALSE;
+
+    ZeroMemory(flag, sizeof(*flag));
+    flag->value = (wchar_t)contents[0];
+    if (flag->value == L'1') {
+        flag->has_product_ids = parse_ready_product_ids(contents, bytes_read,
+            &flag->vendor_id, &flag->product_id);
+    }
     return TRUE;
 }
 
 static BOOL CALLBACK count_gamepad(const DIDEVICEINSTANCEW *device, void *context)
 {
-    (void)device;
-    (*(DWORD *)context)++;
+    GAMEPAD_ENUM_CONTEXT *gamepads = (GAMEPAD_ENUM_CONTEXT *)context;
+    if (!gamepads->match_product_id ||
+        device->guidProduct.Data1 == (DWORD)MAKELONG(gamepads->vendor_id, gamepads->product_id)) {
+        gamepads->count++;
+    }
     return DIENUM_CONTINUE;
 }
 
-static DWORD wait_for_gamepad_device(void)
+static DWORD wait_for_gamepad_device(const READY_FLAG *flag)
 {
     LPDIRECTINPUT8W input = NULL;
-    DWORD device_count = 0;
+    GAMEPAD_ENUM_CONTEXT gamepads;
+    ZeroMemory(&gamepads, sizeof(gamepads));
+    gamepads.match_product_id = flag->has_product_ids;
+    gamepads.vendor_id = flag->vendor_id;
+    gamepads.product_id = flag->product_id;
+
     ULONGLONG deadline = GetTickCount64() + 3000;
     if (SUCCEEDED(DirectInput8Create(GetModuleHandleW(NULL), DIRECTINPUT_VERSION,
         &IID_IDirectInput8W, (void **)&input, NULL))) {
         do {
-            device_count = 0;
             input->lpVtbl->EnumDevices(input, DI8DEVCLASS_GAMECTRL, count_gamepad,
-                &device_count, DIEDFL_ATTACHEDONLY);
-            if (device_count > 0 || GetTickCount64() >= deadline) break;
+                &gamepads, DIEDFL_ATTACHEDONLY);
+            if (gamepads.count > 0 || GetTickCount64() >= deadline) break;
+            gamepads.count = 0;
             Sleep(100);
         } while (TRUE);
         input->lpVtbl->Release(input);
@@ -130,7 +199,7 @@ static DWORD wait_for_gamepad_device(void)
     else {
         while (GetTickCount64() < deadline) Sleep(100);
     }
-    return device_count;
+    return gamepads.count;
 }
 
 static BOOL resolve_application_path(const wchar_t *token, wchar_t *path, size_t path_capacity)
@@ -180,21 +249,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR command_line, 
     const wchar_t *command = skip_first_argument(GetCommandLineW());
     log_event(L"START cmd=%ls", command);
 
-    wchar_t ready_value = 0;
+    READY_FLAG ready_flag;
+    ZeroMemory(&ready_flag, sizeof(ready_flag));
     ULONGLONG ready_deadline = started_at + 8000;
     BOOL ready_received = FALSE;
     while (GetTickCount64() < ready_deadline) {
-        if (read_ready_flag(&ready_value)) {
+        if (read_ready_flag(&ready_flag)) {
             ready_received = TRUE;
             break;
         }
         Sleep(50);
     }
-    if (ready_received) log_event(L"READY value=%lc", ready_value);
+    if (ready_received && ready_flag.value == L'1' && ready_flag.has_product_ids) {
+        log_event(L"READY value=1 vid=%04x pid=%04x",
+            (unsigned int)ready_flag.vendor_id, (unsigned int)ready_flag.product_id);
+    }
+    else if (ready_received) log_event(L"READY value=%lc", ready_flag.value);
     else log_event(L"READY timeout");
 
-    DWORD device_count = ready_received && ready_value == L'1'
-        ? wait_for_gamepad_device() : 0;
+    DWORD device_count = ready_received && ready_flag.value == L'1'
+        ? wait_for_gamepad_device(&ready_flag) : 0;
     log_event(L"DINPUT devices=%lu", (unsigned long)device_count);
 
     wchar_t token[MAX_COMMAND_CHARS];
