@@ -1,0 +1,234 @@
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -13,0 +14 @@
++import android.util.Log;
+@@ -63,0 +65 @@
++import com.winlator.core.GuestLaunchCommand;
+@@ -114,0 +117 @@
++import java.io.FileInputStream;
+@@ -116,0 +120 @@
++import java.io.InputStream;
+@@ -118,0 +123,2 @@
++import java.nio.file.Files;
++import java.nio.file.StandardCopyOption;
+@@ -167,0 +174 @@
++    private boolean guestLaunchHelperAvailable;
+@@ -547,0 +555,72 @@
++    private static int readChunk(InputStream input, byte[] buffer) throws IOException {
++        int offset = 0;
++        while (offset < buffer.length) {
++            int bytesRead = input.read(buffer, offset, buffer.length - offset);
++            if (bytesRead < 0) break;
++            if (bytesRead == 0) {
++                int nextByte = input.read();
++                if (nextByte < 0) break;
++                buffer[offset++] = (byte)nextByte;
++            }
++            else offset += bytesRead;
++        }
++        return offset == 0 ? -1 : offset;
++    }
++
++    private boolean assetMatchesFile(File file, String assetName) throws IOException {
++        if (!file.isFile()) return false;
++        try (InputStream asset = getAssets().open(assetName);
++             FileInputStream installed = new FileInputStream(file)) {
++            byte[] assetBuffer = new byte[8192];
++            byte[] installedBuffer = new byte[8192];
++            while (true) {
++                int assetBytes = readChunk(asset, assetBuffer);
++                int installedBytes = readChunk(installed, installedBuffer);
++                if (assetBytes != installedBytes) return false;
++                if (assetBytes == -1) return true;
++                for (int i = 0; i < assetBytes; i++) {
++                    if (assetBuffer[i] != installedBuffer[i]) return false;
++                }
++            }
++        }
++    }
++
++    private boolean installGuestLaunchHelper(File windowsDir) {
++        File helperFile = new File(windowsDir, "bifrost-launch.exe");
++        File tempFile = new File(windowsDir, "bifrost-launch.exe.tmp");
++        try {
++            if (assetMatchesFile(helperFile, "bifrost-launch.exe")) return true;
++            try (InputStream input = getAssets().open("bifrost-launch.exe");
++                 FileOutputStream output = new FileOutputStream(tempFile, false)) {
++                byte[] buffer = new byte[8192];
++                int bytesRead;
++                while ((bytesRead = input.read(buffer)) != -1) output.write(buffer, 0, bytesRead);
++                output.getFD().sync();
++            }
++            Files.move(tempFile.toPath(), helperFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
++            return helperFile.isFile() && helperFile.length() > 0;
++        }
++        catch (Exception e) {
++            tempFile.delete();
++            Log.e("BifrostLaunch", "Unable to install guest launch helper", e);
++            return false;
++        }
++    }
++
++    private static boolean deleteIfExists(File file) {
++        return !file.exists() || file.delete();
++    }
++
++    private boolean prepareGuestLaunchFiles() {
++        File windowsDir = new File(rootFS.getRootDir(), RootFS.WINEPREFIX + "/drive_c/windows");
++        File bifrostDir = new File(windowsDir, "bifrost");
++        if (!windowsDir.isDirectory() && !windowsDir.mkdirs() && !windowsDir.isDirectory()) return false;
++        if (!bifrostDir.isDirectory() && !bifrostDir.mkdirs() && !bifrostDir.isDirectory()) return false;
++
++        File readyFile = new File(bifrostDir, "gamepad-ready");
++        boolean readyFileCleared = deleteIfExists(readyFile);
++        boolean launchLogCleared = deleteIfExists(new File(bifrostDir, "launch.log"));
++        winHandler.gamepadHandler.setGamepadReadyFile(readyFile);
++        return readyFileCleared && launchLogCleared && installGuestLaunchHelper(windowsDir);
++    }
++
+@@ -548,0 +628 @@
++        guestLaunchHelperAvailable = prepareGuestLaunchFiles();
+@@ -1272 +1352 @@
+-            cmdArgs = "/dir "+StringUtils.escapeDOSPath(execDir)+" \""+filename+"\""+execArgs;
++            cmdArgs = GuestLaunchCommand.build(execDir, filename, execArgs, guestLaunchHelperAvailable);
+--- a/java/com/winlator/core/GuestLaunchCommand.java
++++ b/java/com/winlator/core/GuestLaunchCommand.java
+@@ -0,0 +1,16 @@
++package com.winlator.core;
++
++import java.util.Locale;
++
++public final class GuestLaunchCommand {
++    private GuestLaunchCommand() {}
++
++    public static String build(String execDir, String filename, String execArgs, boolean useHelper) {
++        boolean wrapWithHelper = useHelper && filename.toLowerCase(Locale.ENGLISH).endsWith(".exe");
++        String executable = wrapWithHelper
++            ? "\"C:\\windows\\bifrost-launch.exe\" \"" + filename + "\""
++            : "\"" + filename + "\"";
++        return "/dir " + StringUtils.escapeDOSPath(execDir) + " " + executable +
++            (execArgs == null ? "" : execArgs);
++    }
++}
+--- a/java/com/winlator/winhandler/GamepadHandler.java
++++ b/java/com/winlator/winhandler/GamepadHandler.java
+@@ -24,0 +25 @@
++import java.io.BufferedReader;
+@@ -25,0 +27 @@
++import java.io.FileInputStream;
+@@ -26,0 +29,2 @@
++import java.io.IOException;
++import java.io.InputStreamReader;
+@@ -28,0 +33,2 @@
++import java.nio.file.Files;
++import java.nio.file.StandardCopyOption;
+@@ -56,0 +63 @@
++    private volatile File gamepadReadyFile;
+@@ -59,0 +67 @@
++    private final AtomicBoolean gamepadReadyFlagScheduled = new AtomicBoolean();
+@@ -128,0 +137,5 @@
++    public void setGamepadReadyFile(File file) {
++        gamepadReadyFile = file;
++        gamepadReadyFlagScheduled.set(false);
++    }
++
+@@ -131,0 +145 @@
++        gamepadReadyFlagScheduled.set(false);
+@@ -209,0 +224 @@
++        appendLaunchLog();
+@@ -223,0 +239,24 @@
++    private void appendLaunchLog() {
++        File readyFile = gamepadReadyFile;
++        File parent = readyFile != null ? readyFile.getParentFile() : null;
++        File gamepadLog = diagnosticLogFile;
++        if (parent == null || gamepadLog == null) return;
++        File launchLog = new File(parent, "launch.log");
++        if (!launchLog.isFile()) return;
++        try {
++            diagnosticLogWriter.execute(() -> {
++                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
++                         new FileInputStream(launchLog), StandardCharsets.UTF_8));
++                     FileOutputStream outputStream = new FileOutputStream(gamepadLog, true)) {
++                    String line;
++                    while ((line = reader.readLine()) != null) {
++                        outputStream.write(("LAUNCH " + line + System.lineSeparator())
++                            .getBytes(StandardCharsets.UTF_8));
++                    }
++                }
++                catch (Exception ignored) {}
++            });
++        }
++        catch (Exception ignored) {}
++    }
++
+@@ -226,0 +266,54 @@
++    }
++
++    private void writeGamepadReadyFlag(boolean slot0Connected) {
++        if (!gamepadReadyFlagScheduled.compareAndSet(false, true)) return;
++        File readyFile = gamepadReadyFile;
++        String value = slot0Connected ? "1" : "0";
++        if (readyFile == null) {
++            logDiagnosticEvent("GAMEPAD_READY_FLAG error=flag_path_unavailable t=" +
++                getSessionElapsedMillis());
++            return;
++        }
++
++        try {
++            diagnosticLogWriter.execute(() -> {
++                File parent = readyFile.getParentFile();
++                File tempFile = parent != null ? new File(parent, "gamepad-ready.tmp") : null;
++                try {
++                    if (parent == null || (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory())) {
++                        throw new IOException("flag_directory_unavailable");
++                    }
++                    try (FileOutputStream outputStream = new FileOutputStream(tempFile, false)) {
++                        outputStream.write(value.getBytes(StandardCharsets.US_ASCII));
++                        outputStream.getFD().sync();
++                    }
++                    Files.move(tempFile.toPath(), readyFile.toPath(),
++                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
++                    logGamepadReadyFlag("GAMEPAD_READY_FLAG value=" + value + " t=" +
++                        getSessionElapsedMillis());
++                }
++                catch (Exception e) {
++                    if (tempFile != null) tempFile.delete();
++                    logGamepadReadyFlag("GAMEPAD_READY_FLAG error=" + e.getClass().getSimpleName() +
++                        " t=" + getSessionElapsedMillis());
++                }
++            });
++        }
++        catch (Exception e) {
++            logDiagnosticEvent("GAMEPAD_READY_FLAG error=" + e.getClass().getSimpleName() +
++                " t=" + getSessionElapsedMillis());
++        }
++    }
++
++    private void logGamepadReadyFlag(String line) {
++        Log.i("BifrostGamepad", line);
++        File file = diagnosticLogFile;
++        if (file == null) return;
++        try {
++            File parent = file.getParentFile();
++            if (parent != null && !parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) return;
++            try (FileOutputStream outputStream = new FileOutputStream(file, true)) {
++                outputStream.write((line + System.lineSeparator()).getBytes(StandardCharsets.UTF_8));
++            }
++        }
++        catch (Exception ignored) {}
+@@ -428,0 +522 @@
++            boolean slot0Connected = false;
+@@ -442,0 +537 @@
++                    if (i == 0) slot0Connected = true;
+@@ -474 +569,4 @@
+-            if (winHandler.sendPacket(port) && connected) logGamepadReplySent(port);
++            if (winHandler.sendPacket(port)) {
++                logGamepadReplySent(port, connected);
++                writeGamepadReadyFlag(slot0Connected);
++            }
+@@ -478 +576 @@
+-    private void logGamepadReplySent(int port) {
++    private void logGamepadReplySent(int port, boolean connected) {
+@@ -483 +581 @@
+-            getSessionElapsedMillis() + " connected=true");
++            getSessionElapsedMillis() + " connected=" + connected);

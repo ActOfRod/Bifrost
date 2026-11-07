@@ -297,6 +297,15 @@ def main():
             check=True,
         )
 
+    subprocess.run(
+        [
+            "bash",
+            str(android_dir / "scripts" / "build_guest_helper.sh"),
+            str(output / "assets" / "bifrost-launch.exe"),
+        ],
+        check=True,
+    )
+
     for archive in sorted((output / "assets").rglob("*.tzst")):
         rewrite_archive(archive, archive.with_suffix(archive.suffix + ".rewritten"))
         archive.with_suffix(archive.suffix + ".rewritten").replace(archive)
