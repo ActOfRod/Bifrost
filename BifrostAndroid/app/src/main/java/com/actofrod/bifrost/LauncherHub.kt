@@ -1264,7 +1264,7 @@ private fun EntryOptionsPanel(activity: MainActivity, entry: LibraryEntry) {
                                     }
                                 }
                                 OutlinedTextField(
-                                    value = entry.effectiveLaunchArgs(),
+                                    value = entry.launchArgs ?: (entry.engine ?: GameEngine.UNKNOWN).defaultLaunchArgs,
                                     onValueChange = { value ->
                                         activity.updateEntry(entry.id) { it.copy(launchArgs = value) }
                                     },
