@@ -104,6 +104,7 @@ import com.winlator.XServerDisplayActivity
 import com.winlator.container.Container
 import com.winlator.container.ContainerManager
 import com.winlator.container.DXWrappers
+import com.winlator.core.GPUHelper
 import com.winlator.inputcontrols.ControlsProfile
 import com.winlator.inputcontrols.InputControlsManager
 import java.io.File
@@ -1029,7 +1030,9 @@ class MainActivity : ComponentActivity() {
         folderAddInProgress = true
         lifecycleScope.launch {
             try {
-                val apis = withContext(Dispatchers.IO) { PeScan.detectApis(candidate.root, exe.path) }
+                val (apis, engine) = withContext(Dispatchers.IO) {
+                    PeScan.detectApis(candidate.root, exe.path) to detectEngine(candidate.root, exe.path)
+                }
                 val entry = LibraryEntry(
                     id = candidate.id,
                     kind = Kind.PC,
@@ -1038,6 +1041,7 @@ class MainActivity : ComponentActivity() {
                     exe = exe.path,
                     arch = exe.arch,
                     apis = apis,
+                    engine = engine,
                     addedAt = System.currentTimeMillis(),
                     systemId = targetSystemId,
                 )
@@ -1286,6 +1290,9 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+                val engine = withContext(Dispatchers.IO) {
+                    detectEngine(resolveGameDirectory(filesDir, imported.gameDir), imported.manifest.exe)
+                }
                 val entry = LibraryEntry(
                     id = id,
                     kind = Kind.PC,
@@ -1294,6 +1301,7 @@ class MainActivity : ComponentActivity() {
                     exe = imported.manifest.exe,
                     arch = imported.manifest.arch,
                     apis = imported.manifest.apis,
+                    engine = engine,
                     cover = imported.cover?.absolutePath,
                     addedAt = System.currentTimeMillis(),
                     systemId = targetSystemId,
@@ -1442,7 +1450,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun launchPcEntry(entry: LibraryEntry) {
         try {
-            val launchEntry = ensureControlsProfile(entry)
+            var launchEntry = ensureControlsProfile(entry)
             val gameDirPath = launchEntry.gameDir ?: throw IllegalArgumentException("Game files are missing")
             val gameDir = resolveGameDirectory(filesDir, gameDirPath)
             if (!gameDir.isDirectory) throw IllegalArgumentException("Imported game files are missing")
@@ -1452,6 +1460,11 @@ class MainActivity : ComponentActivity() {
             if (!executable.path.startsWith(gameDir.path + File.separator) || !executable.isFile) {
                 throw IllegalArgumentException("Game executable is missing or invalid")
             }
+            if (launchEntry.engine == null) {
+                launchEntry = launchEntry.copy(
+                    engine = withContext(Dispatchers.IO) { detectEngine(gameDir, exe) },
+                )
+            }
             val executableImports = withContext(Dispatchers.IO) {
                 runCatching { PeScan.parseImports(executable) }.getOrNull().orEmpty()
             }
@@ -1460,6 +1473,10 @@ class MainActivity : ComponentActivity() {
             val manager = ContainerManager(this)
             val existingContainer = launchEntry.containerId?.let(manager::getContainerById)
             val createdContainer = existingContainer == null
+            val graphicsDriver = graphicsDriverFor(
+                launchEntry.gpuDriver,
+                GPUHelper.getAdrenoModelId(this).toInt(),
+            )
             val container = if (existingContainer != null) {
                 existingContainer
             } else {
@@ -1479,8 +1496,13 @@ class MainActivity : ComponentActivity() {
                     put("name", launchEntry.title)
                     put("drives", drives)
                     put("dxwrapper", wrapper)
+                    put("graphicsDriver", graphicsDriver)
                 }
                 createContainer(manager, data)
+            }
+            if (container.getGraphicsDriver() != graphicsDriver) {
+                container.setGraphicsDriver(graphicsDriver)
+                container.saveData()
             }
 
             if (snapshot.entries.none { it.id == launchEntry.id }) {
@@ -1488,7 +1510,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             val next = snapshot.recordPlayAndUpdate(launchEntry.id, System.currentTimeMillis()) {
-                it.copy(containerId = container.id)
+                it.copy(containerId = container.id, engine = launchEntry.engine)
             }
             val saved = persist(next)
             if (!saved && createdContainer) {
@@ -1504,6 +1526,7 @@ class MainActivity : ComponentActivity() {
                 Intent(this, XServerDisplayActivity::class.java)
                     .putExtra("container_id", container.id)
                     .putExtra("exec_path", executable.absolutePath)
+                    .putExtra("exec_args", launchEntry.effectiveLaunchArgs())
                     .putExtra("controls_profile_id", launchEntry.controlsProfileId ?: 0)
                     .putExtra("dinput_mapper_type", mapperType)
                     .putExtra("controller_style", controllerStyle.id)

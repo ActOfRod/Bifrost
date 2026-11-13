@@ -1,11 +1,91 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assume
 import org.junit.Test
 
 class PcLaunchTest {
+    @Test
+    fun detectsGodotFromSparseExecutableTrailer() {
+        withTempRoot("bifrost-godot-tail") { root ->
+            val executable = File(root, "GodotGame.exe")
+            val expectedLength = 3L * 1024 * 1024 * 1024
+            var sparseFileSupported = false
+            RandomAccessFile(executable, "rw").use { file ->
+                try {
+                    file.setLength(expectedLength)
+                    file.seek(expectedLength - 4L)
+                    file.write("GDPC".toByteArray(Charsets.US_ASCII))
+                    sparseFileSupported = file.length() == expectedLength
+                } catch (_: IOException) {
+                    sparseFileSupported = false
+                }
+            }
+            Assume.assumeTrue("Sparse 3 GiB files are unavailable", sparseFileSupported)
+
+            assertEquals(GameEngine.GODOT, detectEngine(root, executable.name))
+        }
+    }
+
+    @Test
+    fun detectsGodotFromSiblingPackAndDotNetDataDirectory() {
+        withTempRoot("bifrost-godot-markers") { root ->
+            val packedExe = writeExecutable(root, "Packed/PackedGame.exe")
+            File(packedExe.parentFile, "PACKEDGAME.PCK").writeBytes(byteArrayOf())
+            assertEquals(GameEngine.GODOT, detectEngine(root, "Packed/PackedGame.exe"))
+
+            val dotnetExe = writeExecutable(root, "DotNet/DotNetGame.exe")
+            File(dotnetExe.parentFile, "data_game_WINDOWS_x86_64").mkdirs()
+            assertEquals(GameEngine.GODOT, detectEngine(root, "DotNet/DotNetGame.exe"))
+        }
+    }
+
+    @Test
+    fun detectsUnityFromPlayerDllOrDataDirectory() {
+        withTempRoot("bifrost-unity-markers") { root ->
+            val playerExe = writeExecutable(root, "Player/PlayerGame.exe")
+            File(playerExe.parentFile, "unityplayer.DLL").writeBytes(byteArrayOf())
+            assertEquals(GameEngine.UNITY, detectEngine(root, "Player/PlayerGame.exe"))
+
+            val dataExe = writeExecutable(root, "Data/DataGame.exe")
+            File(dataExe.parentFile, "DATAGAME_data").mkdirs()
+            assertEquals(GameEngine.UNITY, detectEngine(root, "Data/DataGame.exe"))
+        }
+    }
+
+    @Test
+    fun detectsUnrealFromShippingNameOrEngineBinariesDirectory() {
+        withTempRoot("bifrost-unreal-markers") { root ->
+            val shippingExe = writeExecutable(root, "Game-Win64-Shipping.EXE")
+            assertEquals(GameEngine.UNREAL, detectEngine(root, shippingExe.name))
+
+            writeExecutable(root, "UnrealGame.exe")
+            File(root, "Engine/Binaries").mkdirs()
+            assertEquals(GameEngine.UNREAL, detectEngine(root, "UnrealGame.exe"))
+        }
+    }
+
+    @Test
+    fun unknownEngineHasNoMarkers() {
+        withTempRoot("bifrost-unknown-engine") { root ->
+            writeExecutable(root, "Unknown.exe")
+
+            assertEquals(GameEngine.UNKNOWN, detectEngine(root, "Unknown.exe"))
+        }
+    }
+
+    @Test
+    fun selectsGraphicsDriverFromPreferenceAndAdrenoModel() {
+        assertEquals("turnip,gladio", graphicsDriverFor(GpuDriver.AUTO, 830))
+        assertEquals("vortek,gladio", graphicsDriverFor(GpuDriver.AUTO, 0))
+        assertEquals("turnip,gladio", graphicsDriverFor(GpuDriver.TURNIP, 0))
+        assertEquals("vortek,gladio", graphicsDriverFor(GpuDriver.VORTEK, 830))
+    }
+
     @Test
     fun selectsDinputMapperByControllerApiAndExecutableImports() {
         assertEquals(1, dinputMapperType(ControllerApi.XINPUT, setOf("dinput8.dll")))
@@ -226,4 +306,19 @@ class PcLaunchTest {
             temp.deleteRecursively()
         }
     }
+
+    private fun withTempRoot(prefix: String, block: (File) -> Unit) {
+        val root = Files.createTempDirectory(prefix).toFile()
+        try {
+            block(root)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    private fun writeExecutable(root: File, path: String): File =
+        File(root, path).apply {
+            parentFile?.mkdirs()
+            writeBytes(byteArrayOf(0, 0, 0, 0))
+        }
 }

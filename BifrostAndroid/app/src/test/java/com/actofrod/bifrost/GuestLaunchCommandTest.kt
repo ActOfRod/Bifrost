@@ -22,6 +22,14 @@ class GuestLaunchCommandTest {
     }
 
     @Test
+    fun wrapsExecutableAndAppendsGodotLaunchOptions() {
+        assertEquals(
+            "/dir C:\\\\Games \"C:\\windows\\bifrost-launch.exe\" \"GodotGame.exe\" --rendering-driver vulkan",
+            GuestLaunchCommand.build("C:\\Games", "GodotGame.exe", " --rendering-driver vulkan", true)
+        )
+    }
+
+    @Test
     fun escapesGameDirectoryWithSpaces() {
         assertEquals(
             "/dir C:\\\\Games\\\\The\\ Hobbit \"C:\\windows\\bifrost-launch.exe\" \"Meridian.exe\"",

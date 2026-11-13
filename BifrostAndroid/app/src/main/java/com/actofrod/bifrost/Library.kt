@@ -32,6 +32,25 @@ enum class ControllerMode { OVERLAY, SPLIT }
 enum class ControllerApi { AUTO, XINPUT, DIRECTINPUT }
 
 @Serializable
+enum class GameEngine {
+    UNKNOWN, GODOT, UNITY, UNREAL;
+
+    val defaultLaunchArgs: String
+        get() = if (this == GODOT) "--rendering-driver vulkan" else ""
+
+    val label: String
+        get() = when (this) {
+            GODOT -> "Godot"
+            UNITY -> "Unity"
+            UNREAL -> "Unreal Engine"
+            UNKNOWN -> "Unknown"
+        }
+}
+
+@Serializable
+enum class GpuDriver { AUTO, TURNIP, VORTEK }
+
+@Serializable
 data class LauncherSystem(
     val id: String,
     val name: String,
@@ -58,7 +77,13 @@ data class LibraryEntry(
     val playCount: Int = 0,
     val controllerMode: ControllerMode = ControllerMode.OVERLAY,
     val controllerApi: ControllerApi = ControllerApi.AUTO,
+    val engine: GameEngine? = null,
+    val launchArgs: String? = null,
+    val gpuDriver: GpuDriver = GpuDriver.AUTO,
 )
+
+internal fun LibraryEntry.effectiveLaunchArgs(): String =
+    (launchArgs ?: (engine ?: GameEngine.UNKNOWN).defaultLaunchArgs).trim()
 
 @Serializable
 data class LibrarySnapshot(
