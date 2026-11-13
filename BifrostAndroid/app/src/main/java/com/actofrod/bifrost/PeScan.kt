@@ -1,6 +1,8 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.file.Files
 
 data class PeExecutable(
@@ -21,9 +23,14 @@ private data class PeInfo(
     val imports: Set<String>,
 )
 
+private data class ParsedPe(val info: PeInfo, val size: Long)
+
 private data class PeSection(val virtualAddress: Long, val size: Long, val rawOffset: Long)
 
 object PeScan {
+    private const val maxImportDescriptors = 4096
+    private const val maxLegacyD3dFileSize = 64L * 1024 * 1024
+    private const val legacyD3dChunkSize = 1024 * 1024
     private val skippedExecutableNames = listOf(
         "unins", "setup", "install", "vcredist", "vc_redist", "dxsetup", "dxwebsetup", "dotnet", "crashreport",
         "crashhandler", "bugreport", "uninst", "autorun", "launcherupdate", "updater", "physx", "oalinst",
@@ -52,22 +59,31 @@ object PeScan {
         guid(0xf5049e77, 0x4861, 0x11d2, 0xa4, 0x07, 0x00, 0xa0, 0xc9, 0x06, 0x29, 0xa8),
     )
 
-    fun parseImports(executable: File): Set<String>? = parse(executable.readBytes())?.imports
+    fun parseImports(executable: File): Set<String>? =
+        RandomAccessFile(executable, "r").use { parse(PeReader(it))?.imports }
 
     fun scan(gameDirectory: File, pickedExecutable: File? = null): PeScanResult {
         require(gameDirectory.isDirectory) { "${gameDirectory.path} is not a game folder" }
         val root = gameDirectory.canonicalFile
         val rootPath = root.toPath()
         val pickedFile = pickedExecutable?.let { file ->
-            runCatching { file.canonicalFile }
-                .getOrNull()
-                ?.takeIf { it.toPath().startsWith(rootPath) }
+            val canonical = try {
+                file.canonicalFile
+            } catch (error: IOException) {
+                throw unreadableExecutable(file, error)
+            } catch (error: SecurityException) {
+                throw unreadableExecutable(file, error)
+            }
+            canonical.takeIf { it.toPath().startsWith(rootPath) }
         }
-        fun canonicalRelativePath(file: File): String? = runCatching {
+        fun canonicalRelativePath(file: File): String? {
             val path = file.canonicalFile.toPath()
-            if (!path.startsWith(rootPath)) return@runCatching null
-            rootPath.relativize(path).toString().replace(File.separatorChar, '/')
-        }.getOrNull()
+            if (!path.startsWith(rootPath)) return null
+            return rootPath.relativize(path).toString().replace(File.separatorChar, '/')
+        }
+        val pickedPath = pickedFile?.let {
+            rootPath.relativize(it.toPath()).toString().replace(File.separatorChar, '/')
+        }
 
         val paths = mutableListOf<File>()
         walk(root, 4, paths)
@@ -76,32 +92,51 @@ object PeScan {
         for (file in paths) {
             if (!file.extension.equals("exe", ignoreCase = true)) continue
             if (skippedExecutableNames.any { file.name.lowercase().contains(it) }) continue
-            val canonicalPath = canonicalRelativePath(file) ?: continue
+            val canonicalPath = try {
+                canonicalRelativePath(file)
+            } catch (_: IOException) {
+                null
+            } catch (_: SecurityException) {
+                null
+            } ?: continue
             val canonicalKey = canonicalPath.lowercase()
-            val bytes = runCatching { file.readBytes() }.getOrNull() ?: continue
-            val info = parse(bytes) ?: continue
+            val parsed = try {
+                parseFile(file)
+            } catch (_: IOException) {
+                null
+            } catch (_: SecurityException) {
+                null
+            } ?: continue
             scannedCanonicalPaths += canonicalKey
             val path = file.relativeTo(root).path.replace(File.separatorChar, '/')
-            executables += PeExecutable(path, info.arch, info.gui, info.imports, bytes.size.toLong())
+            executables += PeExecutable(
+                path,
+                parsed.info.arch,
+                parsed.info.gui,
+                parsed.info.imports,
+                parsed.size,
+            )
         }
-        if (pickedFile != null) {
-            val pickedPath = canonicalRelativePath(pickedFile)
-            if (pickedPath != null && pickedPath.lowercase() !in scannedCanonicalPaths) {
-                val bytes = runCatching { pickedFile.readBytes() }.getOrNull()
-                val info = bytes?.let(::parse)
-                if (bytes == null || info == null) {
-                    throw IllegalArgumentException(
-                        "${pickedExecutable?.name ?: pickedFile.name} isn't a 32- or 64-bit Windows program, so Bifrost can't run it.",
-                    )
-                }
-                executables += PeExecutable(
-                    pickedPath,
-                    info.arch,
-                    info.gui,
-                    info.imports,
-                    bytes.size.toLong(),
+        if (pickedFile != null && pickedPath != null && pickedPath.lowercase() !in scannedCanonicalPaths) {
+            val parsed = try {
+                parseFile(pickedFile)
+            } catch (error: IOException) {
+                throw unreadableExecutable(pickedExecutable ?: pickedFile, error)
+            } catch (error: SecurityException) {
+                throw unreadableExecutable(pickedExecutable ?: pickedFile, error)
+            }
+            if (parsed == null) {
+                throw IllegalArgumentException(
+                    "${pickedExecutable?.name ?: pickedFile.name} isn't a 32- or 64-bit Windows program, so Bifrost can't run it.",
                 )
             }
+            executables += PeExecutable(
+                pickedPath,
+                parsed.info.arch,
+                parsed.info.gui,
+                parsed.info.imports,
+                parsed.size,
+            )
         }
         require(executables.isNotEmpty()) { "No Windows game executable found in ${root.path}" }
         fun score(index: Int): Long {
@@ -128,85 +163,99 @@ object PeScan {
         for (file in files) {
             val dllName = file.name.lowercase()
             if (dllName in bundledWrappers) continue
-            val bytes = runCatching { file.readBytes() }.getOrNull() ?: continue
-            val pe = parse(bytes) ?: continue
-            pe.imports.mapNotNullTo(found, ::apiForDll)
-            if (usesLegacyD3d(bytes)) found += "Direct3D 7 or older"
+            val parsed = try {
+                RandomAccessFile(file, "r").use { input ->
+                    val reader = PeReader(input)
+                    val pe = parse(reader) ?: return@use null
+                    pe.imports.mapNotNull(::apiForDll).toSet() to usesLegacyD3d(reader)
+                }
+            } catch (_: IOException) {
+                null
+            } catch (_: SecurityException) {
+                null
+            } ?: continue
+            found += parsed.first
+            if (parsed.second) found += "Direct3D 7 or older"
         }
         return apiOrder.filter { it in found }
     }
 
-    private fun parse(bytes: ByteArray): PeInfo? {
-        if (bytes.size < 64 || bytes[0] != 'M'.code.toByte() || bytes[1] != 'Z'.code.toByte()) return null
-        val peOffset = u32(bytes, 0x3c)?.toInt() ?: return null
-        if (peOffset < 0 || !bytes.hasRange(peOffset, 24) ||
-            bytes[peOffset] != 'P'.code.toByte() || bytes[peOffset + 1] != 'E'.code.toByte() ||
-            bytes[peOffset + 2] != 0.toByte() || bytes[peOffset + 3] != 0.toByte()
-        ) return null
-        val coff = peOffset + 4
-        val arch = when (u16(bytes, coff) ?: return null) {
+    private fun parseFile(file: File): ParsedPe? =
+        RandomAccessFile(file, "r").use { input ->
+            val reader = PeReader(input)
+            parse(reader)?.let { ParsedPe(it, reader.length) }
+        }
+
+    private fun unreadableExecutable(file: File, error: Exception): IllegalArgumentException =
+        IllegalArgumentException("Bifrost couldn't read ${file.name}: ${error.message}", error)
+
+    private fun parse(reader: PeReader): PeInfo? {
+        if (reader.u16(0L) != 0x5a4d) return null
+        val peOffset = reader.u32(0x3cL) ?: return null
+        if (!reader.hasRange(peOffset, 24L) || reader.u32(peOffset) != 0x00004550L) return null
+        val coff = peOffset + 4L
+        val arch = when (reader.u16(coff) ?: return null) {
             0x014c -> "x86"
             0x8664 -> "x64"
             else -> return null
         }
-        val sectionCount = u16(bytes, coff + 2) ?: return null
-        val optionalSize = u16(bytes, coff + 16) ?: return null
-        val characteristics = u16(bytes, coff + 18) ?: return null
-        val optional = coff + 20
-        val magic = u16(bytes, optional) ?: return null
+        val sectionCount = reader.u16(coff + 2L) ?: return null
+        val optionalSize = reader.u16(coff + 16L) ?: return null
+        if (reader.u16(coff + 18L) == null) return null
+        val optional = coff + 20L
+        val magic = reader.u16(optional) ?: return null
         val is64 = when (magic) {
             0x10b -> false
             0x20b -> true
             else -> return null
         }
-        val imageBase = if (is64) u64(bytes, optional + 24) ?: return null else u32(bytes, optional + 28) ?: return null
-        val subsystem = u16(bytes, optional + 68) ?: return null
-        val directoryCountOffset = optional + if (is64) 108 else 92
-        val directoryOffset = optional + if (is64) 112 else 96
-        val directoryCount = u32(bytes, directoryCountOffset)?.toInt() ?: return null
+        val imageBase = if (is64) reader.u64(optional + 24L) ?: return null else reader.u32(optional + 28L) ?: return null
+        val subsystem = reader.u16(optional + 68L) ?: return null
+        val directoryCountOffset = optional + if (is64) 108L else 92L
+        val directoryOffset = optional + if (is64) 112L else 96L
+        val directoryCount = reader.u32(directoryCountOffset) ?: return null
         fun directory(index: Int): Long {
-            if (index >= directoryCount) return 0L
-            return u32(bytes, directoryOffset + index * 8) ?: 0L
+            if (index.toLong() >= directoryCount) return 0L
+            return reader.u32(directoryOffset + index.toLong() * 8L) ?: 0L
         }
-        val sectionStart = optional + optionalSize
+        val sectionStart = optional + optionalSize.toLong()
         val sections = (0 until sectionCount).mapNotNull { index ->
-            val offset = sectionStart + index * 40
-            if (!bytes.hasRange(offset, 40)) return@mapNotNull null
-            val virtualSize = u32(bytes, offset + 8) ?: return@mapNotNull null
-            val virtualAddress = u32(bytes, offset + 12) ?: return@mapNotNull null
-            val rawSize = u32(bytes, offset + 16) ?: return@mapNotNull null
-            val rawOffset = u32(bytes, offset + 20) ?: return@mapNotNull null
+            val offset = sectionStart + index.toLong() * 40L
+            if (!reader.hasRange(offset, 40L)) return@mapNotNull null
+            val virtualSize = reader.u32(offset + 8L) ?: return@mapNotNull null
+            val virtualAddress = reader.u32(offset + 12L) ?: return@mapNotNull null
+            val rawSize = reader.u32(offset + 16L) ?: return@mapNotNull null
+            val rawOffset = reader.u32(offset + 20L) ?: return@mapNotNull null
             PeSection(virtualAddress, maxOf(virtualSize, rawSize), rawOffset)
         }
-        fun rawOffset(rva: Long): Int? {
+        fun rawOffset(rva: Long): Long? {
             val section = sections.firstOrNull { rva >= it.virtualAddress && rva - it.virtualAddress < it.size } ?: return null
-            val offset = rva - section.virtualAddress + section.rawOffset
-            return offset.takeIf { it <= Int.MAX_VALUE }?.toInt()
+            return rva - section.virtualAddress + section.rawOffset
         }
-        fun cString(rva: Long): String? {
-            val offset = rawOffset(rva) ?: return null
-            if (offset !in bytes.indices) return null
-            val end = (offset until minOf(bytes.size, offset + 260)).firstOrNull { bytes[it] == 0.toByte() } ?: return null
-            return bytes.copyOfRange(offset, end).toString(Charsets.ISO_8859_1).lowercase()
-        }
+        fun cString(rva: Long): String? = rawOffset(rva)?.let(reader::cString)
+
         val imports = linkedSetOf<String>()
         var importOffset = rawOffset(directory(1))
-        while (importOffset != null && bytes.hasRange(importOffset, 20) &&
-            bytes.sliceArray(importOffset until importOffset + 20).any { it != 0.toByte() }
+        var importCount = 0
+        while (importCount < maxImportDescriptors && importOffset != null &&
+            reader.hasRange(importOffset, 20L) && reader.hasNonZero(importOffset, 20) == true
         ) {
-            val nameRva = u32(bytes, importOffset + 12) ?: break
+            val nameRva = reader.u32(importOffset + 12L) ?: break
             cString(nameRva)?.let(imports::add)
-            importOffset += 20
+            importOffset += 20L
+            importCount++
         }
         var delayOffset = rawOffset(directory(13))
-        while (delayOffset != null && bytes.hasRange(delayOffset, 32) &&
-            bytes.sliceArray(delayOffset until delayOffset + 32).any { it != 0.toByte() }
+        var delayCount = 0
+        while (delayCount < maxImportDescriptors && delayOffset != null &&
+            reader.hasRange(delayOffset, 32L) && reader.hasNonZero(delayOffset, 32) == true
         ) {
-            val attributes = u32(bytes, delayOffset) ?: break
-            var name = u32(bytes, delayOffset + 4) ?: break
+            val attributes = reader.u32(delayOffset) ?: break
+            var name = reader.u32(delayOffset + 4L) ?: break
             if (attributes and 1L == 0L) name = (name - imageBase) and 0xffff_ffffL
             cString(name)?.let(imports::add)
-            delayOffset += 32
+            delayOffset += 32L
+            delayCount++
         }
         return PeInfo(arch, subsystem == 2, imports)
     }
@@ -237,10 +286,26 @@ object PeScan {
         else -> if (dll.startsWith("xinput")) "XInput" else null
     }
 
-    private fun usesLegacyD3d(bytes: ByteArray): Boolean = legacyD3dGuids.any { guid ->
-        (0..bytes.size - guid.size).any { offset ->
-            guid.indices.all { index -> bytes[offset + index] == guid[index] }
+    private fun usesLegacyD3d(reader: PeReader): Boolean {
+        if (reader.length > maxLegacyD3dFileSize) return false
+        val overlap = legacyD3dGuids.maxOf { it.size } - 1
+        val buffer = ByteArray(legacyD3dChunkSize + overlap)
+        var offset = 0L
+        var carry = 0
+        while (offset < reader.length) {
+            val chunkLength = minOf(legacyD3dChunkSize.toLong(), reader.length - offset).toInt()
+            reader.readAt(offset, buffer, carry, chunkLength)
+            val bytesRead = carry + chunkLength
+            for (guid in legacyD3dGuids) {
+                for (index in 0..bytesRead - guid.size) {
+                    if (guid.indices.all { buffer[index + it] == guid[it] }) return true
+                }
+            }
+            carry = minOf(overlap, bytesRead)
+            System.arraycopy(buffer, bytesRead - carry, buffer, 0, carry)
+            offset += chunkLength
         }
+        return false
     }
 
     private fun guid(a: Long, b: Int, c: Int, vararg tail: Int): ByteArray =
@@ -249,26 +314,61 @@ object PeScan {
             b.toByte(), (b shr 8).toByte(), c.toByte(), (c shr 8).toByte(),
             *tail.map(Int::toByte).toByteArray(),
         )
+}
 
-    private fun u16(bytes: ByteArray, offset: Int): Int? {
-        if (!bytes.hasRange(offset, 2)) return null
-        return (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
+private class PeReader(private val file: RandomAccessFile) {
+    val length: Long = file.length()
+
+    fun hasRange(offset: Long, size: Long): Boolean =
+        offset >= 0L && size >= 0L && size <= length && offset <= length - size
+
+    fun u16(offset: Long): Int? {
+        if (!hasRange(offset, 2L)) return null
+        file.seek(offset)
+        return file.readUnsignedByte() or (file.readUnsignedByte() shl 8)
     }
 
-    private fun u32(bytes: ByteArray, offset: Int): Long? {
-        if (!bytes.hasRange(offset, 4)) return null
-        return (bytes[offset].toLong() and 0xff) or
-            ((bytes[offset + 1].toLong() and 0xff) shl 8) or
-            ((bytes[offset + 2].toLong() and 0xff) shl 16) or
-            ((bytes[offset + 3].toLong() and 0xff) shl 24)
+    fun u32(offset: Long): Long? {
+        if (!hasRange(offset, 4L)) return null
+        file.seek(offset)
+        var value = 0L
+        repeat(4) { index -> value = value or (file.readUnsignedByte().toLong() shl (index * 8)) }
+        return value
     }
 
-    private fun u64(bytes: ByteArray, offset: Int): Long? {
-        val low = u32(bytes, offset) ?: return null
-        val high = u32(bytes, offset + 4) ?: return null
+    fun u64(offset: Long): Long? {
+        if (!hasRange(offset, 8L)) return null
+        val low = u32(offset) ?: return null
+        val high = u32(offset + 4L) ?: return null
         return low or (high shl 32)
     }
 
-    private fun ByteArray.hasRange(offset: Int, length: Int): Boolean =
-        offset >= 0 && length >= 0 && offset <= size - length
+    fun cString(offset: Long): String? {
+        if (!hasRange(offset, 1L)) return null
+        val bytes = ByteArray(minOf(260L, length - offset).toInt())
+        file.seek(offset)
+        file.readFully(bytes)
+        val end = bytes.indexOf(0.toByte())
+        if (end < 0) return null
+        return String(bytes, 0, end, Charsets.ISO_8859_1).lowercase()
+    }
+
+    fun hasNonZero(offset: Long, size: Int): Boolean? {
+        if (!hasRange(offset, size.toLong())) return null
+        file.seek(offset)
+        repeat(size) {
+            if (file.readUnsignedByte() != 0) return true
+        }
+        return false
+    }
+
+    fun readAt(offset: Long, target: ByteArray, targetOffset: Int, size: Int) {
+        if (targetOffset < 0 || size < 0 || targetOffset > target.size - size ||
+            !hasRange(offset, size.toLong())
+        ) {
+            throw IOException("Read is outside the executable")
+        }
+        file.seek(offset)
+        file.readFully(target, targetOffset, size)
+    }
 }
