@@ -1,8 +1,11 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assume
 import org.junit.Test
 
 class PeScanTest {
@@ -27,6 +30,132 @@ class PeScanTest {
             File(root, "x64.exe").writeBytes(tinyPe(0x8664))
             val scan = PeScan.scan(root)
             assertEquals(setOf("x86", "x64"), scan.executables.map { it.arch }.toSet())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parsesSparseMultiGiBPickedExecutableWithoutLoadingWholeFile() {
+        val root = Files.createTempDirectory("bifrost-pe-sparse").toFile()
+        try {
+            val executable = File(root, "LargeGame.exe")
+            val expectedSize = writeSparsePe(executable)
+
+            val scan = PeScan.scan(root, executable)
+            val selectedIndex = executableIndexForPath(
+                scan.executables.map { it.path },
+                "LargeGame.exe",
+                scan.mainIndex,
+            )
+
+            assertEquals("LargeGame.exe", scan.executables[selectedIndex].path)
+            assertEquals(expectedSize, scan.executables[selectedIndex].size)
+            assertEquals(listOf("Direct3D 11"), PeScan.detectApis(root, "LargeGame.exe"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun includesPickedSetupExecutableAndSelectsItsPath() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-setup").toFile()
+        try {
+            File(root, "Game.exe").writeBytes(tinyPe(0x014c))
+            val picked = File(root, "GameSetup.exe")
+            picked.writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root, picked)
+
+            assertEquals(setOf("Game.exe", "GameSetup.exe"), scan.executables.map { it.path }.toSet())
+            assertEquals(
+                1,
+                executableIndexForPath(scan.executables.map { it.path }, "GameSetup.exe", scan.mainIndex),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun includesPickedExecutableBeyondWalkDepth() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-deep").toFile()
+        try {
+            val picked = File(root, "one/two/three/four/five/six/DeepGame.exe")
+            picked.parentFile?.mkdirs()
+            picked.writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root, picked)
+
+            assertEquals(listOf("one/two/three/four/five/six/DeepGame.exe"), scan.executables.map { it.path })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rejectsPickedNonPeExecutable() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-invalid").toFile()
+        try {
+            val picked = File(root, "GameSetup.exe")
+            picked.writeText("not a Windows program")
+
+            val error = runCatching { PeScan.scan(root, picked) }.exceptionOrNull()
+
+            assertEquals(IllegalArgumentException::class.java, error?.javaClass)
+            assertEquals(
+                "GameSetup.exe isn't a 32- or 64-bit Windows program, so Bifrost can't run it.",
+                error?.message,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rejectsTruncatedPickedPeHeader() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-truncated").toFile()
+        try {
+            val picked = File(root, "Truncated.exe")
+            picked.writeBytes(byteArrayOf('M'.code.toByte(), 'Z'.code.toByte()))
+
+            val error = runCatching { PeScan.scan(root, picked) }.exceptionOrNull()
+
+            assertEquals(IllegalArgumentException::class.java, error?.javaClass)
+            assertEquals(
+                "Truncated.exe isn't a 32- or 64-bit Windows program, so Bifrost can't run it.",
+                error?.message,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun doesNotDuplicatePickedExecutableAlreadyFoundByWalk() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-duplicate").toFile()
+        try {
+            val picked = File(root, "Game.exe")
+            picked.writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root, picked)
+
+            assertEquals(1, scan.executables.count { it.path.equals("Game.exe", ignoreCase = true) })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun scanWithoutPickedExecutableStillSkipsSetupNames() {
+        val root = Files.createTempDirectory("bifrost-pe-no-picked").toFile()
+        try {
+            File(root, "Game.exe").writeBytes(tinyPe(0x014c))
+            File(root, "Setup.exe").writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root)
+
+            assertEquals(setOf("Game.exe"), scan.executables.map { it.path }.toSet())
         } finally {
             root.deleteRecursively()
         }
@@ -104,6 +233,30 @@ class PeScanTest {
         } finally {
             root.deleteRecursively()
         }
+    }
+
+    private fun writeSparsePe(file: File): Long {
+        val candidateLengths = listOf(
+            3L * 1024 * 1024 * 1024,
+            5L * 1024 * 1024 * 1024 / 2,
+        )
+        var length: Long? = null
+        RandomAccessFile(file, "rw").use { randomAccessFile ->
+            randomAccessFile.write(tinyPe(0x014c, listOf("d3d11.dll")))
+            for (candidate in candidateLengths) {
+                try {
+                    randomAccessFile.setLength(candidate)
+                } catch (_: IOException) {
+                    continue
+                }
+                if (randomAccessFile.length() == candidate) {
+                    length = candidate
+                    break
+                }
+            }
+        }
+        Assume.assumeTrue("Sparse files larger than 2 GiB are unavailable", length != null && length > Int.MAX_VALUE)
+        return length ?: throw AssertionError("Assumption did not abort")
     }
 
     private fun tinyPe(

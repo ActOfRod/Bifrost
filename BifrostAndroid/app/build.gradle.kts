@@ -8,8 +8,8 @@ plugins {
 }
 
 val releaseKeystore = System.getenv("BIFROST_ANDROID_KEYSTORE")
-val appVersionCode = System.getenv("BIFROST_VERSION_CODE")?.toInt() ?: 134
-val appVersionName = System.getenv("BIFROST_VERSION_NAME") ?: "0.2.7"
+val appVersionCode = System.getenv("BIFROST_VERSION_CODE")?.toInt() ?: 137
+val appVersionName = System.getenv("BIFROST_VERSION_NAME") ?: "0.2.10"
 val updateRepo = System.getenv("BIFROST_UPDATE_REPO") ?: "ActOfRod/Bifrost"
 val winlatorSource = file("../third_party/winlator-app")
 val winlatorOutput = layout.buildDirectory.dir("winlator")

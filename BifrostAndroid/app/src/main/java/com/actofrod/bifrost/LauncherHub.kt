@@ -1211,6 +1211,77 @@ private fun EntryOptionsPanel(activity: MainActivity, entry: LibraryEntry) {
                                 }
                             }
                         }
+                        item {
+                            val defaultEngine = entry.engine ?: GameEngine.UNKNOWN
+                            Column(Modifier.fillMaxWidth().padding(top = 5.dp)) {
+                                Text("Graphics", color = HubMuted, fontSize = 12.sp)
+                                if (entry.engine != null && entry.engine != GameEngine.UNKNOWN) {
+                                    Text("Engine: ${entry.engine.label}", color = Color.White, fontSize = 12.sp)
+                                }
+                                Spacer(Modifier.height(7.dp))
+                                Text("GPU driver", color = HubMuted, fontSize = 12.sp)
+                                Spacer(Modifier.height(7.dp))
+                                Row(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xFF0F1622)).padding(4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    listOf(
+                                        GpuDriver.AUTO to "Auto",
+                                        GpuDriver.TURNIP to "Turnip",
+                                        GpuDriver.VORTEK to "Vortek",
+                                    ).forEach { (driver, label) ->
+                                        ControllerModeSegment(
+                                            label,
+                                            entry.gpuDriver == driver,
+                                            Modifier.weight(1f),
+                                        ) {
+                                            activity.updateEntry(entry.id) { it.copy(gpuDriver = driver) }
+                                        }
+                                    }
+                                }
+                                Text(
+                                    "Auto uses Turnip on Snapdragon (Adreno) GPUs",
+                                    color = HubMuted,
+                                    fontSize = 10.sp,
+                                )
+                                Spacer(Modifier.height(7.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        "Launch options",
+                                        Modifier.weight(1f),
+                                        color = HubMuted,
+                                        fontSize = 12.sp,
+                                    )
+                                    if (entry.launchArgs != null) {
+                                        TextButton(
+                                            onClick = {
+                                                activity.updateEntry(entry.id) { it.copy(launchArgs = null) }
+                                            },
+                                        ) {
+                                            Text("Reset", fontSize = 11.sp)
+                                        }
+                                    }
+                                }
+                                OutlinedTextField(
+                                    value = entry.launchArgs ?: (entry.engine ?: GameEngine.UNKNOWN).defaultLaunchArgs,
+                                    onValueChange = { value ->
+                                        activity.updateEntry(entry.id) { it.copy(launchArgs = value) }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    placeholder = { Text("e.g. --rendering-driver vulkan", maxLines = 1) },
+                                    textStyle = MaterialTheme.typography.bodySmall,
+                                    singleLine = true,
+                                )
+                                if (entry.launchArgs == null && defaultEngine.defaultLaunchArgs.isNotEmpty()) {
+                                    Text(
+                                        "Default for ${defaultEngine.label} games",
+                                        color = HubMuted,
+                                        fontSize = 10.sp,
+                                    )
+                                }
+                            }
+                        }
                     }
                     item {
                         Box {

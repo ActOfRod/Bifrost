@@ -1,7 +1,10 @@
 package com.actofrod.bifrost
 
 import java.io.File
+import java.io.IOException
+import java.io.RandomAccessFile
 import java.util.Locale
+import com.winlator.container.GraphicsDrivers
 import com.winlator.winhandler.GamepadHandler
 
 private const val DXVK = "dxvk"
@@ -43,6 +46,58 @@ internal fun dinputMapperType(api: ControllerApi, imports: Set<String>): Int {
 internal fun resolveGameDirectory(filesDirectory: File, gameDir: String): File {
     val path = File(gameDir)
     return (if (path.isAbsolute) path else File(File(filesDirectory, "games"), gameDir)).canonicalFile
+}
+
+internal fun detectEngine(root: File, executable: String): GameEngine {
+    try {
+        val exeFile = File(root, executable)
+        RandomAccessFile(exeFile, "r").use { file ->
+            if (file.length() >= 4L) {
+                file.seek(file.length() - 4L)
+                val trailer = ByteArray(4)
+                file.readFully(trailer)
+                if (trailer.contentEquals("GDPC".toByteArray(Charsets.US_ASCII))) return GameEngine.GODOT
+            }
+        }
+
+        val siblings = exeFile.parentFile?.listFiles().orEmpty()
+        val executableStem = exeFile.nameWithoutExtension
+        if (siblings.any { it.exists() && it.name.equals("$executableStem.pck", ignoreCase = true) } ||
+            siblings.any {
+                it.isDirectory &&
+                    Regex("data_.*_windows_.*", RegexOption.IGNORE_CASE).matches(it.name)
+            }
+        ) {
+            return GameEngine.GODOT
+        }
+        if (siblings.any {
+                it.isFile && it.name.equals("UnityPlayer.dll", ignoreCase = true)
+            } || siblings.any {
+                it.isDirectory && it.name.equals("${executableStem}_Data", ignoreCase = true)
+            }
+        ) {
+            return GameEngine.UNITY
+        }
+        if (exeFile.name.endsWith("-Shipping.exe", ignoreCase = true) ||
+            File(root, "Engine/Binaries").isDirectory
+        ) {
+            return GameEngine.UNREAL
+        }
+    } catch (_: IOException) {
+        return GameEngine.UNKNOWN
+    } catch (_: SecurityException) {
+        return GameEngine.UNKNOWN
+    }
+    return GameEngine.UNKNOWN
+}
+
+internal fun graphicsDriverFor(setting: GpuDriver, adrenoModelId: Int): String {
+    val vulkanDriver = when (setting) {
+        GpuDriver.AUTO -> if (adrenoModelId > 0) GraphicsDrivers.TURNIP else GraphicsDrivers.VORTEK
+        GpuDriver.TURNIP -> GraphicsDrivers.TURNIP
+        GpuDriver.VORTEK -> GraphicsDrivers.VORTEK
+    }
+    return "$vulkanDriver,${GraphicsDrivers.DEFAULT_OPENGL_DRIVER}"
 }
 
 private val executableRootDirectoryNames = setOf(

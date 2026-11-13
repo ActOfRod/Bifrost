@@ -88,9 +88,27 @@ class LibraryTest {
             assertEquals(0, entry.playCount)
             assertEquals(ControllerMode.OVERLAY, entry.controllerMode)
             assertEquals(ControllerApi.AUTO, entry.controllerApi)
+            assertEquals(null, entry.engine)
+            assertEquals(null, entry.launchArgs)
+            assertEquals(GpuDriver.AUTO, entry.gpuDriver)
         } finally {
             temp.deleteRecursively()
         }
+    }
+
+    @Test
+    fun effectiveLaunchArgsUsesEngineDefaultsAndPreservesOverrides() {
+        val godot = LibraryEntry(
+            id = "godot",
+            kind = Kind.PC,
+            title = "Godot game",
+            addedAt = 1,
+            engine = GameEngine.GODOT,
+        )
+
+        assertEquals("--rendering-driver vulkan", godot.effectiveLaunchArgs())
+        assertEquals("", godot.copy(launchArgs = "").effectiveLaunchArgs())
+        assertEquals("--custom-option value", godot.copy(launchArgs = " --custom-option value ").effectiveLaunchArgs())
     }
 
     @Test

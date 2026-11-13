@@ -1,0 +1,9 @@
+--- a/java/com/winlator/XServerDisplayActivity.java
++++ b/java/com/winlator/XServerDisplayActivity.java
+@@ -969,4 +969,6 @@
+         else {
+             Intent intent = getIntent();
++            String intentExecArgs = intent.getStringExtra("exec_args");
++            if (intentExecArgs != null && !intentExecArgs.trim().isEmpty()) execArgs = " "+intentExecArgs.trim();
+             if (intent.hasExtra("exec_path")) {
+                 execPath = WineUtils.unixToDOSPath(intent.getStringExtra("exec_path"), container);
