@@ -54,20 +54,55 @@ object PeScan {
 
     fun parseImports(executable: File): Set<String>? = parse(executable.readBytes())?.imports
 
-    fun scan(gameDirectory: File): PeScanResult {
+    fun scan(gameDirectory: File, pickedExecutable: File? = null): PeScanResult {
         require(gameDirectory.isDirectory) { "${gameDirectory.path} is not a game folder" }
         val root = gameDirectory.canonicalFile
+        val rootPath = root.toPath()
+        val pickedFile = pickedExecutable?.let { file ->
+            runCatching { file.canonicalFile }
+                .getOrNull()
+                ?.takeIf { it.toPath().startsWith(rootPath) }
+        }
+        fun canonicalRelativePath(file: File): String? = runCatching {
+            val path = file.canonicalFile.toPath()
+            if (!path.startsWith(rootPath)) return@runCatching null
+            rootPath.relativize(path).toString().replace(File.separatorChar, '/')
+        }.getOrNull()
+
         val paths = mutableListOf<File>()
         walk(root, 4, paths)
-        val executables = paths.asSequence()
-            .filter { it.extension.equals("exe", ignoreCase = true) }
-            .filterNot { file -> skippedExecutableNames.any { file.name.lowercase().contains(it) } }
-            .mapNotNull { file ->
-                val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@mapNotNull null
-                val info = parse(bytes) ?: return@mapNotNull null
-                PeExecutable(file.relativeTo(root).path.replace(File.separatorChar, '/'), info.arch, info.gui, info.imports, bytes.size.toLong())
+        val executables = mutableListOf<PeExecutable>()
+        val scannedCanonicalPaths = mutableSetOf<String>()
+        for (file in paths) {
+            if (!file.extension.equals("exe", ignoreCase = true)) continue
+            if (skippedExecutableNames.any { file.name.lowercase().contains(it) }) continue
+            val canonicalPath = canonicalRelativePath(file) ?: continue
+            val canonicalKey = canonicalPath.lowercase()
+            val bytes = runCatching { file.readBytes() }.getOrNull() ?: continue
+            val info = parse(bytes) ?: continue
+            scannedCanonicalPaths += canonicalKey
+            val path = file.relativeTo(root).path.replace(File.separatorChar, '/')
+            executables += PeExecutable(path, info.arch, info.gui, info.imports, bytes.size.toLong())
+        }
+        if (pickedFile != null) {
+            val pickedPath = canonicalRelativePath(pickedFile)
+            if (pickedPath != null && pickedPath.lowercase() !in scannedCanonicalPaths) {
+                val bytes = runCatching { pickedFile.readBytes() }.getOrNull()
+                val info = bytes?.let(::parse)
+                if (bytes == null || info == null) {
+                    throw IllegalArgumentException(
+                        "${pickedExecutable?.name ?: pickedFile.name} isn't a 32- or 64-bit Windows program, so Bifrost can't run it.",
+                    )
+                }
+                executables += PeExecutable(
+                    pickedPath,
+                    info.arch,
+                    info.gui,
+                    info.imports,
+                    bytes.size.toLong(),
+                )
             }
-            .toList()
+        }
         require(executables.isNotEmpty()) { "No Windows game executable found in ${root.path}" }
         fun score(index: Int): Long {
             val executable = executables[index]

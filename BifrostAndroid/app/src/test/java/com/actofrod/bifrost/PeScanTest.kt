@@ -33,6 +33,91 @@ class PeScanTest {
     }
 
     @Test
+    fun includesPickedSetupExecutableAndSelectsItsPath() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-setup").toFile()
+        try {
+            File(root, "Game.exe").writeBytes(tinyPe(0x014c))
+            val picked = File(root, "GameSetup.exe")
+            picked.writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root, picked)
+
+            assertEquals(setOf("Game.exe", "GameSetup.exe"), scan.executables.map { it.path }.toSet())
+            assertEquals(
+                1,
+                executableIndexForPath(scan.executables.map { it.path }, "GameSetup.exe", scan.mainIndex),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun includesPickedExecutableBeyondWalkDepth() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-deep").toFile()
+        try {
+            val picked = File(root, "one/two/three/four/five/six/DeepGame.exe")
+            picked.parentFile?.mkdirs()
+            picked.writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root, picked)
+
+            assertEquals(listOf("one/two/three/four/five/six/DeepGame.exe"), scan.executables.map { it.path })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rejectsPickedNonPeExecutable() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-invalid").toFile()
+        try {
+            val picked = File(root, "GameSetup.exe")
+            picked.writeText("not a Windows program")
+
+            val error = runCatching { PeScan.scan(root, picked) }.exceptionOrNull()
+
+            assertEquals(IllegalArgumentException::class.java, error?.javaClass)
+            assertEquals(
+                "GameSetup.exe isn't a 32- or 64-bit Windows program, so Bifrost can't run it.",
+                error?.message,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun doesNotDuplicatePickedExecutableAlreadyFoundByWalk() {
+        val root = Files.createTempDirectory("bifrost-pe-picked-duplicate").toFile()
+        try {
+            val picked = File(root, "Game.exe")
+            picked.writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root, picked)
+
+            assertEquals(1, scan.executables.count { it.path.equals("Game.exe", ignoreCase = true) })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun scanWithoutPickedExecutableStillSkipsSetupNames() {
+        val root = Files.createTempDirectory("bifrost-pe-no-picked").toFile()
+        try {
+            File(root, "Game.exe").writeBytes(tinyPe(0x014c))
+            File(root, "Setup.exe").writeBytes(tinyPe(0x014c))
+
+            val scan = PeScan.scan(root)
+
+            assertEquals(setOf("Game.exe"), scan.executables.map { it.path }.toSet())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun detectsD3dAndDirectDrawImportsWithManifestLabels() {
         val root = Files.createTempDirectory("bifrost-pe-apis").toFile()
         try {

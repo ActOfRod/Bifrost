@@ -918,7 +918,7 @@ class MainActivity : ComponentActivity() {
                 if (':' in root.absolutePath) throw IllegalArgumentException(
                     "This folder path contains ':', which Winlator cannot map as a game drive. Choose a folder without ':' in its path.",
                 )
-                val scan = withContext(Dispatchers.IO) { PeScan.scan(root) }
+                val scan = withContext(Dispatchers.IO) { PeScan.scan(root, selection.pickedExecutablePath) }
                 val id = UUID.randomUUID().toString()
                 folderTitle = selection.folderName
                 val pickedRelativePath = selection.pickedExecutablePath?.let { picked ->
@@ -954,8 +954,8 @@ class MainActivity : ComponentActivity() {
         folderRootScanInProgress = true
         lifecycleScope.launch {
             try {
-                val scan = withContext(Dispatchers.IO) { PeScan.scan(root) }
                 val current = folderCandidate?.takeIf { it.id == candidate.id } ?: return@launch
+                val scan = withContext(Dispatchers.IO) { PeScan.scan(root, current.pickedExecutablePath) }
                 val pickedRelativePath = current.pickedExecutablePath?.let { picked ->
                     runCatching {
                         root.canonicalFile.toPath().relativize(picked.canonicalFile.toPath())
